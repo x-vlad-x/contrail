@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a5fb4"/>
+      <stop offset="1" stop-color="#174d94"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+  </defs>
+  <!-- base plate with a bottom edge, as GNOME app icons have -->
+  <rect x="8" y="16" width="112" height="104" rx="24" fill="url(#side)"/>
+  <rect x="8" y="8" width="112" height="104" rx="24" fill="url(#sky)"/>
+  <!-- two contrail lines sweeping up to the message bubble -->
+  <path d="M 18 98 C 40 92 52 76 66 62" fill="none" stroke="url(#trail)" stroke-width="6" stroke-linecap="round"/>
+  <path d="M 26 106 C 50 100 64 84 76 70" fill="none" stroke="url(#trail)" stroke-width="6" stroke-linecap="round"/>
+  <!-- message bubble -->
+  <path d="M 84 26 h 14 a 14 14 0 0 1 14 14 v 8 a 14 14 0 0 1 -14 14 h -8 l -12 10 l 2 -11 a 14 14 0 0 1 -10 -13 v -8 a 14 14 0 0 1 14 -14 z" fill="#ffffff"/>
+  <circle cx="81" cy="44" r="3.5" fill="#1c71d8"/>
+  <circle cx="91" cy="44" r="3.5" fill="#1c71d8"/>
+  <circle cx="101" cy="44" r="3.5" fill="#1c71d8"/>
+</svg>

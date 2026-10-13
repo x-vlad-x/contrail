@@ -1,0 +1,5 @@
+#!/bin/sh
+# g-ir-scanner for the aarch64 cross build: compiles its helper program with the cross compiler
+# and runs it (and ldd) through qemu-user.
+export CC=aarch64-linux-gnu-gcc PKG_CONFIG=aarch64-linux-gnu-pkg-config QEMU_LD_PREFIX=/
+exec g-ir-scanner --use-binary-wrapper=/usr/bin/qemu-aarch64 --use-ldd-wrapper=/src/build-env/ldd-cross "$@"

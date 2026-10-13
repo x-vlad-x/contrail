@@ -1,0 +1,104 @@
+diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
+index 811707d..7e94351 100644
+--- a/Telegram/CMakeLists.txt
++++ b/Telegram/CMakeLists.txt
+@@ -2782,7 +2782,12 @@ elseif (build_winstore)
+     )
+ endif()
+ 
+-if (LINUX AND DESKTOP_APP_USE_PACKAGED)
++# Contrail: native GNOME (GTK4 + libadwaita) interface, kept outside of the source tree.
++if (CONTRAIL_GTK_DIR)
++    add_subdirectory(${CONTRAIL_GTK_DIR} ${CMAKE_BINARY_DIR}/contrail)
++endif()
++
++if (LINUX AND DESKTOP_APP_USE_PACKAGED AND NOT CONTRAIL_GTK_DIR)
+     include(GNUInstallDirs)
+     configure_file("../lib/xdg/org.telegram.desktop.service" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.service" @ONLY)
+     configure_file("../lib/xdg/org.telegram.desktop.metainfo.xml" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.metainfo.xml" @ONLY)
+diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
+index 7a309ac..32d347e 100644
+--- a/Telegram/SourceFiles/core/application.cpp
++++ b/Telegram/SourceFiles/core/application.cpp
+@@ -109,6 +109,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ 
+ #include <ksandbox.h>
+ 
++#ifdef CONTRAIL_GTK
++namespace Contrail {
++void Start();
++void Activate();
++} // namespace Contrail
++#endif // CONTRAIL_GTK
++
+ namespace Core {
+ namespace {
+ 
+@@ -480,6 +487,11 @@ void Application::run() {
+ 
+ 	Test::Fire(u"launch_finished"_q);
+ 	Test::Start();
++
++#ifdef CONTRAIL_GTK
++	// The GTK interface takes over from here, the Qt window is never shown.
++	Contrail::Start();
++#endif // CONTRAIL_GTK
+ }
+ 
+ void Application::autoRegisterUrlScheme() {
+@@ -660,6 +672,10 @@ void Application::createTray() {
+ }
+ 
+ void Application::activate() {
++#ifdef CONTRAIL_GTK
++	Contrail::Activate();
++	return;
++#endif // CONTRAIL_GTK
+ 	for (const auto &window : _windowStack) {
+ 		if (window == _lastActiveWindow) {
+ 			break;
+diff --git a/Telegram/SourceFiles/platform/linux/specific_linux.cpp b/Telegram/SourceFiles/platform/linux/specific_linux.cpp
+index 8faa6d9..f0ec0d5 100644
+--- a/Telegram/SourceFiles/platform/linux/specific_linux.cpp
++++ b/Telegram/SourceFiles/platform/linux/specific_linux.cpp
+@@ -727,6 +727,12 @@ namespace Platform {
+ 
+ void start() {
+ 	QGuiApplication::setDesktopFileName([&] {
++#ifdef CONTRAIL_GTK
++		// The GTK interface's application ID: D-Bus name, notifications.
++		if (qEnvironmentVariableIsSet("CONTRAIL_APP_ID")) {
++			return qEnvironmentVariable("CONTRAIL_APP_ID");
++		}
++#endif // CONTRAIL_GTK
+ 		if (KSandbox::isFlatpak()) {
+ 			return qEnvironmentVariable("FLATPAK_ID");
+ 		}
+diff --git a/Telegram/SourceFiles/window/window_controller.cpp b/Telegram/SourceFiles/window/window_controller.cpp
+index 8f64912..fde8834 100644
+--- a/Telegram/SourceFiles/window/window_controller.cpp
++++ b/Telegram/SourceFiles/window/window_controller.cpp
+@@ -41,6 +41,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include <QtGui/QWindow>
+ #include <QtGui/QScreen>
+ 
++#ifdef CONTRAIL_GTK
++namespace Contrail {
++void Activate();
++} // namespace Contrail
++#endif // CONTRAIL_GTK
++
+ namespace Window {
+ namespace {
+ 
+@@ -495,6 +501,10 @@ void Controller::sideBarChanged() {
+ }
+ 
+ void Controller::activate() {
++#ifdef CONTRAIL_GTK
++	Contrail::Activate();
++	return;
++#endif // CONTRAIL_GTK
+ 	_widget.activate();
+ }
+ 

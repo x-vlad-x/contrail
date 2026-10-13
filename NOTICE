@@ -1,0 +1,20 @@
+Contrail
+Copyright 2026 Vladislav Shadiuk
+
+Licensed under the GNU General Public License, version 3, with the OpenSSL exception (see LICENSE),
+the same license as Telegram Desktop.
+
+Contrail is an unofficial Telegram client and is not affiliated with or endorsed by Telegram FZ-LLC
+or the Telegram Desktop project. Telegram is a trademark of Telegram FZ-LLC. It uses the Telegram API
+with its own api_id, which every build must supply (see README.md).
+
+It is built on Telegram Desktop (https://github.com/telegramdesktop/tdesktop):
+  Copyright John Preston and Telegram Desktop contributors
+  Licensed under the GNU General Public License, version 3, with the OpenSSL exception.
+The Telegram Desktop sources are not part of this repository; the build script downloads them from
+https://github.com/telegramdesktop/tdesktop. The patch in patches/ modifies those sources. The build
+also downloads the libraries Telegram Desktop needs that Debian doesn't package (tg_owt, tde2e from
+TDLib, tlottie, wallet-engine), at the versions the official Telegram Desktop build uses.
+
+The interface strings come from Telegram's translations, loaded by the Telegram Desktop core.
+The application icon and the icons in gtk-ui/icons/ were made for Contrail.

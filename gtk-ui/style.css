@@ -1,0 +1,212 @@
+/* Contrail: styles on top of libadwaita. Colors follow the system light/dark style and accent color. */
+
+/* --- chat list --- */
+.chat-list row {
+  border-radius: 12px;
+}
+.chat-name {
+  font-weight: bold;
+}
+.unread-badge {
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+  border-radius: 999px;
+  min-width: 14px;
+  padding: 1px 6px;
+  font-size: 0.8em;
+  font-weight: bold;
+}
+.unread-badge.muted {
+  background-color: alpha(currentColor, 0.25);
+  color: var(--window-fg-color);
+}
+.message-status {
+  color: var(--accent-color);
+}
+avatar.saved-messages {
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
+avatar.archive-avatar {
+  background-color: alpha(currentColor, 0.2);
+}
+
+/* --- messages --- */
+.message-list {
+  background: none;
+}
+.message-list > row {
+  padding: 0;
+  background: none;
+}
+.message-list > row:hover {
+  background: none;
+}
+.bubble {
+  padding: 6px 10px 4px 10px;
+  border-radius: 16px;
+  min-width: 60px;
+}
+.bubble.incoming {
+  background-color: var(--card-bg-color);
+  box-shadow: 0 1px 2px alpha(black, 0.12);
+  border-bottom-left-radius: 6px;
+}
+.bubble.outgoing {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 22%, var(--window-bg-color));
+  box-shadow: 0 1px 2px alpha(black, 0.12);
+  border-bottom-right-radius: 6px;
+}
+.bubble.sticker {
+  background: none;
+  box-shadow: none;
+  padding: 0;
+}
+.bubble.sticker .message-footer {
+  background-color: alpha(black, 0.35);
+  color: white;
+  border-radius: 999px;
+  padding: 0 6px;
+}
+.message-text {
+  padding: 0;
+}
+.message-footer {
+  font-size: 0.75em;
+  opacity: 0.65;
+}
+.message-photo {
+  border-radius: 10px;
+}
+.round-video {
+  border-radius: 999px;
+}
+.media-play {
+  padding: 10px;
+  border-radius: 999px;
+}
+.media-status {
+  margin: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.8em;
+}
+.sender-name {
+  font-weight: bold;
+  font-size: 0.9em;
+}
+.forwarded {
+  font-size: 0.9em;
+  color: var(--accent-color);
+}
+.reply-quote {
+  border-left: 3px solid var(--accent-color);
+  background-color: alpha(var(--accent-color), 0.1);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 0.9em;
+}
+.reply-name {
+  font-weight: bold;
+  color: var(--accent-color);
+}
+.webpage {
+  border-left: 3px solid var(--accent-color);
+  padding-left: 8px;
+  margin-top: 2px;
+}
+.webpage-site {
+  font-weight: bold;
+  font-size: 0.9em;
+  color: var(--accent-color);
+}
+.document-button {
+  min-width: 42px;
+  min-height: 42px;
+}
+.voice-progress trough,
+.voice-progress progress {
+  min-height: 4px;
+}
+.service-message,
+.date-separator {
+  background-color: alpha(currentColor, 0.08);
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-size: 0.85em;
+}
+.date-separator {
+  margin: 8px 0 4px 0;
+  font-weight: bold;
+}
+.message-list > row.highlighted .bubble {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 45%, var(--window-bg-color));
+  transition: background-color 300ms;
+}
+
+/* Sender name colors, as in Telegram (7 colors). */
+.peer-color-0 { color: #e5534b; }
+.peer-color-1 { color: #e0823d; }
+.peer-color-2 { color: #a074d4; }
+.peer-color-3 { color: #3fa34d; }
+.peer-color-4 { color: #2c9ea8; }
+.peer-color-5 { color: #3b82d1; }
+.peer-color-6 { color: #d4609e; }
+.reply-quote.peer-color-0 { border-left-color: #e5534b; }
+.reply-quote.peer-color-1 { border-left-color: #e0823d; }
+.reply-quote.peer-color-2 { border-left-color: #a074d4; }
+.reply-quote.peer-color-3 { border-left-color: #3fa34d; }
+.reply-quote.peer-color-4 { border-left-color: #2c9ea8; }
+.reply-quote.peer-color-5 { border-left-color: #3b82d1; }
+.reply-quote.peer-color-6 { border-left-color: #d4609e; }
+.reply-quote.peer-color-0 .reply-name { color: #e5534b; }
+.reply-quote.peer-color-1 .reply-name { color: #e0823d; }
+.reply-quote.peer-color-2 .reply-name { color: #a074d4; }
+.reply-quote.peer-color-3 .reply-name { color: #3fa34d; }
+.reply-quote.peer-color-4 .reply-name { color: #2c9ea8; }
+.reply-quote.peer-color-5 .reply-name { color: #3b82d1; }
+.reply-quote.peer-color-6 .reply-name { color: #d4609e; }
+
+/* --- message field --- */
+.composer {
+  padding: 6px;
+}
+.message-input-frame {
+  border-radius: 18px;
+  background-color: alpha(currentColor, 0.08);
+  padding: 7px 12px;
+}
+.message-input,
+.message-input text {
+  background: none;
+}
+.reply-bar {
+  padding: 4px 6px 0 14px;
+}
+.join-button {
+  min-height: 46px;
+  font-weight: bold;
+  color: var(--accent-color);
+}
+.to-bottom {
+  min-width: 42px;
+  min-height: 42px;
+}
+
+/* --- photo viewer --- */
+.photo-viewer {
+  background-color: black;
+}
+
+/* --- voice recording --- */
+.recording-dot {
+  color: var(--destructive-color);
+}
+.unread-bar {
+  margin: 6px 0;
+  padding: 3px 0;
+  background-color: alpha(var(--accent-bg-color), 0.15);
+  color: var(--accent-color);
+  font-weight: bold;
+  font-size: 0.85em;
+}

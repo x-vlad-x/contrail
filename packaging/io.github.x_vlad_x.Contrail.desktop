@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Contrail
+GenericName=Telegram Client
+GenericName[ru]=Клиент Telegram
+Comment=Unofficial Telegram client built on Telegram Desktop
+Comment[ru]=Неофициальный клиент Telegram на основе Telegram Desktop
+Icon=@HOME@/.local/share/contrail/io.github.x_vlad_x.Contrail.svg
+Exec=@HOME@/.local/share/contrail/contrail -- %u
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.x_vlad_x.Contrail
+Categories=Chat;Network;InstantMessaging;GTK;
+Keywords=Telegram;tg;chat;im;messaging;messenger;
+MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;
+X-Purism-FormFactor=Workstation;Mobile;

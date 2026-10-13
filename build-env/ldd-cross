@@ -1,0 +1,3 @@
+#!/bin/sh
+# ldd for aarch64 binaries, through qemu-user.
+exec /usr/bin/qemu-aarch64 /lib/ld-linux-aarch64.so.1 --list "$@"
