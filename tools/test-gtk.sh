@@ -20,3 +20,6 @@ ${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-poi
   -Igtk-ui tests/audio-route.cpp gtk-ui/audio_route.cpp \
   $(pkg-config --cflags --libs Qt6Core) -o "$work/audio-route"
 ASAN_OPTIONS=detect_leaks=0 "$work/audio-route"
+${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/css-split.cpp \
+  -o "$work/css-split"
+"$work/css-split" gtk-ui/style.css

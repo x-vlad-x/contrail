@@ -3,6 +3,7 @@
 #include "debug.hpp"
 #include "main_window.hpp"
 #include "qt_integration.hpp"
+#include "css_split.hpp"
 #include "style_css.h"
 
 #include "core/application.h"
@@ -15,6 +16,7 @@
 #include <QtWidgets/QApplication>
 
 #include <glib-unix.h>
+
 
 namespace Contrail {
 
@@ -112,26 +114,46 @@ namespace {
 
 void LoadStyle() {
   auto *provider = gtk_css_provider_new();
-  gtk_css_provider_load_from_string(provider, kStyleCss);
-  gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider),
-                                             GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  auto *manager = adw_style_manager_get_default();
+  auto *display = gdk_display_get_default();
 #if GTK_CHECK_VERSION(4, 20, 0)
   // Since GTK 4.20 the "prefers-color-scheme" media queries of a stylesheet follow its provider's
   // own property, which libadwaita sets only on the stylesheets it loads itself: without this the
   // dark variants in style.css never apply.
   if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "prefers-color-scheme")) {
+    gtk_css_provider_load_from_string(provider, kStyleCss);
+    gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider),
+                                               GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     const auto sync = +[](AdwStyleManager *manager, GParamSpec *, GtkCssProvider *provider) {
       g_object_set(provider, "prefers-color-scheme",
                    adw_style_manager_get_dark(manager) ? GTK_INTERFACE_COLOR_SCHEME_DARK
                                                        : GTK_INTERFACE_COLOR_SCHEME_LIGHT,
                    nullptr);
     };
-    auto *manager = adw_style_manager_get_default();
     sync(manager, nullptr, provider);
     g_signal_connect_object(manager, "notify::dark", G_CALLBACK(sync), provider, GConnectFlags(0));
+    g_object_unref(provider);
+    return;
   }
 #endif
+  const auto [base, dark] = SplitDarkRules(kStyleCss);
+  gtk_css_provider_load_from_string(provider, base.c_str());
+  gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider),
+                                             GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
   g_object_unref(provider);
+  auto *darkProvider = gtk_css_provider_new();
+  gtk_css_provider_load_from_string(darkProvider, dark.c_str());
+  const auto sync = +[](AdwStyleManager *manager, GParamSpec *, GtkCssProvider *provider) {
+    auto *display = gdk_display_get_default();
+    gtk_style_context_remove_provider_for_display(display, GTK_STYLE_PROVIDER(provider));
+    if (adw_style_manager_get_dark(manager)) {
+      gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider),
+                                                 GTK_STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+    }
+  };
+  sync(manager, nullptr, darkProvider);
+  // The manager lives as long as the program: the provider stays with the handler.
+  g_signal_connect(manager, "notify::dark", G_CALLBACK(sync), darkProvider);
 }
 
 }  // namespace

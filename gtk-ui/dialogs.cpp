@@ -1,5 +1,7 @@
 #include "dialogs.hpp"
 
+#include "contrail_version.h"
+
 #include "main_window.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
@@ -257,16 +259,29 @@ void ShowAbout(not_null<MainWindow *> window) {
   adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "Contrail");
   adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about), kAppId);
   adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "Vladislav Shadiuk");
-  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), AppVersionStr);
-  adw_about_dialog_set_comments(
-      ADW_ABOUT_DIALOG(about),
-      "An unofficial GNOME interface for Telegram, built on the Telegram Desktop core. "
-      "Not affiliated with or endorsed by Telegram.");
+  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), kContrailVersion);
+  const auto comments = std::string(
+      "An unofficial Telegram client that uses the Telegram API, with a GNOME interface on the Telegram Desktop "
+      "core (version ") + AppVersionStr + "). Not affiliated with or endorsed by Telegram.";
+  adw_about_dialog_set_comments(ADW_ABOUT_DIALOG(about), comments.c_str());
   adw_about_dialog_set_website(ADW_ABOUT_DIALOG(about), kProjectUrl);
   adw_about_dialog_set_issue_url(ADW_ABOUT_DIALOG(about), (std::string(kProjectUrl) + "/issues").c_str());
-  adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about), GTK_LICENSE_GPL_3_0);
+  adw_about_dialog_set_copyright(ADW_ABOUT_DIALOG(about), "© 2026 Vladislav Shadiuk");
+  // The same terms as Telegram Desktop (see LICENSE and NOTICE).
+  adw_about_dialog_set_license_type(ADW_ABOUT_DIALOG(about), GTK_LICENSE_CUSTOM);
+  adw_about_dialog_set_license(
+      ADW_ABOUT_DIALOG(about),
+      "This program is distributed under the GNU General Public License, version 3, with the OpenSSL exception, "
+      "the same license as Telegram Desktop. It comes with absolutely no warranty. See "
+      "<a href=\"https://www.gnu.org/licenses/gpl-3.0.html\">the GNU General Public License</a> and the LICENSE "
+      "and NOTICE files for details.");
   adw_about_dialog_add_credit_section(ADW_ABOUT_DIALOG(about), "Telegram Desktop",
                                       (const char *[]){"Telegram Desktop authors https://github.com/telegramdesktop/tdesktop", nullptr});
+  adw_about_dialog_add_legal_section(
+      ADW_ABOUT_DIALOG(about), "Telegram Desktop", "Copyright © 2014-2026 The Telegram Desktop Authors",
+      GTK_LICENSE_CUSTOM,
+      "GNU General Public License, version 3, with a special exception to link with the OpenSSL library. "
+      "Telegram is a trademark of Telegram FZ-LLC.");
   adw_dialog_present(ADW_DIALOG(about), window->widget());
 }
 
