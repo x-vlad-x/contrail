@@ -143,17 +143,56 @@ def project_archive(destination, version, commit, date):
     return archive_path
 
 
-def split(path):
-    parts = []
-    with path.open("rb") as stream:
-        while content := stream.read(PART_SIZE):
-            part = path.with_name(path.name + f".part{len(parts) + 1:02}")
-            part.write_bytes(content)
-            parts.append(part)
-    for stale in path.parent.glob(path.name + ".part*"):
-        if stale not in parts:
+class PartWriter(io.RawIOBase):
+    """A file written straight into numbered parts of PART_SIZE bytes (the whole file never exists on disk).
+    Keeps the SHA-256 of the whole content."""
+
+    def __init__(self, path):
+        super().__init__()
+        self.path, self.parts, self.hash = path, [], hashlib.sha256()
+        self.stream, self.left, self.position = None, 0, 0
+        for stale in path.parent.glob(path.name + ".part*"):
             stale.unlink()
-    return parts
+
+    def writable(self):
+        return True
+
+    def tell(self):
+        return self.position
+
+    def write(self, data):
+        data = memoryview(data)
+        self.hash.update(data)
+        written = 0
+        while written < len(data):
+            if self.left == 0:
+                if self.stream:
+                    self.stream.close()
+                part = self.path.with_name(self.path.name + f".part{len(self.parts) + 1:02}")
+                self.parts.append(part)
+                self.stream, self.left = part.open("wb"), PART_SIZE
+            chunk = data[written:written + self.left]
+            self.stream.write(chunk)
+            self.left -= len(chunk)
+            written += len(chunk)
+        self.position += len(data)
+        return len(data)
+
+    def close(self):
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        super().close()
+
+
+def split(path):
+    """Splits an existing file into parts (see PartWriter) and removes it."""
+    writer = PartWriter(path)
+    with path.open("rb") as stream:
+        shutil.copyfileobj(stream, writer, 1024 * 1024)
+    writer.close()
+    path.unlink()
+    return writer.parts
 
 
 def main():
@@ -226,8 +265,9 @@ def main():
     files[ROOT / "packaging/runtime-sources.json"] = "appimage-runtime/runtime-sources.json"
     files[ROOT / "packaging/LICENSES.md"] = "README.md"
 
-    sources_tar = bundle / f"Contrail-{version}-corresponding-sources.tar"
-    with tarfile.open(sources_tar, "w", format=tarfile.PAX_FORMAT) as archive:
+    sources_tar = destination / f"Contrail-{version}-corresponding-sources.tar"
+    writer = PartWriter(sources_tar)
+    with tarfile.open(fileobj=writer, mode="w", format=tarfile.PAX_FORMAT) as archive:
         for path, name in sorted(files.items(), key=lambda item: item[1]):
             member = archive.gettarinfo(path, arcname=f"contrail-{version}-corresponding-sources/{name}")
             member.uid = member.gid = 0
@@ -235,10 +275,8 @@ def main():
             member.mtime = date
             with path.open("rb") as stream:
                 archive.addfile(member, stream)
-    whole_sum = digest(sources_tar)
-    parts = [shutil.move(p, destination / p.name) for p in split(sources_tar)]
-    parts = [Path(p) for p in parts]
-    sources_tar.unlink()
+    writer.close()
+    whole_sum, parts = writer.hash.hexdigest(), writer.parts
     (destination / "SOURCES.md").write_text(
         "# Corresponding sources\n\n"
         "These files are not needed to install Contrail. They hold the complete sources of what the packages "

@@ -121,6 +121,29 @@ class SplitTest(unittest.TestCase):
             self.assertEqual([p.name for p in parts], [f"sources.tar.part{i:02}" for i in range(1, 4)])
             self.assertEqual(b"".join(p.read_bytes() for p in parts), content)
             self.assertFalse((Path(directory) / "sources.tar.part09").exists())
+            self.assertFalse(archive.exists())
+
+    def test_tar_streams_into_parts(self):
+        import io as _io
+        import tarfile
+        with tempfile.TemporaryDirectory() as directory:
+            original = prepare_release.PART_SIZE
+            prepare_release.PART_SIZE = 4096
+            try:
+                writer = prepare_release.PartWriter(Path(directory) / "s.tar")
+                with tarfile.open(fileobj=writer, mode="w") as archive:
+                    data = bytes(range(256)) * 50
+                    info = tarfile.TarInfo("a/b.bin")
+                    info.size = len(data)
+                    archive.addfile(info, _io.BytesIO(data))
+                writer.close()
+            finally:
+                prepare_release.PART_SIZE = original
+            joined = b"".join(p.read_bytes() for p in writer.parts)
+            self.assertGreater(len(writer.parts), 1)
+            self.assertEqual(hashlib.sha256(joined).hexdigest(), writer.hash.hexdigest())
+            with tarfile.open(fileobj=_io.BytesIO(joined)) as archive:
+                self.assertEqual(archive.extractfile("a/b.bin").read(), data)
 
 
 class AppImageToolsTest(unittest.TestCase):
