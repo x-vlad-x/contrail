@@ -22,6 +22,8 @@ public:
   ~LoginView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
+  // Testing: fills a step ("phone", "code", "name First Last") and submits it.
+  void debugSubmit(const QString &step, const QString &value);
 
 private:
   struct Page {

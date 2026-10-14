@@ -78,6 +78,8 @@ private:
   GtkWidget *_documentStatus = nullptr;
   GtkWidget *_voiceProgress = nullptr;
   bool _playing = false;
+  guint _highlightTimeout = 0;
+  SignalConnections _signals;
 };
 
 }  // namespace Contrail

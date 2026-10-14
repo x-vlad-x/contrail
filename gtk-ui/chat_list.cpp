@@ -1,5 +1,7 @@
 #include "chat_list.hpp"
 
+#include "demo.hpp"
+
 #include "main_window.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
@@ -155,7 +157,7 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
   auto *header = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_page), "contrail-title"));
   const auto refreshConnecting = [=] {
     const auto state = _session->account().mtp().dcstate();
-    const auto connecting = (state == MTP::ConnectingState || state == MTP::DisconnectedState
+    const auto connecting = !DemoActive() && (state == MTP::ConnectingState || state == MTP::DisconnectedState
                              || (state < 0 && state > -600));
     adw_window_title_set_subtitle(ADW_WINDOW_TITLE(header),
                                   connecting ? U8(tr::lng_status_connecting(tr::now)).c_str() : "");
@@ -507,7 +509,7 @@ void ChatList::updateRow(Row &row) {
   if (const auto action = history ? history->sendActionPainter()->actionText() : QString(); !action.isEmpty()) {
     gtk_label_set_markup(GTK_LABEL(row.preview), ("<span color=\"#3584e4\">" + Escape(action) + "</span>").c_str());
   } else {
-    gtk_label_set_markup(GTK_LABEL(row.preview), ToMarkup(OneLine(EntryPreview(entry))).c_str());
+    gtk_label_set_markup(GTK_LABEL(row.preview), ToMarkup(OneLine(EntryPreview(entry)), false, false).c_str());
   }
 
   const auto badges = entry->chatListBadgesState();
@@ -597,9 +599,7 @@ void ChatList::showContextMenu(Row &row, double x, double y) {
   GdkRectangle rect = {int(x), int(y), 1, 1};
   gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
   gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
-  Connect<void(GtkPopover *)>(popover, "closed", [](GtkPopover *p) {
-    g_idle_add_once(+[](gpointer w) { gtk_widget_unparent(GTK_WIDGET(w)); }, p);
-  });
+  DestroyPopoverOnClose(popover);
 
   auto *group = g_simple_action_group_new();
   const auto add = [&](const char *name, std::function<void()> fn) {

@@ -21,6 +21,7 @@ class LoginView;
 class ChatList;
 class ChatView;
 class SettingsView;
+class CallView;
 
 class MainWindow final : public base::has_weak_ptr {
 public:
@@ -46,12 +47,19 @@ public:
   void confirmDeleteChat(not_null<PeerData *> peer);
   void searchChats(const QString &query);
   void sendBotCommand(const QString &command);
+  void startCall(not_null<PeerData *> peer, bool video = false);
+  void setCallStatus(const QString &text, bool active);
   [[nodiscard]] Main::Session *session() const { return _session; }
 
   // For the debug actions.
   void debugOpenChat(int index);
   void debugBack();
   void debugScroll(bool top);
+  void debugCallPreview(bool incoming, bool video = false, const QString &name = u"Contrail"_q);
+  void debugLocalCall(const QString &action);
+  void debugCheckDraft();
+  void debugLogin(const QString &step, const QString &value);
+  void debugHistory(const QString &action);
 
 private:
   void showAccount(Main::Account *account);
@@ -68,6 +76,8 @@ private:
   AdwNavigationView *_sidebarNav = nullptr;
   AdwNavigationPage *_contentPage = nullptr;
   GtkWidget *_placeholder = nullptr;
+  GtkWidget *_callBanner = nullptr;
+  std::unique_ptr<CallView> _calls;
 
   Main::Session *_session = nullptr;
   std::unique_ptr<LoginView> _login;

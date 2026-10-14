@@ -47,15 +47,51 @@ avatar.archive-avatar {
   border-radius: 16px;
   min-width: 60px;
 }
+/* As in Telegram's phone apps: a tinted backdrop, white (dark grey) bubbles from others and
+   accent-colored ones of your own, so the messages stand out from the background. */
+.chat-background {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 14%, #dce2e8);
+}
 .bubble.incoming {
-  background-color: var(--card-bg-color);
-  box-shadow: 0 1px 2px alpha(black, 0.12);
+  background-color: #ffffff;
+  color: #1e1f24;
+  box-shadow: 0 1px 2px alpha(black, 0.16);
   border-bottom-left-radius: 6px;
 }
 .bubble.outgoing {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 22%, var(--window-bg-color));
-  box-shadow: 0 1px 2px alpha(black, 0.12);
+  background-color: color-mix(in srgb, var(--accent-bg-color) 30%, #ffffff);
+  color: #1e1f24;
+  box-shadow: 0 1px 2px alpha(black, 0.16);
   border-bottom-right-radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  .chat-background {
+    background-color: color-mix(in srgb, var(--accent-bg-color) 8%, #101216);
+  }
+  .bubble.incoming {
+    background-color: #2a2d34;
+    color: #ffffff;
+    box-shadow: 0 1px 2px alpha(black, 0.4);
+  }
+  .bubble.outgoing {
+    background-color: color-mix(in srgb, var(--accent-bg-color) 62%, #1c1f24);
+    color: #ffffff;
+    box-shadow: 0 1px 2px alpha(black, 0.4);
+  }
+  /* Accent-colored text would melt into an accent bubble. */
+  .bubble.outgoing .message-text link,
+  .bubble.outgoing .forwarded,
+  .bubble.outgoing .reply-name,
+  .bubble.outgoing .webpage-site {
+    color: color-mix(in srgb, var(--accent-color) 35%, #ffffff);
+  }
+  .bubble.outgoing .reply-quote,
+  .bubble.outgoing .webpage {
+    border-left-color: alpha(white, 0.75);
+  }
+  .bubble.outgoing .reply-quote {
+    background-color: alpha(white, 0.1);
+  }
 }
 .bubble.sticker {
   background: none;
@@ -130,10 +166,17 @@ avatar.archive-avatar {
 }
 .service-message,
 .date-separator {
-  background-color: alpha(currentColor, 0.08);
+  background-color: alpha(black, 0.25);
+  color: white;
   border-radius: 999px;
   padding: 2px 12px;
   font-size: 0.85em;
+}
+@media (prefers-color-scheme: dark) {
+  .service-message,
+  .date-separator {
+    background-color: alpha(black, 0.4);
+  }
 }
 .date-separator {
   margin: 8px 0 4px 0;
@@ -198,9 +241,32 @@ avatar.archive-avatar {
   background-color: black;
 }
 
+/* --- history loading --- */
+.history-loading {
+  border-radius: 999px;
+  padding: 8px;
+}
+
 /* --- voice recording --- */
 .recording-dot {
   color: var(--destructive-color);
+}
+/* As high as the message field (32px + its padding): the chat doesn't move when recording starts. */
+.record-bar {
+  min-height: 46px;
+}
+/* The microphone under the finger: a big red circle, larger than the bar (scaled, not laid out). */
+.record-mic {
+  padding: 9px;
+  border-radius: 999px;
+  background-color: var(--destructive-bg-color);
+  color: var(--destructive-fg-color);
+  transform: scale(1.5);
+  margin-right: 6px;
+}
+.record-lock {
+  border-radius: 999px;
+  padding: 10px 9px;
 }
 .unread-bar {
   margin: 6px 0;
@@ -209,4 +275,43 @@ avatar.archive-avatar {
   color: var(--accent-color);
   font-weight: bold;
   font-size: 0.85em;
+}
+
+/* Call video fills the window, with a small local preview and controls above it. */
+.call-window, .call-stage {
+  background: #101820;
+  color: white;
+}
+.call-header {
+  background: transparent;
+  color: white;
+  box-shadow: none;
+}
+.call-info {
+  text-shadow: 0 1px 3px black;
+}
+.call-preview {
+  border-radius: 16px;
+  box-shadow: 0 2px 8px alpha(black, 0.5);
+  background: #101820;
+}
+.call-controls {
+  padding: 10px;
+  border-radius: 28px;
+  background: alpha(#101820, 0.8);
+}
+.call-control {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 10px;
+  background: alpha(white, 0.15);
+  color: white;
+}
+.call-control.active {
+  background: white;
+  color: #101820;
+}
+.call-control.destructive-action {
+  background: #e53945;
+  color: white;
 }

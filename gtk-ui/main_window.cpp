@@ -4,14 +4,17 @@
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "calls.hpp"
 #include "dialogs.hpp"
 #include "login.hpp"
+#include "scroll_helpers.hpp"
 #include "settings.hpp"
 
 #include "core/application.h"
 #include "data/data_folder.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
+#include "data/data_user.h"
 #include "history/history.h"
 #include "lang/lang_cloud_manager.h"
 #include "lang/lang_keys.h"
@@ -28,12 +31,31 @@ MainWindow::MainWindow() {
   _window = adw_window_new();
   gtk_window_set_title(GTK_WINDOW(_window), "Contrail");
   gtk_window_set_default_size(GTK_WINDOW(_window), 900, 700);
-  gtk_widget_set_size_request(_window, 360, 294);
+  gtk_widget_set_size_request(_window, 320, 294);
+  // Every press, motion and release passes here first: taps on links and photos are told apart
+  // from scrolling (see TrackTap). A plain handler: this runs for every motion event.
+  auto *taps = gtk_event_controller_legacy_new();
+  gtk_event_controller_set_propagation_phase(taps, GTK_PHASE_CAPTURE);
+  g_signal_connect(taps, "event", G_CALLBACK(+[](GtkEventControllerLegacy *, GdkEvent *event, gpointer) -> gboolean {
+    TrackTap(event);
+    return FALSE;
+  }), nullptr);
+  gtk_widget_add_controller(_window, taps);
 
   _toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   _stack = GTK_STACK(gtk_stack_new());
   gtk_stack_set_transition_type(_stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-  adw_toast_overlay_set_child(_toasts, GTK_WIDGET(_stack));
+  auto *body = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  _callBanner = adw_banner_new("");
+  adw_banner_set_use_markup(ADW_BANNER(_callBanner), FALSE);
+  adw_banner_set_button_label(ADW_BANNER(_callBanner), U8(tr::lng_call_box_title(tr::now)).c_str());
+  Connect<void(AdwBanner *)>(_callBanner, "button-clicked", [=](AdwBanner *) {
+    if (_calls) _calls->present();
+  });
+  gtk_box_append(GTK_BOX(body), _callBanner);
+  gtk_widget_set_vexpand(GTK_WIDGET(_stack), TRUE);
+  gtk_box_append(GTK_BOX(body), GTK_WIDGET(_stack));
+  adw_toast_overlay_set_child(_toasts, body);
   adw_window_set_content(ADW_WINDOW(_window), GTK_WIDGET(_toasts));
 
   // Starting up: the core reads its local storage.
@@ -63,7 +85,9 @@ MainWindow::MainWindow() {
   adw_status_page_set_title(ADW_STATUS_PAGE(status), U8(tr::lng_willbe_history(tr::now)).c_str());
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(placeholderView), status);
   _placeholder = placeholderView;
-  _contentPage = ADW_NAVIGATION_PAGE(adw_navigation_page_new(_placeholder, ""));
+  // The page releases its child when a chat replaces it. Keep the empty view alive for Back.
+  g_object_ref_sink(_placeholder);
+  _contentPage = ADW_NAVIGATION_PAGE(adw_navigation_page_new(_placeholder, "Contrail"));
   adw_navigation_split_view_set_content(_split, _contentPage);
   gtk_stack_add_named(_stack, GTK_WIDGET(_split), "chats");
 
@@ -78,14 +102,12 @@ MainWindow::MainWindow() {
   // Back from a chat on a phone: forget it, so its messages stop being marked as read.
   Connect<void(GObject *, GParamSpec *)>(_split, "notify::show-content", [this](GObject *, GParamSpec *) {
     if (adw_navigation_split_view_get_collapsed(_split) && !adw_navigation_split_view_get_show_content(_split)) {
-      g_idle_add_once(
-          +[](gpointer self) {
-            auto *w = static_cast<MainWindow *>(self);
-            if (!adw_navigation_split_view_get_show_content(w->_split)) {
-              w->closeChat();
-            }
-          },
-          this);
+      crl::on_main(this, [=] {
+        if (adw_navigation_split_view_get_collapsed(_split)
+            && !adw_navigation_split_view_get_show_content(_split)) {
+          closeChat();
+        }
+      });
     }
   });
 
@@ -109,6 +131,7 @@ MainWindow::MainWindow() {
     showAccount(account);
   }, _lifetime);
   followCoreWindow();
+  _calls = std::make_unique<CallView>(this);
 }
 
 // Telegram Desktop opens chats in its own (hidden) window: from a notification, a t.me link, a mention.
@@ -135,7 +158,13 @@ void MainWindow::followCoreWindow() {
   }, _lifetime);
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+  _lifetime.destroy();
+  _sessionLifetime.destroy();
+  _calls = nullptr;
+  clearSessionUi();
+  g_object_unref(_placeholder);
+}
 
 bool MainWindow::isActive() const {
   return gtk_window_is_active(GTK_WINDOW(_window)) && gtk_widget_get_visible(_window);
@@ -172,7 +201,7 @@ void MainWindow::clearSessionUi() {
   // Detach the widgets first: a view is destroyed only after its widgets are out of the window.
   adw_navigation_page_set_child(_contentPage, _placeholder);
   _chat = nullptr;
-  adw_navigation_page_set_title(_contentPage, "");
+  adw_navigation_page_set_title(_contentPage, "Contrail");
   if (adw_navigation_view_find_page(_sidebarNav, "chats")) {
     adw_navigation_view_pop_to_tag(_sidebarNav, "chats");
   }
@@ -206,7 +235,7 @@ void MainWindow::showLogin(not_null<Main::Account *> account) {
     }
     QDir().mkpath(cWorkingDir() + u"tdata"_q);
     QFile file(marker);
-    file.open(QIODevice::WriteOnly);
+    if (!file.open(QIODevice::WriteOnly)) return;
     const auto suggested = Lang::CurrentCloudManager().suggestedLanguage();
     if (!suggested.isEmpty() && Lang::LanguageIdOrDefault(Lang::Id()) != suggested) {
       Lang::CurrentCloudManager().switchToLanguage(suggested);
@@ -271,7 +300,7 @@ void MainWindow::closeChat() {
     return;
   }
   adw_navigation_page_set_child(_contentPage, _placeholder);
-  adw_navigation_page_set_title(_contentPage, "");
+  adw_navigation_page_set_title(_contentPage, "Contrail");
   _chat = nullptr;
   if (_chatList) {
     _chatList->setCurrent(nullptr);
@@ -285,10 +314,26 @@ void MainWindow::openSettings() {
   if (!_session) {
     return;
   }
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (_settings) {
+    if (adw_navigation_view_find_page(_sidebarNav, "settings")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _settings->page());
+    } else {
+      adw_navigation_view_push(_sidebarNav, _settings->page());
+    }
+    return;
+  }
   _settings = std::make_unique<SettingsView>(_session, this);
   adw_navigation_view_push(_sidebarNav, _settings->page());
-  Connect<void(AdwNavigationPage *)>(_settings->page(), "hidden", [this](AdwNavigationPage *) {
-    g_idle_add_once(+[](gpointer self) { static_cast<MainWindow *>(self)->_settings = nullptr; }, this);
+  Connect<void(AdwNavigationPage *)>(_settings->page(), "hidden", [this, page = _settings->page()](AdwNavigationPage *) {
+    crl::on_main(this, [=] {
+      // A sidebar page also becomes hidden when a chat covers it on a phone.
+      // Release its owner only after it actually leaves the navigation stack.
+      if (_settings && _settings->page() == page
+          && adw_navigation_view_find_page(_sidebarNav, "settings") != page) {
+        _settings = nullptr;
+      }
+    });
   });
 }
 
@@ -296,15 +341,30 @@ void MainWindow::openArchive() {
   if (!_session) {
     return;
   }
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (_archive) {
+    if (adw_navigation_view_find_page(_sidebarNav, "archive")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _archive->page());
+    } else {
+      adw_navigation_view_push(_sidebarNav, _archive->page());
+    }
+    return;
+  }
   _archive = std::make_unique<ChatList>(_session, _session->data().folder(Data::Folder::kId), this);
   adw_navigation_view_push(_sidebarNav, _archive->page());
-  Connect<void(AdwNavigationPage *)>(_archive->page(), "hidden", [this](AdwNavigationPage *) {
-    g_idle_add_once(+[](gpointer self) { static_cast<MainWindow *>(self)->_archive = nullptr; }, this);
+  Connect<void(AdwNavigationPage *)>(_archive->page(), "hidden", [this, page = _archive->page()](AdwNavigationPage *) {
+    crl::on_main(this, [=] {
+      if (_archive && _archive->page() == page
+          && adw_navigation_view_find_page(_sidebarNav, "archive") != page) {
+        _archive = nullptr;
+      }
+    });
   });
 }
 
 void MainWindow::openContacts() {
   if (_session) {
+    adw_navigation_split_view_set_show_content(_split, FALSE);
     adw_navigation_view_push(_sidebarNav, MakeContactsPage(_session, this));
   }
 }
@@ -341,6 +401,37 @@ void MainWindow::sendBotCommand(const QString &command) {
   }
 }
 
+void MainWindow::startCall(not_null<PeerData *> peer, bool video) {
+  if (_session && &peer->session() == _session && _calls) {
+    if (const auto user = peer->asUser()) _calls->start(user, video);
+  }
+}
+
+void MainWindow::setCallStatus(const QString &text, bool active) {
+  adw_banner_set_title(ADW_BANNER(_callBanner), U8(text).c_str());
+  adw_banner_set_revealed(ADW_BANNER(_callBanner), active);
+}
+
+void MainWindow::debugCallPreview(bool incoming, bool video, const QString &name) {
+  if (_calls) _calls->preview(incoming, video, name);
+}
+
+void MainWindow::debugLocalCall(const QString &action) {
+  if (_calls) _calls->debugLocalCall(action);
+}
+
+void MainWindow::debugCheckDraft() {
+  if (_chat) _chat->debugCheckDraft();
+}
+
+void MainWindow::debugLogin(const QString &step, const QString &value) {
+  if (_login) _login->debugSubmit(step, value);
+}
+
+void MainWindow::debugHistory(const QString &action) {
+  if (_chat) _chat->debugHistory(action);
+}
+
 void MainWindow::debugOpenChat(int index) {
   if (_chatList) {
     _chatList->openRow(index);
@@ -368,7 +459,7 @@ void MainWindow::setupShortcuts() {
     auto *action = gtk_callback_action_new(
         +[](GtkWidget *, GVariant *, gpointer data) -> gboolean {
           auto *pair = static_cast<std::pair<MainWindow *, void (*)(MainWindow *)> *>(data);
-          pair->second(pair->first);
+          RunCoreEvent([&] { pair->second(pair->first); });
           return TRUE;
         },
         new std::pair<MainWindow *, void (*)(MainWindow *)>(this, fn),

@@ -2,6 +2,7 @@
 
 #include "debug.hpp"
 #include "main_window.hpp"
+#include "qt_integration.hpp"
 #include "style_css.h"
 
 #include "core/application.h"
@@ -11,6 +12,7 @@
 #include "lang/lang_instance.h"
 
 #include <QtCore/QCoreApplication>
+#include <QtWidgets/QApplication>
 
 #include <glib-unix.h>
 
@@ -82,6 +84,30 @@ void CopyToClipboard(const QString &text) {
   gdk_clipboard_set_text(gdk_display_get_clipboard(gdk_display_get_default()), text.toUtf8().constData());
 }
 
+void TriggerFeedback(const char *event) {
+  static auto *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+  if (!bus) {
+    return;
+  }
+  g_dbus_connection_call(bus, "org.sigxcpu.Feedback", "/org/sigxcpu/Feedback", "org.sigxcpu.Feedback",
+                         "TriggerFeedback", g_variant_new("(ss@a{sv}i)", kAppId, event,
+                                                          g_variant_new_array(G_VARIANT_TYPE("{sv}"), nullptr, 0), -1),
+                         nullptr, G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr, nullptr);
+}
+
+void DestroyPopoverOnClose(GtkWidget *popover) {
+  Connect<void(GtkPopover *)>(popover, "closed", [](GtkPopover *p) {
+    // The message/chat row may disappear before the idle callback runs.
+    g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, +[](gpointer data) -> gboolean {
+      auto *widget = GTK_WIDGET(data);
+      if (gtk_widget_get_parent(widget)) {
+        gtk_widget_unparent(widget);
+      }
+      return G_SOURCE_REMOVE;
+    }, g_object_ref(p), g_object_unref);
+  });
+}
+
 namespace {
 
 void LoadStyle() {
@@ -89,15 +115,32 @@ void LoadStyle() {
   gtk_css_provider_load_from_string(provider, kStyleCss);
   gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider),
                                              GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+#if GTK_CHECK_VERSION(4, 20, 0)
+  // Since GTK 4.20 the "prefers-color-scheme" media queries of a stylesheet follow its provider's
+  // own property, which libadwaita sets only on the stylesheets it loads itself: without this the
+  // dark variants in style.css never apply.
+  if (g_object_class_find_property(G_OBJECT_GET_CLASS(provider), "prefers-color-scheme")) {
+    const auto sync = +[](AdwStyleManager *manager, GParamSpec *, GtkCssProvider *provider) {
+      g_object_set(provider, "prefers-color-scheme",
+                   adw_style_manager_get_dark(manager) ? GTK_INTERFACE_COLOR_SCHEME_DARK
+                                                       : GTK_INTERFACE_COLOR_SCHEME_LIGHT,
+                   nullptr);
+    };
+    auto *manager = adw_style_manager_get_default();
+    sync(manager, nullptr, provider);
+    g_signal_connect_object(manager, "notify::dark", G_CALLBACK(sync), provider, GConnectFlags(0));
+  }
+#endif
   g_object_unref(provider);
 }
 
 }  // namespace
 
 void HideCoreWindow() {
-  // Telegram Desktop's own window is "shown" on the offscreen platform: hidden, it isn't painted at all.
-  if (const auto window = Core::App().activePrimaryWindow()) {
-    window->widget()->hide();
+  // The Qt call panel is another top-level window. Keep it from painting or consuming shared video
+  // frames behind GTK, just like the core's main window.
+  for (auto *window : QApplication::topLevelWidgets()) {
+    if (window->isVisible()) window->hide();
   }
 }
 
@@ -110,6 +153,10 @@ void Activate() {
 
 // Called by Core::Application::run() once Telegram Desktop's core is up (see patches/).
 void Start() {
+  KeepGtkApplicationRunning();
+  coreEventDispatcher = [](const std::function<void()> &fn) {
+    Core::Sandbox::Instance().customEnterFromEventLoop(fn);
+  };
   auto &app = GetApp();
   g_set_prgname(kAppId);
   g_set_application_name("Contrail");
@@ -135,11 +182,11 @@ void Start() {
 
   // Ctrl+C / SIGTERM: quit cleanly so the core saves its state.
   g_unix_signal_add(SIGTERM, +[](gpointer) -> gboolean {
-    Core::Quit();
+    RunCoreEvent([] { Core::Quit(); });
     return G_SOURCE_REMOVE;
   }, nullptr);
   g_unix_signal_add(SIGINT, +[](gpointer) -> gboolean {
-    Core::Quit();
+    RunCoreEvent([] { Core::Quit(); });
     return G_SOURCE_REMOVE;
   }, nullptr);
 }

@@ -8,10 +8,11 @@ namespace Contrail {
 
 // Telegram's formatted text -> Pango markup for a GtkLabel. Links become <a href>; mentions, hashtags
 // and spoilers get internal hrefs ("tg-mention:", "tg-user:", "tg-hashtag:", "tg-command:", "spoiler:")
-// that HandleLink() understands.
-std::string ToMarkup(const TextWithEntities &text, bool revealSpoilers = false);
+// that HandleLink() understands. Without `links` (one-line previews, nothing to tap) they stay plain text:
+// a GtkLabel with any link claims every touch on it and the list under it can't be scrolled there.
+std::string ToMarkup(const TextWithEntities &text, bool revealSpoilers = false, bool links = true);
 
-// A selectable, wrapping label for a message text. Opens links and reveals spoilers on click.
+// A wrapping label for a message text. Opens links and reveals spoilers on tap.
 GtkWidget *MakeTextLabel(const TextWithEntities &text);
 void SetLabelText(GtkWidget *label, const TextWithEntities &text);
 

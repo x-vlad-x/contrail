@@ -1,6 +1,8 @@
 #include "message.hpp"
 
 #include "chat_view.hpp"
+#include "layout.hpp"
+#include "scroll_helpers.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
 
@@ -52,20 +54,21 @@ QSize FitPhoto(int w, int h, int maxWidth) {
   return {std::max(width, kMinPhotoSize), std::max(height, 48)};
 }
 
-GtkWidget *MakePicture(int width, int height) {
-  auto *picture = gtk_picture_new();
-  gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
-  gtk_widget_set_size_request(picture, width, height);
-  gtk_widget_set_halign(picture, GTK_ALIGN_START);
-  gtk_widget_set_overflow(picture, GTK_OVERFLOW_HIDDEN);
-  return picture;
-}
-
 void SetPictureImage(GtkWidget *picture, Image *image) {
   if (!image || image->isNull()) {
     return;
   }
-  if (auto *texture = ToTexture(image->original())) {
+  // A texture as large as the picture on the screen: drawing a downscaled full-size photo costs
+  // time on every frame while scrolling, and the memory of all the loaded photos.
+  auto original = image->original();
+  const auto scale = std::max(gtk_widget_get_scale_factor(picture), 1);
+  const auto target = QSize(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-width")),
+                            GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-height")))
+                      * scale;
+  if (!target.isEmpty() && original.width() > target.width() && original.height() > target.height()) {
+    original = original.scaled(target, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+  }
+  if (auto *texture = ToTexture(original)) {
     gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
     g_object_unref(texture);
   }
@@ -99,6 +102,10 @@ MessageWidget::MessageWidget(not_null<HistoryItem *> item, not_null<ChatView *> 
 }
 
 MessageWidget::~MessageWidget() {
+  _signals.clear();
+  if (_highlightTimeout) {
+    g_source_remove(_highlightTimeout);
+  }
   g_object_set_data(G_OBJECT(_row), "contrail-message", nullptr);
   if (auto *parent = gtk_widget_get_parent(_row)) {
     gtk_list_box_remove(GTK_LIST_BOX(parent), _row);
@@ -107,6 +114,7 @@ MessageWidget::~MessageWidget() {
 }
 
 void MessageWidget::refresh() {
+  _signals.clear();
   _photoMedia = nullptr;
   _documentMedia = nullptr;
   _picture = nullptr;
@@ -215,8 +223,8 @@ GtkWidget *MessageWidget::buildForwarded() {
   gtk_widget_add_css_class(label, "forwarded");
   if (const auto sender = forwarded->originalSender) {
     auto *click = gtk_gesture_click_new();
-    Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      _chat->openPeer(sender);
+    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+      if (TapAllowed()) _chat->openPeer(sender);
     });
     gtk_widget_add_controller(label, GTK_EVENT_CONTROLLER(click));
   }
@@ -255,7 +263,7 @@ GtkWidget *MessageWidget::buildReply() {
   gtk_label_set_ellipsize(GTK_LABEL(nameLabel), PANGO_ELLIPSIZE_END);
   gtk_box_append(GTK_BOX(box), nameLabel);
   auto *textLabel = gtk_label_new(nullptr);
-  gtk_label_set_markup(GTK_LABEL(textLabel), ToMarkup(text).c_str());
+  gtk_label_set_markup(GTK_LABEL(textLabel), ToMarkup(text, false, false).c_str());
   gtk_label_set_xalign(GTK_LABEL(textLabel), 0);
   gtk_label_set_ellipsize(GTK_LABEL(textLabel), PANGO_ELLIPSIZE_END);
   gtk_label_set_single_line_mode(GTK_LABEL(textLabel), TRUE);
@@ -263,8 +271,8 @@ GtkWidget *MessageWidget::buildReply() {
   const auto replyId = reply->messageId();
   if (replyId) {
     auto *click = gtk_gesture_click_new();
-    Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      _chat->showAt(replyId);
+    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+      if (TapAllowed()) _chat->showAt(replyId);
     });
     gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   }
@@ -332,10 +340,12 @@ GtkWidget *MessageWidget::buildMedia() {
     auto *name = gtk_label_new(U8(contact->firstName + ' ' + contact->lastName).c_str());
     gtk_widget_add_css_class(name, "heading");
     gtk_label_set_xalign(GTK_LABEL(name), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(column), name);
     auto *phone = gtk_label_new(U8(Ui::FormatPhone(contact->phoneNumber)).c_str());
-    gtk_label_set_selectable(GTK_LABEL(phone), TRUE);
+    gtk_label_set_selectable(GTK_LABEL(phone), FALSE);
     gtk_label_set_xalign(GTK_LABEL(phone), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(phone), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(column), phone);
     gtk_box_append(GTK_BOX(box), column);
     return box;
@@ -345,7 +355,7 @@ GtkWidget *MessageWidget::buildMedia() {
 
 GtkWidget *MessageWidget::buildPhoto(not_null<PhotoData *> photo, int maxWidth) {
   const auto size = FitPhoto(photo->width(), photo->height(), maxWidth);
-  _picture = MakePicture(size.width(), size.height());
+  _picture = MakeMediaPicture(size.width(), size.height());
   gtk_widget_add_css_class(_picture, "message-photo");
   _pictureKind = PictureKind::Photo;
   _photoMedia = photo->createMediaView();
@@ -354,11 +364,11 @@ GtkWidget *MessageWidget::buildPhoto(not_null<PhotoData *> photo, int maxWidth) 
     SetPictureImage(_picture, _photoMedia->thumbnailInline());
   }
   auto *click = gtk_gesture_click_new();
-  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-    _chat->openPhoto(photo, _item);
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+    if (TapAllowed()) _chat->openPhoto(photo, _item);
   });
   gtk_widget_add_controller(_picture, GTK_EVENT_CONTROLLER(click));
-  return _picture;
+  return MakeMediaFrame(_picture, size.width(), size.height());
 }
 
 GtkWidget *MessageWidget::buildSticker(not_null<DocumentData *> document) {
@@ -371,7 +381,7 @@ GtkWidget *MessageWidget::buildSticker(not_null<DocumentData *> document) {
       width = kStickerSize * d.width() / d.height();
     }
   }
-  _picture = MakePicture(width, height);
+  _picture = MakeMediaPicture(width, height);
   gtk_picture_set_content_fit(GTK_PICTURE(_picture), GTK_CONTENT_FIT_CONTAIN);
   _pictureKind = PictureKind::Sticker;
   _documentMedia = document->createMediaView();
@@ -380,18 +390,20 @@ GtkWidget *MessageWidget::buildSticker(not_null<DocumentData *> document) {
     _documentMedia->automaticLoad(_item->fullId(), _item);
   }
   refreshMedia();
-  return _picture;
+  auto *frame = MakeMediaFrame(_picture, width, height);
+  gtk_widget_set_halign(frame, GTK_ALIGN_START);
+  return frame;
 }
 
 GtkWidget *MessageWidget::buildVideoThumb(not_null<DocumentData *> document, int maxWidth) {
   const auto size = FitPhoto(document->dimensions.width(), document->dimensions.height(), maxWidth);
   auto *overlay = gtk_overlay_new();
-  _picture = MakePicture(size.width(), size.height());
+  _picture = MakeMediaPicture(size.width(), size.height());
   gtk_widget_add_css_class(_picture, "message-photo");
   if (document->isVideoMessage()) {
     gtk_widget_add_css_class(_picture, "round-video");
   }
-  gtk_overlay_set_child(GTK_OVERLAY(overlay), _picture);
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(_picture, size.width(), size.height()));
   _pictureKind = PictureKind::Thumbnail;
   _documentMedia = document->createMediaView();
   _documentMedia->thumbnailWanted(_item->fullId());
@@ -415,11 +427,15 @@ GtkWidget *MessageWidget::buildVideoThumb(not_null<DocumentData *> document, int
   gtk_widget_set_can_target(_documentStatus, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _documentStatus);
   auto *click = gtk_gesture_click_new();
-  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+    if (!TapAllowed()) return;
     _chat->openDocument(document, _item);
     updateDocumentState();
   });
   gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
+  if (document->isVideoMessage()) {
+    gtk_widget_set_halign(overlay, GTK_ALIGN_START);  // Stays round in a wider bubble.
+  }
   updateDocumentState();
   return overlay;
 }
@@ -432,7 +448,8 @@ GtkWidget *MessageWidget::buildDocument(not_null<DocumentData *> document) {
   gtk_widget_add_css_class(_documentButton, "circular");
   gtk_widget_add_css_class(_documentButton, "document-button");
   gtk_widget_set_valign(_documentButton, GTK_ALIGN_CENTER);
-  OnClicked(_documentButton, [=] {
+  _signals.clicked(_documentButton, [=] {
+    if (!TapAllowed()) return;
     _chat->openDocument(document, _item);
     updateDocumentState();
   });
@@ -463,7 +480,8 @@ GtkWidget *MessageWidget::buildVoice(not_null<DocumentData *> document) {
   gtk_widget_add_css_class(_documentButton, "circular");
   gtk_widget_add_css_class(_documentButton, "suggested-action");
   gtk_widget_set_valign(_documentButton, GTK_ALIGN_CENTER);
-  OnClicked(_documentButton, [=] {
+  _signals.clicked(_documentButton, [=] {
+    if (!TapAllowed()) return;
     const auto type = document->isVoiceMessage() ? AudioMsgId::Type::Voice : AudioMsgId::Type::Song;
     (void)type;
     Media::Player::instance()->playPause(AudioMsgId(document, _item->fullId()));
@@ -471,7 +489,7 @@ GtkWidget *MessageWidget::buildVoice(not_null<DocumentData *> document) {
   gtk_box_append(GTK_BOX(box), _documentButton);
   auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
   gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
-  gtk_widget_set_size_request(column, 160, -1);
+  gtk_widget_set_hexpand(column, TRUE);
   if (const auto song = document->song(); song && !document->isVoiceMessage()) {
     auto title = song->title.isEmpty() ? document->filename() : song->title;
     if (!song->performer.isEmpty()) {
@@ -510,6 +528,7 @@ GtkWidget *MessageWidget::buildWebPage() {
     auto *site = gtk_label_new(U8(page->siteName).c_str());
     gtk_widget_add_css_class(site, "webpage-site");
     gtk_label_set_xalign(GTK_LABEL(site), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(site), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(box), site);
   }
   if (!page->title.isEmpty()) {
@@ -517,6 +536,8 @@ GtkWidget *MessageWidget::buildWebPage() {
     gtk_widget_add_css_class(title, "heading");
     gtk_label_set_xalign(GTK_LABEL(title), 0);
     gtk_label_set_wrap(GTK_LABEL(title), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(title), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(title), 44);
     gtk_box_append(GTK_BOX(box), title);
   }
   if (!page->description.text.isEmpty()) {
@@ -532,9 +553,9 @@ GtkWidget *MessageWidget::buildWebPage() {
   }
   const auto url = page->url;
   auto *click = gtk_gesture_click_new();
-  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *g, int, double, double) {
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *g, int, double, double) {
     // Taps on the photo open the viewer, the rest opens the page.
-    HandleLink(url);
+    if (TapAllowed()) HandleLink(url);
   });
   gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   return box;
@@ -545,6 +566,7 @@ GtkWidget *MessageWidget::buildFooter() {
   gtk_widget_set_halign(box, GTK_ALIGN_END);
   gtk_widget_add_css_class(box, "message-footer");
   _footerTime = gtk_label_new(nullptr);
+  gtk_label_set_ellipsize(GTK_LABEL(_footerTime), PANGO_ELLIPSIZE_START);
   gtk_box_append(GTK_BOX(box), _footerTime);
   _footerStatus = gtk_image_new();
   gtk_image_set_pixel_size(GTK_IMAGE(_footerStatus), 14);
@@ -690,27 +712,37 @@ void MessageWidget::setFirstInGroup(bool first) {
 
 void MessageWidget::highlight() {
   gtk_widget_add_css_class(_row, "highlighted");
-  g_timeout_add_once(1500, +[](gpointer row) { gtk_widget_remove_css_class(GTK_WIDGET(row), "highlighted"); }, _row);
+  if (_highlightTimeout) {
+    g_source_remove(_highlightTimeout);
+  }
+  _highlightTimeout = g_timeout_add(1500, +[](gpointer data) -> gboolean {
+    auto *self = static_cast<MessageWidget *>(data);
+    self->_highlightTimeout = 0;
+    gtk_widget_remove_css_class(self->_row, "highlighted");
+    return G_SOURCE_REMOVE;
+  }, this);
 }
 
 void MessageWidget::setupGestures(GtkWidget *bubble) {
   auto *longPress = gtk_gesture_long_press_new();
   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(longPress), TRUE);
-  Connect<void(GtkGestureLongPress *, double, double)>(longPress, "pressed", [=](GtkGestureLongPress *g, double x, double y) {
+  _signals.connect<void(GtkGestureLongPress *, double, double)>(longPress, "pressed", [=](GtkGestureLongPress *g, double x, double y) {
     gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
     _chat->showMessageMenu(_item, bubble, x, y);
   });
   gtk_widget_add_controller(bubble, GTK_EVENT_CONTROLLER(longPress));
   auto *rightClick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rightClick), GDK_BUTTON_SECONDARY);
-  Connect<void(GtkGestureClick *, int, double, double)>(rightClick, "pressed", [=](GtkGestureClick *, int, double x, double y) {
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(rightClick, "pressed", [=](GtkGestureClick *, int, double x, double y) {
     _chat->showMessageMenu(_item, bubble, x, y);
   });
   gtk_widget_add_controller(bubble, GTK_EVENT_CONTROLLER(rightClick));
   // Swipe left to reply, as in the phone apps.
-  auto *swipe = gtk_gesture_drag_new();
+  // An unrestricted drag wins the touch sequence over the parent scrolled window. Pan denies
+  // vertical movement early, so touching message text still scrolls the conversation.
+  auto *swipe = gtk_gesture_pan_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(swipe), TRUE);
-  Connect<void(GtkGestureDrag *, double, double)>(swipe, "drag-end", [=](GtkGestureDrag *, double dx, double dy) {
+  _signals.connect<void(GtkGestureDrag *, double, double)>(swipe, "drag-end", [=](GtkGestureDrag *, double dx, double dy) {
     if (dx < -80 && std::abs(dy) < 40) {
       _chat->replyTo(_item);
     }

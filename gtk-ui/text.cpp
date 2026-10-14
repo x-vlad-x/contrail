@@ -1,6 +1,8 @@
 #include "text.hpp"
 
 #include "main_window.hpp"
+#include "layout.hpp"
+#include "scroll_helpers.hpp"
 
 #include "base/unixtime.h"
 #include "core/application.h"
@@ -27,19 +29,23 @@ struct Tag {
   int end = 0;
   std::string open;
   std::string close;
+  QString href;  // Links only.
 };
 
 std::string Attr(const QString &s) {
   return Escape(s);
 }
 
-std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers) {
+std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers, bool links) {
   std::vector<Tag> tags;
   const auto add = [&](const EntityInText &e, std::string open, std::string close) {
     tags.push_back({e.offset(), e.offset() + e.length(), std::move(open), std::move(close)});
   };
   const auto link = [&](const EntityInText &e, const QString &href) {
-    add(e, "<a href=\"" + Attr(href) + "\">", "</a>");
+    if (links) {
+      add(e, "<a href=\"" + Attr(href) + "\">", "</a>");
+      tags.back().href = href;
+    }
   };
   for (const auto &e : text.entities) {
     if (e.length() <= 0 || e.offset() < 0 || e.offset() + e.length() > text.text.size()) {
@@ -68,9 +74,12 @@ std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers) 
       case EntityType::Cashtag: link(e, u"tg-hashtag:"_q + part); break;
       case EntityType::BotCommand: link(e, u"tg-command:"_q + part); break;
       case EntityType::Spoiler:
-        if (!revealSpoilers) {
+        if (!revealSpoilers && links) {
           add(e, "<a href=\"spoiler:\"><span background=\"#808080\" foreground=\"#808080\" underline=\"none\">",
               "</span></a>");
+          tags.back().href = u"spoiler:"_q;
+        } else if (!revealSpoilers) {
+          add(e, "<span background=\"#808080\" foreground=\"#808080\">", "</span>");
         }
         break;
       default: break;
@@ -81,8 +90,8 @@ std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers) 
 
 }  // namespace
 
-std::string ToMarkup(const TextWithEntities &text, bool revealSpoilers) {
-  const auto tags = CollectTags(text, revealSpoilers);
+std::string ToMarkup(const TextWithEntities &text, bool revealSpoilers, bool links) {
+  const auto tags = CollectTags(text, revealSpoilers, links);
   if (tags.empty()) {
     return Escape(text.text);
   }
@@ -133,7 +142,42 @@ namespace {
 struct LabelText {
   TextWithEntities text;
   bool revealed = false;
+  // The links in the label's text, in UTF-8 bytes of the Pango layout.
+  struct Link {
+    int from = 0;
+    int till = 0;
+    QString href;
+  };
+  std::vector<Link> links;
 };
+
+const LabelText::Link *LinkAt(GtkWidget *label, const LabelText &data, double x, double y) {
+  auto offsetX = 0, offsetY = 0;
+  gtk_label_get_layout_offsets(GTK_LABEL(label), &offsetX, &offsetY);
+  auto index = 0, trailing = 0;
+  if (!pango_layout_xy_to_index(gtk_label_get_layout(GTK_LABEL(label)), int((x - offsetX) * PANGO_SCALE),
+                                int((y - offsetY) * PANGO_SCALE), &index, &trailing)) {
+    return nullptr;
+  }
+  for (const auto &link : data.links) {
+    if (index >= link.from && index < link.till) {
+      return &link;
+    }
+  }
+  return nullptr;
+}
+
+void ApplyLabelText(GtkWidget *label, LabelText *data) {
+  data->links.clear();
+  const auto utf8Offset = [&](int offset) { return int(data->text.text.left(offset).toUtf8().size()); };
+  for (const auto &tag : CollectTags(data->text, data->revealed, true)) {
+    if (!tag.href.isEmpty()) {
+      data->links.push_back({utf8Offset(tag.start), utf8Offset(tag.end), tag.href});
+    }
+  }
+  gtk_label_set_markup(GTK_LABEL(label), ToMarkup(data->text, data->revealed).c_str());
+  DisableLabelGestures(label);
+}
 
 }  // namespace
 
@@ -144,29 +188,34 @@ void SetLabelText(GtkWidget *label, const TextWithEntities &text) {
   }
   data->text = text;
   data->revealed = false;
-  gtk_label_set_markup(GTK_LABEL(label), ToMarkup(text).c_str());
+  ApplyLabelText(label, data);
 }
 
 GtkWidget *MakeTextLabel(const TextWithEntities &text) {
   auto *label = gtk_label_new(nullptr);
-  gtk_label_set_wrap(GTK_LABEL(label), TRUE);
-  gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+  ConfigureMessageWrapping(GTK_LABEL(label));
   gtk_label_set_xalign(GTK_LABEL(label), 0);
-  gtk_label_set_selectable(GTK_LABEL(label), TRUE);
+  gtk_label_set_selectable(GTK_LABEL(label), FALSE);
   gtk_widget_set_focusable(label, FALSE);
   gtk_widget_add_css_class(label, "message-text");
+  // Doesn't claim the touch: the scrolled chat takes it as soon as the finger moves.
+  auto *click = gtk_gesture_click_new();
+  g_object_set_data(G_OBJECT(click), "contrail-own", GINT_TO_POINTER(1));
+  gtk_widget_add_controller(label, GTK_EVENT_CONTROLLER(click));
   SetLabelText(label, text);
-  Connect<gboolean(GtkLabel *, const char *)>(label, "activate-link", [](GtkLabel *label, const char *uri) -> gboolean {
-    const auto href = Q(uri);
-    if (href == u"spoiler:"_q) {
-      if (auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"))) {
-        data->revealed = true;
-        gtk_label_set_markup(label, ToMarkup(data->text, true).c_str());
-      }
-      return TRUE;
+  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [label](GtkGestureClick *, int, double x, double y) {
+    auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"));
+    const auto link = (data && TapAllowed()) ? LinkAt(label, *data, x, y) : nullptr;
+    if (!link) {
+      return;
     }
+    if (link->href == u"spoiler:"_q) {
+      data->revealed = true;
+      ApplyLabelText(label, data);
+      return;
+    }
+    const auto href = link->href;  // HandleLink() may destroy the label (another chat opens).
     HandleLink(href);
-    return TRUE;
   });
   return label;
 }
@@ -208,9 +257,8 @@ QString FormatListDate(TimeId date) {
 }
 
 QString FormatDay(TimeId date) {
-  const auto day = base::unixtime::parse(date).date();
-  const auto today = QDate::currentDate();
-  return (day.year() == today.year()) ? langDayOfMonthFull(day) : langDayOfMonthFull(day) + ' ' + QString::number(day.year());
+  // Adds the year itself for the past years.
+  return langDayOfMonthFull(base::unixtime::parse(date).date());
 }
 
 }  // namespace Contrail

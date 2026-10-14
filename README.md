@@ -1,104 +1,182 @@
+<div align="center">
+
+<img src="packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt="">
+
 # Contrail
 
-An unofficial native GNOME interface (GTK4 + libadwaita) for [Telegram](https://telegram.org), built on the
-[Telegram Desktop](https://github.com/telegramdesktop/tdesktop) core and made for Linux phones. Developed and
-tested on the FuriLabs FLX1s with FuriOS (Phosh), but it should work on any aarch64 phone or tablet with
-GTK 4.12+ and libadwaita 1.6+.
+**A native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones**
 
-The core (MTProto, the chats and messages database, local storage, media downloads and playback,
-notifications) is the official Telegram Desktop code with a two-line patch. Its own Qt window is never
-shown: the interface is new and adapts to the window — one column on a phone, the chat list and the chat
-side by side on a wider screen.
+Built on the [Telegram Desktop](https://github.com/telegramdesktop/tdesktop) core · made for Phosh ·
+developed on the FuriLabs FLX1s with FuriOS
 
-- sign-in with a phone number, the code and the cloud password (two-step verification);
-- chat list in Telegram Desktop's order: pinned chats, unread and mention badges, previews, drafts, read
-  ticks; archive; search by name plus global search by username; pin, mute, archive, mark as read, delete
-  or leave from a long press;
-- chats: messages loaded page by page, date separators, grouped senders with avatars, replies (tap to
-  jump), forwards, formatted text with links, mentions and hidden spoilers, photos (full-screen viewer),
-  stickers, files (download, open), videos and GIFs (open in the system player), voice messages and music
-  (played by the core), link previews, polls, contacts; read on screen;
-- sending text, replies (long press or swipe left), editing (also Up in an empty field), deleting (for
-  everyone too), files and pictures from the file chooser; drafts are kept per chat;
-- chat info, contacts, Saved Messages, settings (notifications, log out);
-- notifications through the core's native Linux notifications; tapping one opens the chat here;
-- `tg://` and `t.me` links.
+</div>
 
-Not there yet: calls, stories, reactions, message forwarding and selection, stickers and emoji panels,
-voice recording, secret chats (Telegram Desktop doesn't have them either), folders, multiple accounts.
+<p align="center">
+  <img src="screenshots/chats.png" width="200" alt="Chat list">
+  <img src="screenshots/chat.png" width="200" alt="A conversation with a photo, a reply and a voice message">
+  <img src="screenshots/group.png" width="200" alt="A group chat">
+  <img src="screenshots/call.png" width="200" alt="An incoming call">
+</p>
+<p align="center">
+  <img src="screenshots/chats-dark.png" width="200" alt="Chat list, dark style">
+  <img src="screenshots/chat-dark.png" width="200" alt="A conversation, dark style">
+  <img src="screenshots/channel.png" width="200" alt="A channel">
+  <img src="screenshots/profile.png" width="200" alt="A profile">
+</p>
 
-The interface is in every language Telegram is translated into: the strings are Telegram Desktop's own
-(`tr::lng_*`), and on the first start the language follows the system's.
+> [!NOTE]
+> Contrail is an **unofficial** client. It is not affiliated with or endorsed by Telegram. The chats in the
+> screenshots are made up (see [Screenshots](#screenshots)).
 
-## Building and installing
+Telegram Desktop works on a Linux phone, but its Qt interface is made for a mouse and a big screen. Contrail
+keeps everything below the interface — MTProto, the message database, local storage, media, calls,
+notifications — and replaces the interface itself with an adaptive GTK4/libadwaita one: a single column
+on a phone, the chat list and the chat side by side on a wider screen, touch gestures, the system's light
+or dark style and accent color.
 
-Requirements on the build machine (x86_64 Linux): git, patch, podman, ssh. The phone must be reachable over SSH
-with key authentication.
+## Features
 
-You need your own Telegram API credentials: get `api_id` and `api_hash` at <https://my.telegram.org>
-(API development tools) and put them into `api-credentials.env` next to the script (it's in `.gitignore`):
+- **Sign-in** with a phone number, the code and the cloud password (two-step verification); sign-up for
+  a new number.
+- **Chat list** in Telegram's order: pinned chats, unread and mention badges, previews, drafts, read
+  ticks; the archive; search by name and global search by username; pin, mute, archive, mark as read,
+  delete or leave from a long press.
+- **Chats**: history loaded page by page while you scroll (in both directions, without jumps), date
+  separators and an "Unread messages" bar, grouped senders with avatars, replies (tap to jump),
+  forwards, formatted text with links, mentions and hidden spoilers, photos with a full-screen viewer,
+  stickers, files, videos and GIFs (opened in the system player), voice messages and music (played by
+  the core), link previews, polls, shared contacts. Scrolling over text and links never turns into a tap.
+- **Writing**: text, replies (long press or swipe left), editing (also Up in an empty field), deleting
+  (for everyone too), files and pictures, drafts kept per chat.
+- **Voice messages** as in the phone apps: hold the microphone to record and release to send, slide
+  left to cancel or up to keep recording hands-free.
+- **Calls**: one-to-one audio and video calls — accept or decline, mute, front/back camera,
+  speaker/earpiece (FuriOS), encryption emoji, back to an ongoing call from any chat. The remote video
+  fills the window with your camera in a corner.
+- **Notifications** through the core's native Linux notifications; tapping one opens the chat.
+- `tg://` and `t.me` links, chat info, contacts, Saved Messages, settings.
+- **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
+  start the language follows the system.
 
-```bash
-TELEGRAM_API_ID=12345
-TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-```
+Not there yet: group calls, screen sharing, stories, reactions, forwarding and selecting messages,
+sticker and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't
+planned: Telegram Desktop doesn't have them either.
 
-Then:
+## Installing
 
-```bash
-./update-contrail.sh            # build the latest Telegram Desktop release and install it on the phone
-./update-contrail.sh --ui-only  # quickly update only the program (after changes in gtk-ui/)
-./update-contrail.sh --check    # what is installed on the phone, is there an update
-./update-contrail.sh --build-only
-./update-contrail.sh --uninstall [--purge]
-```
+Contrail is built on a PC (x86_64 Linux) and installed on the phone over SSH. The build machine needs
+git, patch, podman and ssh; the phone must accept SSH logins with a key. No root access on the phone is
+needed.
 
-The SSH destination is taken from `PHONE` (default `furios`), e.g. `PHONE=furios@192.168.1.10`.
+1. Get your own Telegram API credentials: `api_id` and `api_hash` at <https://my.telegram.org> (API
+   development tools). Put them into `api-credentials.env` next to the script (it's in `.gitignore`):
 
-The script clones Telegram Desktop at the latest release tag into `tdesktop/`, applies the patch and
-cross-compiles for aarch64 in a container (`build-env/`). The container uses the same Debian snapshot as
-FuriOS (its mirror, `debian.furios.io`), so the program runs with the phone's own Qt, FFmpeg and the rest;
-the few libraries the phone doesn't have are put next to it. Libraries Debian doesn't package (tg_owt,
-tde2e, tdesktop_rust) are built from source at the versions the official build uses. Code generators
-that Telegram Desktop builds and runs during the build go through qemu-user, so nothing has to be
-installed on the build machine. The first build takes about an hour, later ones a minute or two.
+   ```bash
+   TELEGRAM_API_ID=12345
+   TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+   ```
 
-On the phone the program is installed to `~/.local/share/contrail`, the account and the cache are kept in
-`~/.local/share/contrail-data` (separate from the official Telegram Desktop). No root access is needed.
+2. Build the latest Telegram Desktop release with Contrail and install it:
 
-## Project layout
+   ```bash
+   ./update-contrail.sh
+   ```
 
-- `gtk-ui/` — the interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's
-  executable: `app` (start, helpers), `main_window` (adaptive layout, following the core's own window),
-  `login`, `chat_list`, `chat_view` (history loading, scrolling, message field), `message` (one message),
-  `text` (Telegram entities → Pango markup, links), `userpics`, `settings`, `dialogs` (chat info, photo
-  viewer, contacts, about), `style.css`, `icons/`;
-- `patches/` — the patch for Telegram Desktop: adds `gtk-ui/` to its CMake target and calls
-  `Contrail::Start()` at the end of `Core::Application::run()`;
-- `build-env/` — the container, the CMake toolchain, the build of the extra libraries, the library
-  bundling, wrappers to run aarch64 tools through qemu;
-- `packaging/` — launcher, desktop entry and icon.
-
-## Debugging
-
-The core writes its log to `~/.local/share/contrail-data/log.txt`. With `CONTRAIL_DEBUG=1` the app accepts
-commands over D-Bus, which is handy for testing on the phone without touching it (see `gtk-ui/debug.cpp`
-for the list):
+The first build takes about an hour, later ones a minute or two. Contrail then appears among the phone's
+apps. Other options:
 
 ```bash
-gdbus call --session --dest io.github.x_vlad_x.Contrail --object-path /io/github/x_vlad_x/Contrail/Debug \
-  --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
+./update-contrail.sh --check        # what is installed on the phone, is there an update
+./update-contrail.sh --ui-only      # quickly update only the program (after changes in gtk-ui/)
+./update-contrail.sh --build-only   # build without installing
+./update-contrail.sh --tag v7.3.1   # a specific Telegram Desktop release
+./update-contrail.sh --uninstall    # remove from the phone (--uninstall --purge also removes the account)
 ```
+
+The SSH destination is taken from `PHONE` (default `furios`), e.g. `PHONE=user@192.168.1.10`.
+
+On the phone the program is installed to `~/.local/share/contrail`; the account and the cache are kept in
+`~/.local/share/contrail-data`, separate from the official Telegram Desktop.
+
+### Other phones
+
+Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh), but it should work on any
+aarch64 phone or tablet with GTK 4.12+ and libadwaita 1.6+. The build container uses the same Debian
+snapshot as FuriOS (its mirror, `debian.furios.io`), so the program runs with the phone's own Qt, FFmpeg
+and the rest; the few libraries the phone doesn't have are installed next to it. The speaker/earpiece
+switch in calls needs the two ports of FuriOS's PulseAudio Droid sink and is disabled elsewhere.
 
 ## How it works
 
-Telegram Desktop's data layer (`Data::Session`, `ApiWrap`, `History`) is tied to its Qt widgets, so the
-whole program is built. Qt runs with the `offscreen` platform and uses GLib's event loop, the same loop
-GTK runs on, so both live on the main thread. Once the core has started, `Contrail::Start()` creates the
-GTK window and from then on talks to `Main::Session` directly: it reads the chat list and the history,
-subscribes to the core's change streams (`Data::Changes`), sends requests through `ApiWrap` and
-`Data::Histories`. When the core opens a chat in its hidden window (a notification, a link), the GTK
-window follows.
+Telegram Desktop's data layer (`Data::Session`, `ApiWrap`, `History`) is tied to its Qt code, so the whole
+program is built, with a small patch that adds the interface to its CMake target and starts it at the end
+of `Core::Application::run()`. Qt runs on the `offscreen` platform and on GLib's event loop — the same loop
+GTK runs on — so both live on the main thread. The GTK interface talks to `Main::Session` directly: it
+reads the chat list and the history, follows the core's change streams (`Data::Changes`) and sends
+requests through `ApiWrap` and `Data::Histories`. When the core opens a chat in its hidden window (a
+notification, a link), the GTK window follows.
+
+The build clones Telegram Desktop at the release tag into `tdesktop/`, applies the patch and
+cross-compiles for aarch64 in a podman container. Libraries Debian doesn't package (tg_owt, tde2e,
+tdesktop_rust) are built from source at the versions the official build uses. Code generators that run
+during the build go through qemu-user, so nothing has to be installed on the build machine.
+
+### Project layout
+
+| Path | Contents |
+| --- | --- |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `dialogs`, `settings`, `style.css`, `icons/` |
+| `patches/` | The patch for Telegram Desktop |
+| `build-env/` | The build container, the CMake toolchain, the build of the extra libraries, library bundling |
+| `packaging/` | Launcher, desktop entry and icon |
+| `tests/`, `tools/` | Regression tests and testing helpers |
+
+## Development
+
+### Testing on the phone
+
+With `CONTRAIL_DEBUG=1` the app takes commands over D-Bus, so it can be driven over SSH without touching
+the phone. `tools/phone.sh` wraps that:
+
+```bash
+tools/phone.sh run              # start with CONTRAIL_DEBUG=1, the log goes to /tmp/contrail.log on the phone
+tools/phone.sh cmd 'chat 0'     # open the first chat
+tools/phone.sh cmd history-state
+tools/phone.sh shot shot.png    # a screenshot (tools/phone.sh get-grim once)
+```
+
+The commands are listed at the top of `gtk-ui/debug.cpp`: opening chats and pages, scrolling, history and
+layout diagnostics, a call window preview, local call tests that never contact anybody.
+`tools/phone-touch.py` injects real touchscreen drags for testing scrolling and gestures. The core writes
+its own log to `~/.local/share/contrail-data/log.txt`.
+
+### Tests
+
+Regressions for the parts that don't need a Telegram account — GTK handler lifetimes, layout on a phone
+width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation and audio
+routing — run on any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under
+AddressSanitizer and UBSan:
+
+```bash
+tools/test-gtk.sh
+```
+
+### Screenshots
+
+The screenshots show the real interface with a made-up account. `tools/demo.sh` starts a second Contrail
+on the phone with its own empty data directory and application ID, in English, inside a network namespace
+without network; the `demo` command (`gtk-ui/demo.cpp`) signs a fictional account in locally and fills it
+with chats, a group and a channel with generated pictures. Nothing reaches Telegram's servers and the
+installed Contrail is not touched. The app draws its own window into a PNG, so the phone's screen can be
+locked meanwhile:
+
+```bash
+tools/demo.sh run               # or: tools/demo.sh run dark
+tools/demo.sh cmd demo
+tools/demo.sh cmd 'chat 0'
+tools/demo.sh shot chat.png
+tools/demo.sh stop
+```
 
 ## License
 

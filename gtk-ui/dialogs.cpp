@@ -119,6 +119,20 @@ void ShowProfile(not_null<MainWindow *> window, not_null<PeerData *> peer) {
     window->openPeer(peer);
   });
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(actions), send);
+  if (const auto user = peer->asUser(); user && !user->isSelf() && !user->isBot()) {
+    for (const auto video : {false, true}) {
+      auto *call = adw_button_row_new();
+      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(call),
+          U8(video ? tr::lng_call_start_video(tr::now) : tr::lng_call_start(tr::now)).c_str());
+      adw_button_row_set_start_icon_name(ADW_BUTTON_ROW(call),
+          video ? "camera-video-symbolic" : "call-start-symbolic");
+      Connect<void(AdwButtonRow *)>(call, "activated", [=](AdwButtonRow *) {
+        adw_dialog_close(ADW_DIALOG(dialog));
+        window->startCall(peer, video);
+      });
+      adw_preferences_group_add(ADW_PREFERENCES_GROUP(actions), call);
+    }
+  }
   if (!peer->isSelf()) {
     const auto history = peer->owner().history(peer);
     auto *mute = adw_switch_row_new();

@@ -159,6 +159,21 @@ void LoginView::buildPhonePage() {
   adw_entry_row_set_activates_default(ADW_ENTRY_ROW(_phone), FALSE);
 }
 
+void LoginView::debugSubmit(const QString &step, const QString &value) {
+  if (step == u"phone"_q) {
+    gtk_editable_set_text(GTK_EDITABLE(_phone), U8(value).c_str());
+    submitPhone();
+  } else if (step == u"code"_q) {
+    gtk_editable_set_text(GTK_EDITABLE(_code), U8(value).c_str());
+    submitCode();
+  } else if (step == u"name"_q) {
+    const auto space = value.indexOf(' ');
+    gtk_editable_set_text(GTK_EDITABLE(_firstName), U8(value.left(space)).c_str());
+    gtk_editable_set_text(GTK_EDITABLE(_lastName), U8(space < 0 ? QString() : value.mid(space + 1)).c_str());
+    submitSignup();
+  }
+}
+
 void LoginView::submitPhone() {
   if (_request || !_api) {
     return;

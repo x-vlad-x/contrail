@@ -9,7 +9,9 @@
 
 #include <functional>
 #include <memory>
+#include <type_traits>
 #include <string>
+#include <vector>
 
 namespace Main {
 class Session;
@@ -54,6 +56,17 @@ void ClearBox(GtkWidget *box);
 void ShowToast(const QString &text);
 void OpenUri(const std::string &uri);
 void CopyToClipboard(const QString &text);
+// Haptic/sound feedback through feedbackd (Phosh), if it runs: "button-pressed" and the like.
+void TriggerFeedback(const char *event);
+
+// GTK uses GLib's native dispatch, outside QApplication::notify(). The Telegram core requires
+// a registered event context before it can postpone widget/media updates.
+using CoreEventDispatcher = void (*)(const std::function<void()> &);
+inline CoreEventDispatcher coreEventDispatcher = nullptr;
+inline void RunCoreEvent(const std::function<void()> &fn) {
+  if (coreEventDispatcher) coreEventDispatcher(fn);
+  else fn(); // Standalone GTK tests, before the core is started.
+}
 
 // Connects a lambda to a GObject signal with no extra arguments besides the instance.
 template <typename Fn>
@@ -61,7 +74,10 @@ void OnClicked(GtkWidget *button, Fn &&fn) {
   auto *heap = new std::function<void()>(std::forward<Fn>(fn));
   g_signal_connect_data(
       button, "clicked",
-      G_CALLBACK(+[](GtkWidget *, gpointer data) { (*static_cast<std::function<void()> *>(data))(); }), heap,
+      G_CALLBACK(+[](GtkWidget *, gpointer data) {
+        auto fn = *static_cast<std::function<void()> *>(data);
+        RunCoreEvent(fn);
+      }), heap,
       [](gpointer data, GClosure *) { delete static_cast<std::function<void()> *>(data); }, GConnectFlags(0));
 }
 
@@ -70,7 +86,16 @@ void OnClicked(GtkWidget *button, Fn &&fn) {
 template <typename R, typename... Args>
 struct SignalThunk {
   static R Call(Args... args, gpointer data) {
-    return (*static_cast<std::function<R(Args...)> *>(data))(args...);
+    // A handler can remove its own widget (opening another chat, for example).
+    // Keep the callable alive until it returns, even if GTK destroys its closure.
+    auto fn = *static_cast<std::function<R(Args...)> *>(data);
+    if constexpr (std::is_void_v<R>) {
+      RunCoreEvent([&] { fn(args...); });
+    } else {
+      R result{};
+      RunCoreEvent([&] { result = fn(args...); });
+      return result;
+    }
   }
 };
 
@@ -86,6 +111,41 @@ template <typename Sig, typename Fn>
 gulong Connect(gpointer instance, const char *signal, Fn &&fn) {
   return ConnectImpl(instance, signal, std::function<Sig>(std::forward<Fn>(fn)));
 }
+
+// Views can outlive their C++ owner during GTK transitions. Disconnect handlers before teardown.
+class SignalConnections final {
+public:
+  SignalConnections() = default;
+  SignalConnections(const SignalConnections &) = delete;
+  SignalConnections &operator=(const SignalConnections &) = delete;
+  ~SignalConnections() { clear(); }
+
+  template <typename Sig, typename Fn>
+  void connect(gpointer instance, const char *signal, Fn &&fn) {
+    const auto id = Connect<Sig>(instance, signal, std::forward<Fn>(fn));
+    _handlers.emplace_back(G_OBJECT(g_object_ref(instance)), id);
+  }
+
+  template <typename Fn>
+  void clicked(GtkWidget *button, Fn &&fn) {
+    connect<void(GtkButton *)>(button, "clicked", [fn = std::forward<Fn>(fn)](GtkButton *) { fn(); });
+  }
+
+  void clear() {
+    for (const auto &[object, id] : _handlers) {
+      if (g_signal_handler_is_connected(object, id)) {
+        g_signal_handler_disconnect(object, id);
+      }
+      g_object_unref(object);
+    }
+    _handlers.clear();
+  }
+
+private:
+  std::vector<std::pair<GObject *, gulong>> _handlers;
+};
+
+void DestroyPopoverOnClose(GtkWidget *popover);
 
 
 // Keeps a C++ object alive as long as a GObject lives.
