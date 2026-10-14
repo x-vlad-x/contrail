@@ -5,6 +5,7 @@
 #include "api/api_text_entities.h"
 #include "base/unixtime.h"
 #include "core/application.h"
+#include "data/components/sponsored_messages.h"
 #include "data/data_changes.h"
 #include "data/data_peer_id.h"
 #include "data/data_photo.h"
@@ -372,6 +373,18 @@ void Fill(not_null<Main::Session *> session) {
 bool demoActive = false;
 
 }  // namespace
+
+void AddDemoSponsored() {
+  auto &account = Core::App().domain().active();
+  if (!demoActive || !account.sessionExists()) return;
+  auto &data = account.session().data();
+  const auto history = data.history(peerFromChannel(kChannel));
+  history->addSponsoredMessage(
+      data.nextLocalMessageId(),
+      Data::SponsoredFrom{.title = u"Trail Maps"_q, .link = u"https://t.me/example"_q, .buttonText = u"View channel"_q},
+      {u"Offline maps for every hiking trail in the region, updated each week."_q});
+  data.sendHistoryChangeNotifications();
+}
 
 bool DemoActive() {
   return demoActive;

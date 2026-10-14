@@ -3,7 +3,7 @@
 //     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
 // Commands: testmode | login phone|code|name TEXT | chat N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
 //           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
-//           check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) |
+//           check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           screenshot [call] PATH
 
 #include "debug.hpp"
@@ -135,6 +135,8 @@ void Run(MainWindow &w, const std::string &cmdline) {
     w.debugCallPreview(mode == u"incoming"_q, mode == u"video"_q, name.isEmpty() ? u"Contrail"_q : name);
   } else if (cmd == "demo") {
     StartDemo();
+  } else if (cmd == "demo-sponsored") {
+    AddDemoSponsored();
   } else if (cmd == "screenshot") {
     // screenshot [call] PATH: the window drawn by GTK itself, 3x, nothing of the phone around it.
     const auto value = Q(arg.c_str());

@@ -7,6 +7,7 @@
 #include "userpics.hpp"
 
 #include "core/file_utilities.h"
+#include "data/components/sponsored_messages.h"
 #include "data/data_channel.h"
 #include "data/data_document.h"
 #include "data/data_document_media.h"
@@ -186,7 +187,7 @@ void MessageWidget::build() {
   const auto &text = _item->originalText();
   if (!text.text.isEmpty()) {
     gtk_box_append(GTK_BOX(bubble), MakeTextLabel(text));
-  } else if (!media) {
+  } else if (!media && !_item->isSponsored()) {
     // Something this interface can't show: a short description from the core.
     auto preview = _item->toPreview({.hideSender = true, .generateImages = false});
     auto *label = MakeTextLabel(preview.text);
@@ -199,8 +200,10 @@ void MessageWidget::build() {
   if (auto *webpage = buildWebPage()) {
     gtk_box_append(GTK_BOX(bubble), webpage);
   }
-  _footer = buildFooter();
-  gtk_box_append(GTK_BOX(bubble), _footer);
+  if (!_item->isSponsored()) {
+    _footer = buildFooter();
+    gtk_box_append(GTK_BOX(bubble), _footer);
+  }
 
   setupGestures(bubble);
   gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(_row), line);
@@ -551,11 +554,41 @@ GtkWidget *MessageWidget::buildWebPage() {
   if (page->photo && !_picture) {
     gtk_box_append(GTK_BOX(box), buildPhoto(page->photo, kMaxPhotoWidth - 20));
   }
-  const auto url = page->url;
+  auto url = page->url;
+  auto open = Fn<void()>();
+  if (_item->isSponsored()) {
+    // A sponsored message (see ChatView::showSponsored): the core reports the click, the button names the action.
+    gtk_widget_add_css_class(box, "sponsored");
+    auto &sponsored = _item->history()->session().sponsoredMessages();
+    const auto details = sponsored.lookupDetails(_item->fullId());
+    if (!details.link.isEmpty()) url = details.link;
+    const auto session = &_item->history()->session();
+    const auto id = _item->fullId();
+    open = [=] {
+      session->sponsoredMessages().clicked(id, false, false);
+      HandleLink(url);
+    };
+    if (!url.isEmpty()) {
+      auto *button = gtk_button_new_with_label(
+          U8(details.buttonText.isEmpty() ? tr::lng_open_link(tr::now) : details.buttonText).c_str());
+      gtk_widget_add_css_class(button, "sponsored-button");
+      gtk_widget_set_margin_top(button, 4);
+      _signals.connect<void(GtkButton *)>(button, "clicked", [=](GtkButton *) { open(); });
+      gtk_box_append(GTK_BOX(box), button);
+    }
+    for (const auto &info : details.info) {
+      auto *label = MakeTextLabel(info);
+      gtk_widget_add_css_class(label, "dim-label");
+      gtk_widget_add_css_class(label, "caption");
+      gtk_box_append(GTK_BOX(box), label);
+    }
+  } else {
+    open = [=] { HandleLink(url); };
+  }
   auto *click = gtk_gesture_click_new();
   _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *g, int, double, double) {
     // Taps on the photo open the viewer, the rest opens the page.
-    if (TapAllowed()) HandleLink(url);
+    if (TapAllowed() && !url.isEmpty()) open();
   });
   gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   return box;

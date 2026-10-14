@@ -76,6 +76,9 @@ private:
   [[nodiscard]] bool scrollIdle() const;
   [[nodiscard]] bool scrollIdleIgnoringShift() const;
   void markAsRead();
+  // Telegram's sponsored messages in channels (required by the Telegram API Terms of Service, 3.3).
+  void showSponsored();
+  void reportSponsoredViews();
 
   void send();
   void edit(not_null<HistoryItem *> item);
@@ -133,6 +136,10 @@ private:
   std::unordered_map<const HistoryItem *, std::unique_ptr<MessageWidget>> _rows;
   std::set<MessageWidget *> _waitingMedia;
   std::set<DocumentData *> _openWhenLoaded;
+  // Sponsored messages are sorted after the regular message they follow in the history.
+  std::unordered_map<const HistoryItem *, MsgId> _sponsoredAfter;
+  std::set<const HistoryItem *> _sponsoredViewed;
+  bool _sponsoredMediaLoading = false;
 
   int _olderRequest = 0;
   int _newerRequest = 0;

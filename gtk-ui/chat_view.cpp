@@ -19,6 +19,7 @@
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "data/data_chat_participant_status.h"
+#include "data/components/sponsored_messages.h"
 #include "data/data_document.h"
 #include "data/data_document_media.h"
 #include "data/data_file_origin.h"
@@ -151,6 +152,9 @@ ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, M
         })
       | rpl::on_next([=] { refreshHeader(); }, _lifetime);
   session->downloaderTaskFinished() | rpl::on_next([=] {
+    if (_sponsoredMediaLoading) {
+      showSponsored();
+    }
     for (auto i = _waitingMedia.begin(); i != _waitingMedia.end();) {
       if ((*i)->refreshMedia()) {
         i = _waitingMedia.erase(i);
@@ -195,6 +199,8 @@ ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, M
 
 ChatView::~ChatView() {
   invalidate_weak_ptrs(this);
+  // Like HistoryWidget: the sponsored messages shown here leave the history with the chat.
+  _history->session().sponsoredMessages().clearItems(_history);
   if (_viewportSource) g_source_remove(_viewportSource);
   _readTimer.cancel();
   _statusTimer.cancel();
@@ -296,13 +302,23 @@ void ChatView::buildList() {
   // Order of the messages in the chat.
   gtk_list_box_set_sort_func(
       GTK_LIST_BOX(_list),
-      +[](GtkListBoxRow *a, GtkListBoxRow *b, gpointer) -> int {
+      +[](GtkListBoxRow *a, GtkListBoxRow *b, gpointer data) -> int {
         auto *ma = static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(a), "contrail-message"));
         auto *mb = static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(b), "contrail-message"));
         if (!ma || !mb) {
           return 0;
         }
         const auto ia = ma->item(), ib = mb->item();
+        // A sponsored message has a local id: it goes right after the message it follows in the history.
+        if (ia->isSponsored() || ib->isSponsored()) {
+          const auto &after = static_cast<ChatView *>(data)->_sponsoredAfter;
+          const auto key = [&](const HistoryItem *item) {
+            const auto i = after.find(item);
+            return (i != after.end()) ? std::pair(i->second, 1) : std::pair(item->id, 0);
+          };
+          const auto ka = key(ia), kb = key(ib);
+          return (ka < kb) ? -1 : (kb < ka) ? 1 : 0;
+        }
         // Messages being sent have local ids: they go after the others.
         const auto la = ia->isSending() || ia->hasFailed(), lb = ib->isSending() || ib->hasFailed();
         if (la != lb) {
@@ -314,7 +330,7 @@ void ChatView::buildList() {
         // Server ids grow with time within a chat.
         return (ia->id < ib->id) ? -1 : (ia->id > ib->id) ? 1 : 0;
       },
-      nullptr, nullptr);
+      this, nullptr);
   // Date separators and grouping of consecutive messages from the same sender.
   gtk_list_box_set_header_func(
       GTK_LIST_BOX(_list),
@@ -650,9 +666,16 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
 
 void ChatView::sync() {
   std::set<const HistoryItem *> present;
+  auto lastRegular = MsgId();
+  _sponsoredAfter.clear();
   for (const auto &block : _history->blocks) {
     for (const auto &view : block->messages) {
       const auto item = view->data();
+      if (item->isSponsored()) {
+        _sponsoredAfter.emplace(item, lastRegular);
+      } else if (item->isRegular()) {
+        lastRegular = item->id;
+      }
       present.insert(item);
       if (!_rows.contains(item)) {
         addRow(item);
@@ -661,6 +684,7 @@ void ChatView::sync() {
   }
   for (auto i = _rows.begin(); i != _rows.end();) {
     if (!present.contains(i->first)) {
+      _sponsoredViewed.erase(i->first);
       _waitingMedia.erase(i->second.get());
       i = _rows.erase(i);
     } else {
@@ -685,6 +709,8 @@ void ChatView::addRow(not_null<HistoryItem *> item) {
 }
 
 void ChatView::removeRow(const HistoryItem *item) {
+  _sponsoredAfter.erase(item);
+  _sponsoredViewed.erase(item);
   if (const auto i = _rows.find(item); i != _rows.end()) {
     _waitingMedia.erase(i->second.get());
     _rows.erase(i);
@@ -811,6 +837,64 @@ void ChatView::updateViewport() {
   const auto bottom = value + page >= upper - 40 && _history->loadedAtBottom();
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
   preloadVisibleEdges();
+  if (bottom) {
+    showSponsored();
+  }
+  reportSponsoredViews();
+}
+
+void ChatView::showSponsored() {
+  auto &sponsored = _history->session().sponsoredMessages();
+  if (!_initialLoaded || !_history->loadedAtBottom() || !sponsored.canHaveFor(_history)
+      || sponsored.isTopBarFor(_history)) {
+    return;
+  }
+  using State = Data::SponsoredMessages::State;
+  using Result = Data::SponsoredMessages::AppendResult;
+  // The core asks the server at most once in a few minutes and keeps the answer.
+  sponsored.request(_history, crl::guard(this, [=] { showSponsored(); }));
+  _sponsoredMediaLoading = false;
+  auto added = false;
+  switch (sponsored.state(_history)) {
+    case State::AppendToEnd: {
+      const auto result = sponsored.append(_history);
+      _sponsoredMediaLoading = (result == Result::MediaLoading);
+      added = (result == Result::Appended);
+    } break;
+    case State::InjectToMiddle: {
+      // Contrail shows it after the newest message, where the reader ends up, like AppendToEnd.
+      auto last = MsgId();
+      for (const auto &block : _history->blocks) {
+        for (const auto &view : block->messages) {
+          if (view->data()->isRegular()) last = view->data()->id;
+        }
+      }
+      if (last) {
+        sponsored.inject(_history, last, 0, 400);
+        added = true;
+      }
+    } break;
+    default: break;
+  }
+  if (added) {
+    sync();
+  }
+}
+
+void ChatView::reportSponsoredViews() {
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  for (const auto &[item, after] : _sponsoredAfter) {
+    const auto row = rowFor(item);
+    if (!row || _sponsoredViewed.contains(item)) continue;
+    double y = 0;
+    const auto height = gtk_widget_get_height(row->row());
+    // Seen once the whole message is on the screen (or fills it, if it is taller).
+    if (height > 0 && WidgetViewportY(row->row(), _scroll, y)
+        && ((y >= 0 && y + height <= page) || (y <= 0 && y + height >= page))) {
+      _sponsoredViewed.insert(item);
+      _history->session().sponsoredMessages().view(item->fullId());
+    }
+  }
 }
 
 void ChatView::preloadVisibleEdges() {
@@ -1197,6 +1281,7 @@ void ChatView::showReplyBar(const QString &title, const QString &text, const cha
 }
 
 void ChatView::replyTo(not_null<HistoryItem *> item) {
+  if (item->isSponsored()) return;
   if (_editing) {
     cancelReplyOrEdit();
   }
@@ -1513,6 +1598,7 @@ void ChatView::finishRecording(bool send) {
 // --- message actions ---------------------------------------------------------
 
 void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y) {
+  if (item->isSponsored()) return;
   auto *menu = g_menu_new();
   const auto now = base::unixtime::now();
   if (!item->isService() && Data::CanSendTexts(_history)) {
