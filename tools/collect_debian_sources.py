@@ -105,12 +105,17 @@ def fetch_file(record, directory):
     if valid(target, record):
         return
     temporary = target.with_name(target.name + ".download")
-    with urllib.request.urlopen(record["url"], timeout=120) as response, temporary.open("wb") as output:
-        shutil.copyfileobj(response, output, 1024 * 1024)
-    if not valid(temporary, record):
-        temporary.unlink(missing_ok=True)
-        raise RuntimeError(f"Source checksum mismatch: {record['name']}")
-    temporary.replace(target)
+    for attempt in range(3):  # Long downloads over flaky connections end early now and then.
+        try:
+            with urllib.request.urlopen(record["url"], timeout=120) as response, temporary.open("wb") as output:
+                shutil.copyfileobj(response, output, 1024 * 1024)
+        except OSError:
+            pass
+        if valid(temporary, record):
+            temporary.replace(target)
+            return
+    temporary.unlink(missing_ok=True)
+    raise RuntimeError(f"Source checksum mismatch: {record['name']}")
 
 
 def verify_dsc(source, directory):
