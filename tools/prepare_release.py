@@ -259,8 +259,16 @@ def main():
         raise RuntimeError("The AppImage runtime binary and source pins disagree")
     runtime_dir = SOURCES / "appimage-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
+    unavailable = []
     for record in runtime["files"]:
-        fetch_file(record, runtime_dir)
+        try:
+            fetch_file(record, runtime_dir)
+        except (RuntimeError, OSError):
+            # A check of the tooling may run where some hosts are blocked; a release may not.
+            if not args.validation:
+                raise
+            unavailable.append(record["url"])
+            continue
         files[runtime_dir / record["name"]] = f"appimage-runtime/{record['name']}"
     files[ROOT / "packaging/runtime-sources.json"] = "appimage-runtime/runtime-sources.json"
     files[ROOT / "packaging/LICENSES.md"] = "README.md"
@@ -310,7 +318,9 @@ def main():
     if args.validation:
         warning = destination / "NOT-FOR-RELEASE.txt"
         warning.write_text("Built with Telegram's public test API credentials to check the release tooling. "
-                           "Do not publish these files.\n")
+                           "Do not publish these files.\n"
+                           + "".join(f"Not downloaded here (the release run fetches it): {url}\n"
+                                     for url in unavailable))
         assets.append(warning)
     (destination / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in sorted(assets)))
     shutil.rmtree(bundle)
