@@ -1,0 +1,12 @@
+# FuriOS 14's userland for checking the ARM64 package (tools/smoke-test.sh deb): the same Debian testing
+# snapshot as build-env/Containerfile, arm64, run through qemu-user. Not used for building.
+ARG BASE=docker.io/library/debian:testing-20260610
+FROM ${BASE}
+RUN printf 'Types: deb\nURIs: https://debian.furios.io/\nSuites: forky forky-updates\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+      > /etc/apt/sources.list.d/debian.sources \
+    && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99furios-snapshot \
+    && apt-get -o Acquire::https::Verify-Peer=false update \
+    && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::https::Verify-Peer=false install -y --allow-downgrades ca-certificates \
+    && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      xvfb dbus dbus-x11 libglib2.0-bin desktop-file-utils x11-apps netpbm \
+    && rm -rf /var/lib/apt/lists/*

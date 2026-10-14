@@ -1,0 +1,41 @@
+# x86_64 desktop build for the AppImage. Debian 13 (trixie) is the oldest Debian with GTK 4.12+ and
+# libadwaita 1.6+; the AppImage carries those libraries and needs glibc 2.39 or newer on the host (see the
+# AppImage's usr/share/doc/contrail/host-libraries.txt). tools/build-packages.sh records the exact package
+# versions of this image.
+FROM docker.io/library/debian:trixie-20261005
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkgconf python3 git ca-certificates file curl \
+      protobuf-compiler libwayland-bin gobject-introspection qt6-base-dev-tools patchelf xz-utils \
+      autoconf automake libtool gperf qt6-shader-baker desktop-file-utils \
+    && rm -rf /var/lib/apt/lists/*
+# Telegram Desktop (the list of Debian's telegram-desktop package; rnnoise, ada, tg_owt, tde2e and the Rust
+# part are built by build-deps.sh).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      qt6-base-dev qt6-base-private-dev qt6-svg-dev qt6-wayland-dev \
+      libavcodec-dev libavfilter-dev libavformat-dev libavutil-dev \
+      libswresample-dev libswscale-dev libboost-regex-dev libexpected-dev \
+      libglib2.0-dev libglibmm-2.68-dev gir1.2-glib-2.0-dev libhunspell-dev \
+      libjpeg-dev libkf6coreaddons-dev liblz4-dev libminizip-dev libmsgsl-dev \
+      libopenal-dev libopus-dev libpulse-dev libasound2-dev libqrcodegencpp-dev \
+      librange-v3-dev libssl-dev libxcb1-dev libxcb-keysyms1-dev \
+      libxcb-record0-dev libxcb-screensaver0-dev libxxhash-dev xdg-desktop-portal-dev \
+      zlib1g-dev libvpx-dev libopenh264-dev \
+      libfido2-dev libudev-dev libprotobuf-dev libpango1.0-dev libxkbcommon-dev \
+      libpipewire-0.3-dev libx11-dev libxext-dev libxfixes-dev libxtst-dev \
+      libxrandr-dev libxrender-dev libxdamage-dev libxcomposite-dev \
+      libdrm-dev libgbm-dev libegl-dev libgl-dev \
+      libgtk-4-dev libadwaita-1-dev \
+      qt6-image-formats-plugins \
+    && rm -rf /var/lib/apt/lists/*
+# Resources the AppImage loads at run time (icon theme, SVG and image loaders, GIO modules).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      adwaita-icon-theme hicolor-icon-theme librsvg2-common libgdk-pixbuf2.0-bin \
+      glib-networking dconf-gsettings-backend gsettings-desktop-schemas shared-mime-info \
+      librsvg2-bin appstream \
+    && rm -rf /var/lib/apt/lists/*
+# Rust, for the Rust part of Telegram Desktop (tlottie, wallet engine): the toolchain the official build pins.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.96.1 \
+      && chmod -R a+rwX /opt/rustup /opt/cargo
+ENV PKG_CONFIG_PATH=/src/deps-x86_64/prefix/lib/pkgconfig \
+    GI_GIR_PATH=/usr/lib/x86_64-linux-gnu/gir-1.0:/usr/share/gir-1.0

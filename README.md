@@ -25,7 +25,7 @@ developed on the FuriLabs FLX1s with FuriOS
 </p>
 
 > [!NOTE]
-> Contrail is an **unofficial** client. It is not affiliated with or endorsed by Telegram. The chats in the
+> Contrail is an **unofficial** client that uses the Telegram API. It is not affiliated with or endorsed by Telegram. The chats in the
 > screenshots are made up (see [Screenshots](#screenshots)).
 
 Telegram Desktop works on a Linux phone, but its Qt interface is made for a mouse and a big screen. Contrail
@@ -64,28 +64,67 @@ planned: Telegram Desktop doesn't have them either.
 
 ## Installing
 
-Contrail is built on a PC (x86_64 Linux) and installed on the phone over SSH. The build machine needs
-git, patch, podman and ssh; the phone must accept SSH logins with a key. No root access on the phone is
-needed.
+Download the package for your device from the [releases page](https://github.com/x-vlad-x/contrail/releases):
 
-1. Get your own Telegram API credentials: `api_id` and `api_hash` at <https://my.telegram.org> (API
-   development tools). Put them into `api-credentials.env` next to the script (it's in `.gitignore`):
+| Device | Package |
+| --- | --- |
+| Linux phone, ARM64 (FuriOS and other Debian-based systems) | `contrail_<version>_arm64.deb` |
+| Linux computer, x86_64 (glibc 2.39 or newer) | `Contrail-<version>-x86_64.AppImage` |
 
-   ```bash
-   TELEGRAM_API_ID=12345
-   TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
-   ```
-
-2. Build the latest Telegram Desktop release with Contrail and install it:
-
-   ```bash
-   ./update-contrail.sh
-   ```
-
-The first build takes about an hour, later ones a minute or two. Contrail then appears among the phone's
-apps. Other options:
+On the phone:
 
 ```bash
+sudo apt install ./contrail_<version>_arm64.deb
+```
+
+On a computer:
+
+```bash
+chmod +x Contrail-<version>-x86_64.AppImage
+./Contrail-<version>-x86_64.AppImage
+```
+
+The packages are ready to use: no building and no Telegram API keys needed. The account and the cache are
+kept in `~/.local/share/contrail-data`, separate from the official Telegram Desktop. The installation guide
+that comes with each release (`README.md` among its files) has the details, including moving from the earlier
+SSH install to the package (`contrail-migrate-launcher`).
+
+Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). The Debian package uses the
+phone's own GTK, Qt, FFmpeg and other libraries; other aarch64 phones and tablets need GTK 4.12+ and libadwaita
+1.6+. The speaker/earpiece switch in calls needs the two ports of FuriOS's PulseAudio Droid sink and is
+disabled elsewhere.
+
+## Building
+
+You need your own Telegram API credentials: `api_id` and `api_hash` at <https://my.telegram.org> (API
+development tools). Put them into `api-credentials.env` in the repository (it's in `.gitignore`):
+
+```bash
+TELEGRAM_API_ID=12345
+TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
+```
+
+### Packages
+
+```bash
+tools/build-packages.sh phone      # out/packages/contrail_<version>_arm64.deb
+tools/build-packages.sh desktop    # out/packages/Contrail-<version>-x86_64.AppImage
+```
+
+This needs git, patch, python3 and podman (or docker); everything else happens in build containers. The
+Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes.
+Nothing is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages,
+corresponding sources, checksums) in `out/release/`; see [packaging/LICENSES.md](packaging/LICENSES.md).
+
+### Development install over SSH
+
+For working on the interface, `update-contrail.sh` builds the latest Telegram Desktop release with Contrail
+and installs it into `~/.local/share/contrail` on the phone over SSH. The build machine needs git, patch,
+podman and ssh; the phone must accept SSH logins with a key. No root access on the phone is needed. Don't
+combine it with the Debian package on the same phone: its user launcher hides the package's.
+
+```bash
+./update-contrail.sh                # build and install
 ./update-contrail.sh --check        # what is installed on the phone, is there an update
 ./update-contrail.sh --ui-only      # quickly update only the program (after changes in gtk-ui/)
 ./update-contrail.sh --build-only   # build without installing
@@ -94,17 +133,6 @@ apps. Other options:
 ```
 
 The SSH destination is taken from `PHONE` (default `furios`), e.g. `PHONE=user@192.168.1.10`.
-
-On the phone the program is installed to `~/.local/share/contrail`; the account and the cache are kept in
-`~/.local/share/contrail-data`, separate from the official Telegram Desktop.
-
-### Other phones
-
-Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh), but it should work on any
-aarch64 phone or tablet with GTK 4.12+ and libadwaita 1.6+. The build container uses the same Debian
-snapshot as FuriOS (its mirror, `debian.furios.io`), so the program runs with the phone's own Qt, FFmpeg
-and the rest; the few libraries the phone doesn't have are installed next to it. The speaker/earpiece
-switch in calls needs the two ports of FuriOS's PulseAudio Droid sink and is disabled elsewhere.
 
 ## How it works
 
@@ -116,20 +144,22 @@ reads the chat list and the history, follows the core's change streams (`Data::C
 requests through `ApiWrap` and `Data::Histories`. When the core opens a chat in its hidden window (a
 notification, a link), the GTK window follows.
 
-The build clones Telegram Desktop at the release tag into `tdesktop/`, applies the patch and
-cross-compiles for aarch64 in a podman container. Libraries Debian doesn't package (tg_owt, tde2e,
-tdesktop_rust) are built from source at the versions the official build uses. Code generators that run
-during the build go through qemu-user, so nothing has to be installed on the build machine.
+The build clones Telegram Desktop at the release tag into `tdesktop/`, applies the patches and builds in a
+container: cross-compiled for aarch64 against the same Debian snapshot as FuriOS (code generators that run
+during the build go through qemu-user), natively on Debian 13 for the x86_64 AppImage. Libraries Debian
+doesn't package (tg_owt, tde2e, tdesktop_rust) are built from source at the versions the official build
+uses, so nothing has to be installed on the build machine.
 
 ### Project layout
 
 | Path | Contents |
 | --- | --- |
 | `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `dialogs`, `settings`, `style.css`, `icons/` |
-| `patches/` | The patch for Telegram Desktop |
-| `build-env/` | The build container, the CMake toolchain, the build of the extra libraries, library bundling |
-| `packaging/` | Launcher, desktop entry and icon |
-| `tests/`, `tools/` | Regression tests and testing helpers |
+| `patches/` | The patches for Telegram Desktop |
+| `build-env/` | The build containers (ARM64 cross build, x86_64 desktop build), CMake toolchains, the build of the extra libraries |
+| `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, release documents |
+| `tools/` | Package and release scripts, testing helpers |
+| `tests/` | Regression tests (`test-gtk.sh`) and packaging tests (`python3 -m unittest discover tests`) |
 
 ## Development
 
@@ -159,6 +189,13 @@ AddressSanitizer and UBSan:
 
 ```bash
 tools/test-gtk.sh
+```
+
+The launcher, the migration from the SSH install, the release metadata and the release tooling have their
+own tests, which need only Python:
+
+```bash
+python3 -m unittest discover tests
 ```
 
 ### Screenshots

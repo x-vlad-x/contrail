@@ -1,0 +1,65 @@
+# Licenses and sources of the Contrail packages
+
+Contrail is distributed under the GNU General Public License, version 3, with the OpenSSL exception — the
+same license as Telegram Desktop, which it is built on (`LICENSE`, `NOTICE`). That license covers Contrail
+and Telegram Desktop; the libraries listed below keep their own licenses.
+
+Contrail is an unofficial client that uses the Telegram API. It is not affiliated with or endorsed by
+Telegram. Telegram is a trademark of Telegram FZ-LLC.
+
+## What the program is made of
+
+The program (`/usr/libexec/contrail/contrail`, or `usr/libexec/contrail/contrail` inside the AppImage) is
+Telegram Desktop at a pinned release tag with the patches in `patches/` and Contrail's GTK interface
+(`gtk-ui/`) compiled in. Inside the packages, `share/doc/contrail/build-info.json` names the exact Contrail
+source commit, the Telegram Desktop tag and commit, and a checksum of the patches.
+
+Compiled into the program from source:
+
+- **Telegram Desktop** and its submodules and bundled third-party code (lib_base, lib_ui, tgcalls, cld3,
+  hunspell, libprisma, MicroTeX and others): their license texts are in `share/doc/contrail/upstream`.
+- **Libraries built by `build-env/build-deps.sh`** at the commits the official Telegram Desktop build uses:
+  tg_owt (WebRTC), TDLib's tde2e, rnnoise (with its neural network model), the Rust part (tlottie, wallet
+  engine and the Rust crates they use) and, for the AppImage, ada. Their license texts are in
+  `share/doc/contrail/static-libraries`; `sources.json` there lists the source archives with their SHA-256,
+  and `tdesktop_rust/crates.txt` lists the Rust crates that are linked in, with their licenses.
+- **Debian packages** used at build time: `share/doc/contrail/build-inputs.json` lists every Debian package
+  whose headers, static archives or shared libraries the build used, with the source package and version.
+
+## The Debian package (ARM64)
+
+The program uses the phone's own system libraries (GTK, libadwaita, Qt, FFmpeg, OpenSSL and others); the
+package declares them as dependencies and carries none of them. They keep their distribution's licenses.
+
+## The AppImage (x86_64)
+
+The AppImage carries the shared libraries, plugins, icons and schemas it needs from Debian 13. They keep
+their own licenses — including the LGPL and the GPL — and are not relicensed by Contrail.
+`share/doc/contrail/bundled` holds each package's Debian copyright file, the common license texts, and
+`bundled-packages.json`, which maps every bundled file to its Debian binary and source package and version.
+`host-libraries.txt` lists what is taken from the host system instead (glibc, graphics drivers, fontconfig).
+
+The AppImage runtime (the small program at the start of the file that mounts it) is AppImage's type2-runtime
+under the MIT license, with statically linked libfuse (LGPL-2.1), squashfuse, musl, zstd, zlib and mimalloc;
+see `share/doc/contrail/appimage-runtime`.
+
+Replacing a bundled library: extract the AppImage with `--appimage-extract`, replace the library in
+`squashfs-root/usr/lib` and start `squashfs-root/AppRun`. Contrail adds no restriction on modifying the
+libraries or on the reverse engineering needed to debug such modifications.
+
+## Corresponding sources
+
+Each release offers, next to the packages:
+
+- `Contrail-<version>-sources.tar.gz`: Contrail's own sources at the release commit (with
+  `SOURCE-REVISION.json`, a checksum manifest of the files);
+- `Contrail-<version>-corresponding-sources.tar` (in numbered parts, see `SOURCES.md`): the Telegram Desktop
+  source tree at the pinned tag with all submodules, the source archives of the libraries built by
+  `build-deps.sh` (including the vendored Rust crates and the Cargo lockfile), the exact Debian source
+  packages of everything the AppImage carries and of the Debian libraries compiled into the programs (verified
+  against the signed APT indexes and each `.dsc`), and the AppImage runtime sources.
+
+To build the packages yourself, follow "Building" in `README.md`: `tools/build-packages.sh` needs podman (or
+docker) and your own Telegram API credentials (`api_id`/`api_hash` from <https://my.telegram.org>). The build
+containers install packages from mutable repositories, so byte-for-byte identical results are not claimed;
+`build-environment-*.txt` in each release lists the exact package versions the released builds used.

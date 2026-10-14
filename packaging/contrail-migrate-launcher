@@ -1,0 +1,48 @@
+#!/bin/sh
+# Run as the desktop user (without sudo) after installing the Contrail package on a phone that had the
+# development install over SSH (update-contrail.sh). That install left a user launcher with the same
+# application ID, which hides the packaged one. This moves it into a backup; nothing else is touched:
+# the account, the chats and the cache (~/.local/share/contrail-data) and the old program files stay.
+# Package maintainer scripts must not modify files in users' home directories, hence a separate command.
+set -eu
+
+APP_ID=io.github.x_vlad_x.Contrail
+PREFIX="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+SYSTEM_ENTRY="$PREFIX/share/applications/$APP_ID.desktop"
+LOCAL_ENTRY="${XDG_DATA_HOME:-$HOME/.local/share}/applications/$APP_ID.desktop"
+LEGACY_DIR="$HOME/.local/share/contrail"
+
+if [ -n "${SUDO_USER:-}" ] || [ -n "${PKEXEC_UID:-}" ]; then
+  echo "Run this command as your own user, without sudo." >&2
+  exit 1
+fi
+if [ ! -f "$SYSTEM_ENTRY" ] || [ ! -x "$PREFIX/bin/contrail" ]; then
+  echo "The Contrail package must be installed before migrating its launcher." >&2
+  exit 1
+fi
+if [ ! -e "$LOCAL_ENTRY" ] && [ ! -L "$LOCAL_ENTRY" ]; then
+  echo "The packaged launcher is already in use. There is no old launcher to migrate."
+  exit 0
+fi
+# Only the launcher update-contrail.sh generated is recognized; anything else is the user's own.
+if [ -L "$LOCAL_ENTRY" ] || [ ! -f "$LOCAL_ENTRY" ] ||
+   ! grep -Fqx "Exec=$LEGACY_DIR/contrail -- %u" "$LOCAL_ENTRY" ||
+   ! grep -Fqx "Icon=$LEGACY_DIR/$APP_ID.svg" "$LOCAL_ENTRY" ||
+   grep -Eq '^(Hidden|NoDisplay|OnlyShowIn|NotShowIn|TryExec|DBusActivatable)=' "$LOCAL_ENTRY"; then
+  echo "The local launcher has custom settings, so it was left unchanged: $LOCAL_ENTRY" >&2
+  echo "Remove or edit it yourself to use the packaged Contrail." >&2
+  exit 1
+fi
+
+BACKUP_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/contrail/launcher-backups"
+mkdir -p "$BACKUP_ROOT"
+BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/migration.XXXXXX")"
+mv -- "$LOCAL_ENTRY" "$BACKUP_DIR/$APP_ID.desktop"
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$(dirname "$LOCAL_ENTRY")" ||
+    echo "Could not refresh the local desktop database; the launcher was migrated anyway." >&2
+fi
+printf 'Contrail now starts from the package: %s\nThe old launcher was saved in: %s\n' "$SYSTEM_ENTRY" "$BACKUP_DIR"
+if [ -d "$LEGACY_DIR" ]; then
+  printf 'The old program files are still in %s; the package does not need them.\n' "$LEGACY_DIR"
+fi

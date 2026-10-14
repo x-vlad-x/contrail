@@ -182,12 +182,17 @@ echo "Done: $DIST ($(du -sh "$DIST" | cut -f1))"
 [[ $BUILD_ONLY -eq 1 ]] && exit 0
 
 # --- install -----------------------------------------------------------------
+if rsh "test -x /usr/bin/contrail" 2>/dev/null; then
+  echo "Note: the Contrail package is installed on the phone; this development install's launcher will hide it."
+  echo "      To go back to the package later: contrail-migrate-launcher (on the phone, without sudo)."
+fi
 log "Closing Contrail on the phone"
 rsh "pkill -f '[b]in/contrail' ; true"
 
 install_desktop_entry() {
   rsh "set -e; mkdir -p .local/share/applications
-       sed \"s|@HOME@|\$HOME|g\" $REMOTE_DIR/$APP_ID.desktop > .local/share/applications/$APP_ID.desktop
+       sed -e \"s|^Exec=contrail |Exec=\$HOME/$REMOTE_DIR/contrail |\" -e \"s|^Icon=.*|Icon=\$HOME/$REMOTE_DIR/$APP_ID.svg|\" \\
+         $REMOTE_DIR/$APP_ID.desktop > .local/share/applications/$APP_ID.desktop
        update-desktop-database .local/share/applications 2>/dev/null || true"
 }
 

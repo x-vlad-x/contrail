@@ -1,24 +1,42 @@
 #!/bin/sh
-# Contrail launcher.
-APPDIR="$(dirname "$(readlink -f "$0")")"
-DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+# Contrail launcher. Works in three layouts:
+#   PREFIX/bin/contrail, PREFIX/libexec/contrail/contrail   packages (/usr) and the AppImage (AppDir/usr)
+#   DIR/contrail, DIR/bin/contrail, DIR/lib, DIR/plugins     the development install over SSH (update-contrail.sh)
+HERE="$(dirname "$(readlink -f "$0")")"
+if [ -x "$HERE/bin/contrail" ]; then
+  PROGRAM="$HERE/bin/contrail"
+  RESOURCES="$HERE"
+  INFO="$HERE/VERSION"
+  # The development install carries the libraries and the Qt plugins the phone doesn't have.
+  export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export QT_PLUGIN_PATH="$HERE/plugins"
+else
+  PREFIX="$(dirname "$HERE")"
+  PROGRAM="$PREFIX/libexec/contrail/contrail"
+  RESOURCES="$PREFIX/share/contrail"
+  INFO="$RESOURCES/version"
+fi
 
-export LD_LIBRARY_PATH="$APPDIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+case "${1:-}" in
+  --version)
+    if [ -r "$INFO" ]; then cat "$INFO"; else echo "Contrail (unknown version)"; fi
+    exit 0 ;;
+  --check-libs)
+    ! ldd -r "$PROGRAM" 2>&1 | grep -E "not found|undefined symbol"
+    exit $? ;;
+esac
+
 # Telegram Desktop's core runs Qt, but its window is never shown: the interface is GTK.
 export QT_QPA_PLATFORM=offscreen
-export QT_PLUGIN_PATH="$APPDIR/plugins"
-export CONTRAIL_DIR="$APPDIR"
+# The interface's own icons.
+export CONTRAIL_DIR="$RESOURCES"
 # The core's application ID (D-Bus name, notifications) is Contrail's, not Telegram Desktop's.
 export CONTRAIL_APP_ID=io.github.x_vlad_x.Contrail
 
-if [ "$1" = "--check-libs" ]; then
-  ! ldd -r "$APPDIR/bin/contrail" 2>&1 | grep -E "not found|undefined symbol"
-  exit $?
-fi
-
-# Separate from the official Telegram Desktop (~/.local/share/TelegramDesktop).
-mkdir -p "$DATA_HOME/contrail-data/tdata"
+# The account and the cache, separate from the official Telegram Desktop (~/.local/share/TelegramDesktop).
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/contrail-data"
+mkdir -p "$DATA/tdata"
 # The core would register itself as the tg:// handler bypassing this launcher; the desktop entry does it.
-OPTIONS="$DATA_HOME/contrail-data/tdata/experimental_options.json"
+OPTIONS="$DATA/tdata/experimental_options.json"
 [ -f "$OPTIONS" ] || echo '{"skip-url-scheme-register": true}' > "$OPTIONS"
-exec "$APPDIR/bin/contrail" -workdir "$DATA_HOME/contrail-data/" "$@"
+exec "$PROGRAM" -workdir "$DATA/" "$@"

@@ -2,10 +2,13 @@
 /tdesktop/
 # Libraries built from source for the cross build (tg_owt, tde2e, tdesktop_rust)
 /deps-aarch64/
+/deps-x86_64/
 # Build output
 /build-aarch64/
+/build-x86_64/
 /out/
 # Your Telegram API credentials: never commit them
 /api-credentials.env
 # g-ir-scanner cache from the build container
 /.cache/
+__pycache__/
