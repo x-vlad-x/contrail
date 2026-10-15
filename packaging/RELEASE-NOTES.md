@@ -32,9 +32,15 @@ move from the earlier SSH install (`contrail-migrate-launcher`, which keeps your
 - One-to-one audio and video calls; notifications; `tg://` and `t.me` links; every Telegram language.
 - Sponsored messages in channels, as the Telegram API terms require of clients that show channels.
 - An adaptive layout: one column on a phone, the chat list and the chat side by side on a wider window, with a
-  normal draggable header on desktops.
+  normal header and window buttons on desktops.
 - Packages: system integration (app list entry, icon at all standard sizes, `contrail --version`), its own
   version independent of the core, license notices and the complete corresponding sources.
+
+## Known limitations
+
+- The AppImage is large (about 190 MB): it carries Debian's full FFmpeg with all its codec libraries.
+- Emoji in messages need a color emoji font on the system (the Debian package recommends Noto Color Emoji).
+- No RPM package yet; on RPM-based systems use the AppImage.
 
 ## Not there yet
 
@@ -44,7 +50,12 @@ have them either.
 
 ## Tested
 
-<!-- Fill in from the actual checks of these exact files before publishing. -->
+<!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
+- These files were installed and started in clean containers with an offline, made-up demo account
+  (`tools/smoke-test.sh`): the Debian package with `apt` in a FuriOS 14 (Debian testing) ARM64 userland, the
+  AppImage on Ubuntu 24.04, Debian 13, Fedora 42 and Arch Linux (X11).
+- Not checked yet with these files: the phone itself, signing in and chatting with a real account, calls,
+  Wayland desktops.
 
 ## Sources and licenses
 

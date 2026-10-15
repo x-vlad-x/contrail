@@ -8,7 +8,6 @@ Commands that need the build environment (cmake --install, strip, dpkg-shlibdeps
 the build container, so the result doesn't depend on the host.
 """
 import argparse
-import email.utils
 import gzip
 import hashlib
 import json
@@ -18,6 +17,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -250,7 +250,7 @@ def build_deb(args, workspace, stage, version, info):
     package_version = deb_version(version)
     doc = stage / "usr/share/doc/contrail"
     write_copyright(doc)
-    date = email.utils.formatdate(info["source_date"], usegmt=True)
+    date = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(info["source_date"]))
     changelog = (f"contrail ({package_version}) unstable; urgency=medium\n\n"
                  f"  * Preview package. See {HOMEPAGE}/releases.\n\n -- {MAINTAINER}  {date}\n")
     with gzip.GzipFile(doc / "changelog.Debian.gz", "wb", mtime=0) as stream:
