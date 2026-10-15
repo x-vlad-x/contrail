@@ -55,8 +55,8 @@ If your system has no FUSE, run it with `--appimage-extract-and-run`. The AppIma
 libadwaita 1.7 and Qt 6.8 itself and needs a Linux system with glibc 2.39 or newer and the usual graphics,
 font and sound libraries. It was started on Ubuntu 24.04, Debian 13, Fedora 42 and Arch Linux (on X11; GTK runs
 on Wayland too, but that wasn't checked for this preview). For emoji in messages, install a color emoji font
-(for example Noto Color Emoji) if your system has none. The AppImage keeps your account in `~/.local/share/contrail-data`, like the phone package,
-separate from the official Telegram Desktop.
+(for example Noto Color Emoji) if your system has none. The AppImage keeps your account in
+`~/.local/share/contrail-data`, like the phone package, separate from the official Telegram Desktop.
 
 ## Checking the download
 
