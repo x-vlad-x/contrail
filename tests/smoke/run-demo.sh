@@ -12,6 +12,7 @@ OUT=$1; shift
 mkdir -p "$OUT"
 export HOME="$(mktemp -d)" LANG=C.UTF-8 LC_ALL=C.UTF-8 LANGUAGE=en GTK_A11Y=none NO_AT_BRIDGE=1
 export XDG_RUNTIME_DIR="$HOME/runtime"
+[ -z "${SMOKE_DARK:-}" ] || export ADW_DEBUG_COLOR_SCHEME=prefer-dark
 mkdir -m 700 "$XDG_RUNTIME_DIR"
 
 "$@" --version | tee "$OUT/version.txt"

@@ -6,7 +6,7 @@
 #                                  qemu-user binfmt on the host for arm64 containers) and run it
 #   tools/smoke-test.sh appimage   run the AppImage on Debian 13, Ubuntu 24.04, Fedora 42 and Arch Linux
 #
-# Screenshots and logs go to out/smoke/<target>/.
+# Screenshots and logs go to out/smoke/<target>/. SMOKE_DARK=1 runs the program with the dark style.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -33,7 +33,7 @@ image() {
 }
 # run <image> <script>: no network, the sources read-only, results in out/smoke.
 run() {
-  "$ENGINE" run --rm --network=none --platform "${PLATFORM:-linux/amd64}" -v "$ROOT:/src:ro" \
+  "$ENGINE" run --rm --network=none --platform "${PLATFORM:-linux/amd64}" -e SMOKE_DARK -v "$ROOT:/src:ro" \
     -v "$ROOT/out/smoke:/out" -w /src "$1" sh -c "$2"
 }
 
