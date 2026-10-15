@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Publishes a release kit made by tools/prepare_release.py on GitHub: a draft prerelease for the existing tag,
-# every file listed in SHA256SUMS (and SHA256SUMS itself) uploaded and checked against GitHub's own digests,
-# then published. Needs gh (logged in with write access to the repository), python3 and sha256sum.
+# Publishes a release kit made by tools/prepare_release.py on GitHub: the tag (made on the source commit the
+# kit records, if it doesn't exist yet), a draft prerelease, every file listed in SHA256SUMS (and SHA256SUMS
+# itself) uploaded and checked against GitHub's own digests, then published. Needs gh (logged in with write
+# access to the repository), python3, sha256sum and curl.
 #
 #   tools/publish-release.sh DIRECTORY [TAG]       DIRECTORY holds the release files; TAG defaults to v<version>
 #
 # Safe to run again: it continues with the draft it made (by release id), replaces nothing that is already
-# published, and refuses a kit marked NOT-FOR-RELEASE.
+# published, and refuses a tag on another commit and a kit marked NOT-FOR-RELEASE.
 set -euo pipefail
 REPO="${CONTRAIL_REPO:-x-vlad-x/contrail}"
 DIR="$(cd "${1:?Usage: $0 DIRECTORY [TAG]}" && pwd)"
 cd "$DIR"
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
-for tool in gh python3 sha256sum; do command -v "$tool" >/dev/null || die "$tool is required"; done
+for tool in gh python3 sha256sum curl; do command -v "$tool" >/dev/null || die "$tool is required"; done
 [[ ! -e NOT-FOR-RELEASE.txt ]] || die "this kit is marked NOT-FOR-RELEASE"
 [[ -f SHA256SUMS && -f RELEASE-NOTES.md ]] || die "not a release kit: $DIR"
 
@@ -24,7 +25,23 @@ extra=$(comm -13 <(printf '%s\n' "${FILES[@]}" | sort) <(ls -1 | sort) || true)
 [[ -z $extra ]] || die "files that SHA256SUMS doesn't list: $extra"
 VERSION=$(sed -n 's/^# Contrail \(.*\)$/\1/p' RELEASE-NOTES.md | head -1)
 TAG="${2:-v$VERSION}"
-gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1 || die "tag $TAG doesn't exist on GitHub"
+
+# The commit the packages were built from, as recorded in the source archive.
+COMMIT=$(python3 -c '
+import json, sys, tarfile
+with tarfile.open(sys.argv[1]) as archive:
+    name = next(n for n in archive.getnames() if n.endswith("/SOURCE-REVISION.json"))
+    print(json.load(archive.extractfile(name))["commit"])
+' "Contrail-$VERSION-sources.tar.gz")
+if tagged=$(gh api "repos/$REPO/commits/$TAG" --jq .sha 2>/dev/null); then
+  [[ $tagged == "$COMMIT" ]] || die "tag $TAG points to $tagged, the packages were built from $COMMIT"
+else
+  echo "==> Tag $TAG on $COMMIT"
+  gh api "repos/$REPO/commits/$COMMIT" >/dev/null || die "commit $COMMIT is not on GitHub"
+  object=$(gh api -X POST "repos/$REPO/git/tags" -f tag="$TAG" -f object="$COMMIT" -f type=commit \
+             -f message="Contrail $VERSION" --jq .sha)
+  gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$object" >/dev/null
+fi
 
 echo "==> Draft release for $TAG"
 # Notes without the internal HTML comments.
