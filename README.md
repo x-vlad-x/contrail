@@ -114,7 +114,8 @@ tools/build-packages.sh desktop    # out/packages/Contrail-<version>-x86_64.AppI
 This needs git, patch, python3 and podman (or docker); everything else happens in build containers. The
 Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes.
 Nothing is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages,
-corresponding sources, checksums) in `out/release/`; see [packaging/LICENSES.md](packaging/LICENSES.md).
+corresponding sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LICENSES.md), and
+`tools/publish-release.sh` publishes them as a GitHub release for an existing tag.
 
 ### Development install over SSH
 
