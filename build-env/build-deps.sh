@@ -73,10 +73,12 @@ EOF
 }
 
 done_marker() { echo "$DEPS/.$1-$2"; }
+# built <name> <id> <source archive>: built at this commit, with its sources kept (older builds kept none).
+built() { [[ -e $(done_marker "$1" "$2") && -e $SOURCES/$3.tar.xz ]]; }
 
 # --- rnnoise -------------------------------------------------------------------
 RNNOISE=$(tag_of xiph/rnnoise.git)
-if [[ ! -e $(done_marker rnnoise "$RNNOISE") ]]; then
+if ! built rnnoise "$RNNOISE" rnnoise; then
   echo "==> rnnoise $RNNOISE"
   fetch "$DEPS/rnnoise" https://github.com/xiph/rnnoise.git "refs/tags/$RNNOISE"
   # autogen.sh downloads the neural network model with wget: curl does the same here. The model is part of
@@ -100,7 +102,7 @@ fi
 # --- ada (Debian 13 doesn't package it) -----------------------------------------
 if [[ $CROSS -eq 0 ]] && ! pkg-config --exists ada 2>/dev/null && [[ ! -e /usr/lib/$TRIPLE/cmake/ada ]]; then
   ADA=$(tag_of ada-url/ada.git)
-  if [[ ! -e $(done_marker ada "$ADA") ]]; then
+  if ! built ada "$ADA" ada; then
     echo "==> ada $ADA"
     fetch "$DEPS/ada" https://github.com/ada-url/ada.git "refs/tags/$ADA"
     keep_source ada "$DEPS/ada" https://github.com/ada-url/ada.git "$ADA"
@@ -116,7 +118,7 @@ fi
 
 # --- tg_owt ------------------------------------------------------------------
 TG_OWT=$(commit_of desktop-app/tg_owt.git)
-if [[ ! -e $(done_marker tg_owt "$TG_OWT") ]]; then
+if ! built tg_owt "$TG_OWT" tg_owt; then
   echo "==> tg_owt $TG_OWT"
   fetch "$DEPS/tg_owt" https://github.com/desktop-app/tg_owt.git "$TG_OWT"
   git -C "$DEPS/tg_owt" submodule -q update --init --recursive --depth=1
@@ -131,7 +133,7 @@ fi
 
 # --- tde2e -------------------------------------------------------------------
 TDE2E=$(commit_of tdlib/td.git)
-if [[ ! -e $(done_marker tde2e "$TDE2E") ]]; then
+if ! built tde2e "$TDE2E" td; then
   echo "==> tde2e $TDE2E"
   fetch "$DEPS/td" https://github.com/tdlib/td.git "$TDE2E"
   keep_source td "$DEPS/td" https://github.com/tdlib/td.git "$TDE2E"
@@ -153,7 +155,7 @@ PATCHES=$(commit_of desktop-app/patches.git)
 TLOTTIE=$(commit_of dkaraush/tlottie.git)
 WALLET=$(commit_of i582/wallet-engine.git)
 RUST_ID="$TLOTTIE-$WALLET-$PATCHES"
-if [[ ! -e $(done_marker rust "$RUST_ID") ]]; then
+if ! built rust "$RUST_ID" tdesktop_rust; then
   echo "==> tdesktop_rust (tlottie $TLOTTIE, wallet-engine $WALLET)"
   R=$DEPS/rust
   rm -rf "$R"; mkdir -p "$R"
