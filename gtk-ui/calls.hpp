@@ -2,6 +2,7 @@
 
 #include "app.hpp"
 #include "audio_route.hpp"
+#include "proximity.hpp"
 #include "video_frame.hpp"
 #include "base/timer.h"
 #include "base/weak_ptr.h"
@@ -32,7 +33,9 @@ private:
   void switchCamera();
   void choosePhoneCamera();
   void refreshDevices();
-  void updateAudioRoute(bool available, bool speaker, const QString &device);
+  void updateAudioRoute();
+  void chooseAudioOutput();
+  void updateProximity();
   void hangup();
 
   const not_null<MainWindow *> _parent;
@@ -51,14 +54,15 @@ private:
   GtkWidget *_switchCamera = nullptr;
   GtkWidget *_speaker = nullptr;
   GtkWidget *_localFrame = nullptr;
+  GtkWidget *_shield = nullptr;
   base::weak_ptr<Calls::Call> _call;
   bool _ending = false;
   bool _remoteHasFrame = false;
   QSize _localSourceSize;
   QSize _remoteSourceSize;
-  QString _savedPlaybackDevice;
-  QString _routedPlaybackDevice;
+  QString _playbackOutput;
   AudioRoute _audio;
+  Proximity _proximity;
   VideoFrameConverter _incomingConverter;
   VideoFrameConverter _outgoingConverter;
   base::Timer _timer;

@@ -51,18 +51,29 @@ static QString hardwarePort() {
   return {};
 }
 
+using Kind = Contrail::AudioRoute::Kind;
+
+static const Contrail::AudioRoute::Output *output(const Contrail::AudioRoute &route, Kind kind) {
+  for (const auto &output : route.outputs()) if (output.kind == kind) return &output;
+  return nullptr;
+}
+
+static bool on(const Contrail::AudioRoute &route, Kind kind) {
+  return !route.busy() && route.current() && route.current()->kind == kind;
+}
+
 int main(int argc, char **argv) {
   QCoreApplication app(argc, argv);
   if (argc > 1) {
     const auto original = hardwarePort();
     assert(!original.isEmpty());
-    auto available = false;
-    Contrail::AudioRoute route([&](bool ready, bool, const QString &) { available = ready; });
-    route.begin();
-    waitFor([&] { return available && !route.busy(); });
-    route.toggle();
-    waitFor([&] { return available && !route.busy(); });
-    assert(hardwarePort() != original);
+    Contrail::AudioRoute route([] {});
+    route.begin(false);
+    waitFor([&] { return !route.busy() && route.current(); });
+    const auto other = output(route, route.current()->kind == Kind::Speaker ? Kind::Earpiece : Kind::Speaker);
+    assert(other);
+    route.select(other->id);
+    waitFor([&] { return !route.busy() && hardwarePort() == other->port; });
     route.end();
     waitFor([&] { return !route.busy(); });
     assert(hardwarePort() == original);
@@ -71,21 +82,36 @@ int main(int argc, char **argv) {
   }
   QTemporaryDir directory;
   assert(directory.isValid());
-  const auto state = directory.path() + QStringLiteral("/port");
-  const auto pactl = directory.path() + QStringLiteral("/pactl");
-  write(state, "output-earpiece");
+  const auto path = [&](const char *name) { return directory.path() + u'/' + QLatin1String(name); };
+  const auto state = path("port");
+  const auto pactl = path("pactl");
+  write(state, "output-speaker");
   write(pactl, R"py(#!/usr/bin/python3
 import json, os, pathlib, sys, time
 state = pathlib.Path(os.environ['CONTRAIL_TEST_AUDIO_STATE'])
-if sys.argv[1:] == ['--format=json', 'list', 'sinks']:
-    print(json.dumps([{'name': 'phone-output', 'description': 'Phone audio',
-        'active_port': state.read_text(), 'ports': [
+other = lambda name: state.with_name(name)
+if sys.argv[1:] == ['--format=json', 'info']:
+    default = other('default').read_text() if other('default').exists() else 'phone-output'
+    print(json.dumps({'default_sink_name': default}))
+elif sys.argv[1:] == ['--format=json', 'list', 'sinks']:
+    wired = 'available' if other('wired').exists() else 'not available'
+    sinks = [{'name': 'phone-output', 'description': 'Phone audio', 'driver': 'module-droid-card.c',
+        'active_port': state.read_text(), 'properties': {}, 'ports': [
+            {'name': 'output-parking', 'availability': 'available'},
             {'name': 'output-speaker', 'availability': 'available'},
             {'name': 'output-earpiece', 'availability': 'available'},
-            {'name': 'output-wired_headset', 'availability': 'available'}]}]))
+            {'name': 'output-wired_headset', 'availability': wired}]},
+        {'name': 'sink.fake.sco', 'description': 'Null', 'driver': 'module-null-sink.c',
+         'active_port': None, 'properties': {}, 'ports': []}]
+    if other('bluetooth').exists():
+        sinks.append({'name': 'bluez_sink.1C_6E.a2dp_sink', 'description': 'Phone audio',
+            'driver': 'module-bluez5-device.c', 'active_port': 'headphone-output',
+            'properties': {'device.bus': 'bluetooth'},
+            'ports': [{'name': 'headphone-output', 'availability': 'available'}]})
+    print(json.dumps(sinks))
 elif len(sys.argv) == 4 and sys.argv[1:3] == ['set-sink-port', 'phone-output']:
     time.sleep(0.1)
-    if state.with_name('fail').exists(): sys.exit(1)
+    if other('fail').exists(): sys.exit(1)
     state.write_text(sys.argv[3])
 else: sys.exit(1)
 )py");
@@ -93,44 +119,83 @@ else: sys.exit(1)
   qputenv("PATH", directory.path().toUtf8() + ':' + qgetenv("PATH"));
   qputenv("CONTRAIL_TEST_AUDIO_STATE", state.toUtf8());
 
-  auto available = false;
-  auto speaker = false;
-  Contrail::AudioRoute route([&](bool ready, bool active, const QString &) { available = ready; speaker = active; });
-  const auto ready = [&] { return available && !route.busy(); };
-  route.begin();
-  waitFor(ready);
-  assert(!speaker);
-  route.toggle();
-  waitFor([&] { return ready() && speaker; });
-  assert(read(state) == "output-speaker");
-  route.toggle();
-  waitFor([&] { return ready() && !speaker; });
+  Contrail::AudioRoute route([] {});
+  // An audio call starts on the earpiece; the parking port and the placeholder sink are no outputs.
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Earpiece); });
   assert(read(state) == "output-earpiece");
+  assert(route.outputs().size() == 2);
+  assert(route.current()->device == QStringLiteral("Phone audio"));
+  route.select(output(route, Kind::Speaker)->id);
+  waitFor([&] { return on(route, Kind::Speaker); });
+  assert(read(state) == "output-speaker");
+  route.select(output(route, Kind::Earpiece)->id);
+  waitFor([&] { return on(route, Kind::Earpiece); });
+  route.end();
+  waitFor([&] { return !route.busy(); });
+  assert(read(state) == "output-speaker");
 
   // Hanging up while the route change is still in flight must restore the initial port.
-  route.toggle();
+  route.begin(false);
+  waitFor([&] { return !route.busy() && route.current(); });
+  route.select(output(route, Kind::Speaker)->id);
   route.end();
-  waitFor([&] { return !route.busy() && read(state) == "output-earpiece"; });
+  waitFor([&] { return !route.busy() && read(state) == "output-speaker"; });
+  route.begin(false);
+  route.end();
+  waitFor([&] { return !route.busy(); });
+  assert(read(state) == "output-speaker");
 
   // Ending a call must respect a later route chosen by another app or system settings.
-  route.begin();
-  waitFor(ready);
-  route.toggle();
-  waitFor([&] { return ready() && speaker; });
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Earpiece); });
   write(state, "output-wired_headset");
   route.end();
   waitFor([&] { return !route.busy(); });
   assert(read(state) == "output-wired_headset");
 
+  // A failed switch leaves the route where the sound is.
   write(state, "output-earpiece");
-  route.begin();
-  waitFor(ready);
-  write(directory.path() + QStringLiteral("/fail"), "1");
-  route.toggle();
-  waitFor([&] { return !route.busy(); });
-  assert(!speaker);
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Earpiece); });
+  write(path("fail"), "1");
+  route.select(output(route, Kind::Speaker)->id);
+  waitFor([&] { return on(route, Kind::Earpiece); });
   assert(read(state) == "output-earpiece");
-  assert(QFile::remove(directory.path() + QStringLiteral("/fail")));
+  assert(QFile::remove(path("fail")));
   route.end();
-  std::puts("Audio regressions: speaker/earpiece, restore, hangup during switching, external route and failed switching passed");
+  waitFor([&] { return !route.busy(); });
+
+  // A video call starts on the loudspeaker, plugged headphones win over both.
+  write(state, "output-speaker");
+  route.begin(true);
+  waitFor([&] { return on(route, Kind::Speaker); });
+  route.end();
+  waitFor([&] { return !route.busy(); });
+  write(path("wired"), "1");
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Headphones); });
+  assert(read(state) == "output-wired_headset");
+  route.end();
+  waitFor([&] { return !route.busy(); });
+  assert(read(state) == "output-speaker");
+  assert(QFile::remove(path("wired")));
+
+  // Bluetooth headphones as the default output: the call goes there and the phone's port is untouched.
+  write(path("bluetooth"), "1");
+  write(path("default"), "bluez_sink.1C_6E.a2dp_sink");
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Bluetooth); });
+  assert(route.outputs().size() == 3);
+  assert(route.current()->device == QStringLiteral("Phone audio #2"));
+  assert(read(state) == "output-speaker");
+  route.select(output(route, Kind::Earpiece)->id);
+  waitFor([&] { return on(route, Kind::Earpiece); });
+  route.select(output(route, Kind::Bluetooth)->id);
+  waitFor([&] { return on(route, Kind::Bluetooth); });
+  route.end();
+  waitFor([&] { return !route.busy(); });
+  assert(read(state) == "output-speaker");
+  std::puts("Audio regressions: earpiece/speaker, restore, hangup during switching, external route, failed switching, "
+            "video, headphones and Bluetooth passed");
 }

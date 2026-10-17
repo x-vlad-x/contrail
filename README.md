@@ -51,8 +51,10 @@ or dark style and accent color.
 - **Voice messages** as in the phone apps: hold the microphone to record and release to send, slide
   left to cancel or up to keep recording hands-free.
 - **Calls**: one-to-one audio and video calls — accept or decline, mute, front/back camera,
-  speaker/earpiece (FuriOS), encryption emoji, back to an ongoing call from any chat. The remote video
-  fills the window with your camera in a corner.
+  encryption emoji, back to an ongoing call from any chat. The remote video fills the window with your
+  camera in a corner. As in the phone apps, a call is heard where the sound already goes (Bluetooth or
+  wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
+  the screen goes dark while the phone is held to the ear.
 - **Notifications** through the core's native Linux notifications; tapping one opens the chat.
 - `tg://` and `t.me` links, chat info, contacts, Saved Messages, settings.
 - **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
@@ -91,8 +93,10 @@ SSH install to the package (`contrail-migrate-launcher`).
 
 Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). The Debian package uses the
 phone's own GTK, Qt, FFmpeg and other libraries; other aarch64 phones and tablets need GTK 4.12+ and libadwaita
-1.6+. The speaker/earpiece switch in calls needs the two ports of FuriOS's PulseAudio Droid sink and is
-disabled elsewhere.
+1.6+. Choosing where a call is heard needs `pactl` (PulseAudio, or PipeWire's PulseAudio server); the
+earpiece and the loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs
+a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service) and a shell with Mutter's
+DisplayConfig interface, as Phosh has.
 
 ## Building
 
