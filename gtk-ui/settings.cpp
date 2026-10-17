@@ -75,6 +75,20 @@ SettingsView::SettingsView(not_null<Main::Session *> session, not_null<MainWindo
       }));
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(prefs), ADW_PREFERENCES_GROUP(notify));
 
+  // When the window is closed: quit, or keep receiving messages and calls (with a tray icon on a desktop).
+  using CloseBehavior = Core::Settings::CloseBehavior;
+  auto *closing = adw_preferences_group_new();
+  adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(closing), U8(tr::lng_settings_window_close(tr::now)).c_str());
+  adw_preferences_group_add(
+      ADW_PREFERENCES_GROUP(closing),
+      SwitchRow(tr::lng_settings_run_in_background(tr::now), settings.closeBehavior() == CloseBehavior::RunInBackground,
+                [this](bool value) {
+                  Core::App().settings().setCloseBehavior(value ? CloseBehavior::RunInBackground : CloseBehavior::Quit);
+                  Core::App().saveSettingsDelayed();
+                  _window->updateBackgroundMode();
+                }));
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(prefs), ADW_PREFERENCES_GROUP(closing));
+
   // About and logging out.
   auto *other = adw_preferences_group_new();
   auto *about = adw_button_row_new();

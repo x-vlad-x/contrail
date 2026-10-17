@@ -22,6 +22,7 @@ class ChatList;
 class ChatView;
 class SettingsView;
 class CallView;
+class TrayIcon;
 
 class MainWindow final : public base::has_weak_ptr {
 public:
@@ -49,6 +50,8 @@ public:
   void sendBotCommand(const QString &command);
   void startCall(not_null<PeerData *> peer, bool video = false);
   void setCallStatus(const QString &text, bool active);
+  // Closing the window either quits or leaves the app running, with an icon in the notification area.
+  void updateBackgroundMode();
   [[nodiscard]] Main::Session *session() const { return _session; }
 
   // For the debug actions.
@@ -78,6 +81,7 @@ private:
   GtkWidget *_placeholder = nullptr;
   GtkWidget *_callBanner = nullptr;
   std::unique_ptr<CallView> _calls;
+  std::unique_ptr<TrayIcon> _tray;
 
   Main::Session *_session = nullptr;
   std::unique_ptr<LoginView> _login;

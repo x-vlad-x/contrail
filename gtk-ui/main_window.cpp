@@ -9,8 +9,10 @@
 #include "login.hpp"
 #include "scroll_helpers.hpp"
 #include "settings.hpp"
+#include "tray.hpp"
 
 #include "core/application.h"
+#include "core/core_settings.h"
 #include "data/data_folder.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
@@ -111,9 +113,14 @@ MainWindow::MainWindow() {
     }
   });
 
-  // Closing the window quits: the core saves everything and exits the process.
-  Connect<gboolean(GtkWindow *)>(_window, "close-request", [](GtkWindow *) -> gboolean {
-    Core::Quit();
+  // Closing the window quits, the core saves everything and exits the process; or, when the app runs
+  // in the background, only hides the window: messages, notifications and calls keep coming.
+  Connect<gboolean(GtkWindow *)>(_window, "close-request", [this](GtkWindow *) -> gboolean {
+    if (Core::App().settings().closeBehavior() == Core::Settings::CloseBehavior::RunInBackground) {
+      gtk_widget_set_visible(_window, FALSE);
+    } else {
+      Core::Quit();
+    }
     return TRUE;
   });
 
@@ -132,6 +139,31 @@ MainWindow::MainWindow() {
   }, _lifetime);
   followCoreWindow();
   _calls = std::make_unique<CallView>(this);
+  updateBackgroundMode();
+  Core::App().unreadBadgeChanges() | rpl::on_next([=] {
+    if (_tray) _tray->setUnread(Core::App().unreadBadgeMuted() ? 0 : Core::App().unreadBadge());
+  }, _lifetime);
+}
+
+void MainWindow::updateBackgroundMode() {
+  const auto background = Core::App().settings().closeBehavior() == Core::Settings::CloseBehavior::RunInBackground;
+  if (!background) {
+    _tray = nullptr;
+    // Nothing would bring a hidden window back.
+    if (!gtk_widget_get_visible(_window)) present();
+    return;
+  }
+  if (_tray) return;
+  // Not within the D-Bus call that asks for it: quitting destroys the icon.
+  _tray = std::make_unique<TrayIcon>(TrayIcon::Callbacks{
+      .toggle = [=] { crl::on_main(this, [=] {
+        if (isActive()) gtk_widget_set_visible(_window, FALSE);
+        else present();
+      }); },
+      .open = [=] { crl::on_main(this, [=] { present(); }); },
+      .quit = [=] { crl::on_main(this, [] { Core::Quit(); }); },
+  });
+  _tray->setUnread(Core::App().unreadBadgeMuted() ? 0 : Core::App().unreadBadge());
 }
 
 // Telegram Desktop opens chats in its own (hidden) window: from a notification, a t.me link, a mention.
@@ -161,6 +193,7 @@ void MainWindow::followCoreWindow() {
 MainWindow::~MainWindow() {
   _lifetime.destroy();
   _sessionLifetime.destroy();
+  _tray = nullptr;
   _calls = nullptr;
   clearSessionUi();
   g_object_unref(_placeholder);

@@ -56,6 +56,9 @@ or dark style and accent color.
   wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
   the screen goes dark while the phone is held to the ear.
 - **Notifications** through the core's native Linux notifications; tapping one opens the chat.
+- **Running in the background** (Settings): closing the window keeps messages, notifications and calls
+  coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
+  launcher does.
 - `tg://` and `t.me` links, chat info, contacts, Saved Messages, settings.
 - **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
   start the language follows the system.
