@@ -3,6 +3,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,10 +26,12 @@ class MetadataTest(unittest.TestCase):
         self.assertRegex(VERSION, r"^\d+\.\d+\.\d+(-(preview|rc)\d+)?$")
         self.assertEqual(package.deb_version("0.1.0-preview1"), "0.1.0~preview1-1")
         self.assertEqual(package.deb_version("0.1.0"), "0.1.0-1")
+        self.assertEqual(package.rpm_version("0.1.0-preview1"), "0.1.0~preview1")
         # "~" sorts before anything: a preview is older than the final release.
+        if not shutil.which("dpkg"):
+            self.skipTest("dpkg is not installed")
         result = subprocess.run(["dpkg", "--compare-versions", "0.1.0~preview1-1", "lt", "0.1.0-1"])
-        if result.returncode != 127:
-            self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0)
 
     def test_metainfo_names_this_release(self):
         root = ET.parse(ROOT / f"packaging/{APP_ID}.metainfo.xml").getroot()
@@ -47,15 +50,33 @@ class MetadataTest(unittest.TestCase):
         self.assertNotIn("Telegram", name)  # Telegram API Terms of Service, 2.3
 
     def test_documents_name_the_real_files(self):
-        deb = f"contrail_{package.deb_version(VERSION).replace('~', '-')}_arm64.deb"
-        appimage = f"Contrail-{VERSION}-x86_64.AppImage"
         guide = (ROOT / "packaging/INSTALL.md").read_text()
         notes = (ROOT / "packaging/RELEASE-NOTES.md").read_text()
+        for kind in package.FORMATS:
+            for arch in package.ARCHES:
+                name = package.package_file(kind, arch, VERSION)
+                # GitHub rewrites "~" in asset names: the package version's "~" stays inside the package only.
+                self.assertNotIn("~", name)
+                for text in (guide, notes):
+                    self.assertIn(name, text)
         for text in (guide, notes):
-            self.assertIn(deb, text)
-            self.assertIn(appimage, text)
-            # GitHub rewrites "~" in asset names: the Debian version's "~" stays inside the package only.
             self.assertNotIn("~preview", text)
+        self.assertIn(f"# Contrail {VERSION}\n", notes)
+
+    def test_package_names(self):
+        self.assertEqual(package.package_file("deb", "aarch64", "0.1.0"), "contrail_0.1.0-1_arm64.deb")
+        self.assertEqual(package.package_file("rpm", "x86_64", "0.1.0-rc1"), "contrail-0.1.0-rc1-1.x86_64.rpm")
+        self.assertEqual(package.package_file("appimage", "aarch64", "0.1.0"), "Contrail-0.1.0-aarch64.AppImage")
+        self.assertEqual(package.package_file("flatpak", "x86_64", "0.1.0"), "Contrail-0.1.0-x86_64.flatpak")
+
+    def test_host_libraries_are_the_base_system(self):
+        names = {line.split()[0] for line in (ROOT / "packaging/bundle-host-libraries.txt").read_text().splitlines()
+                 if line.strip() and not line.startswith("#")}
+        for name in ("libc.so.6", "libstdc++.so.6", "libEGL.so.1", "ld-linux-aarch64.so.1", "ld-linux-x86-64.so.2"):
+            self.assertIn(name, names)
+        # GTK, Qt and FFmpeg travel with the packages.
+        for name in ("libgtk-4.so.1", "libadwaita-1.so.0", "libQt6Core.so.6", "libglib-2.0.so.0"):
+            self.assertNotIn(name, names)
 
     def test_no_private_files_tracked(self):
         names = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.split()
@@ -64,7 +85,7 @@ class MetadataTest(unittest.TestCase):
         for name in names:
             self.assertNotIn(".local.", name)
             self.assertFalse(name.endswith(".env"), name)
-            self.assertFalse(name.startswith(("out/", "tdesktop/", "deps-aarch64/", "deps-x86_64/", "build-aarch64/", "build-x86_64/")), name)
+            self.assertFalse(name.startswith(("out/", "tdesktop/", "deps-", "build-aarch64", "build-x86_64")), name)
 
 
 class SourceClassificationTest(unittest.TestCase):
@@ -153,7 +174,8 @@ class AppImageToolsTest(unittest.TestCase):
         for name, tool in tools.items():
             self.assertRegex(tool["sha256"], r"^[0-9a-f]{64}$", name)
             self.assertTrue(tool["url"].startswith("https://"), name)
-        self.assertEqual(tools["runtime-x86_64"]["source_commit"], runtime["runtime_commit"])
+        for arch in package.ARCHES:
+            self.assertEqual(tools[f"runtime-{arch}"]["source_commit"], runtime["runtime_commit"])
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Builds Contrail's installable packages locally:
 #
-#   tools/build-packages.sh phone      ARM64 .deb for Linux phones (FuriOS / Debian testing)
-#   tools/build-packages.sh desktop    x86_64 AppImage for Linux desktops (glibc 2.39+)
+#   tools/build-packages.sh aarch64    ARM64 (Linux phones, ARM computers), cross-compiled
+#   tools/build-packages.sh x86_64     x86_64
 #   tools/build-packages.sh all        both (default)
 #
-# The packages land in out/packages/. Nothing is installed, copied to a phone, pushed or published.
+# Each architecture is built once, against Debian 13, and packaged as a DEB, an RPM, an AppImage and a Flatpak
+# (tools/package.py; CONTRAIL_FORMATS=deb,rpm,appimage,flatpak picks some). The packages land in out/packages/.
+# Nothing is installed, copied to a phone, pushed or published.
 # The Telegram Desktop core is pinned below; an existing tdesktop/ checkout is used only if it is at that
 # commit and either pristine or carrying exactly the patches in patches/ (it is never reset).
 #
@@ -19,7 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 TARGET="${1:-all}"
-case "$TARGET" in phone|desktop|all) ;; *) sed -n '2,16p' "$0" >&2; exit 2 ;; esac
+case "$TARGET" in aarch64|x86_64|all) ;; *) sed -n '2,18p' "$0" >&2; exit 2 ;; esac
 
 CORE_TAG=v7.3.1
 CORE_COMMIT=6fed91ffab9861771a75f29df65031b3c80b6941
@@ -96,10 +98,9 @@ unexpected=$(comm -23 <(core_changes | sort -u) <(patched_files))
 [[ -z "$unexpected" ]] || die "tdesktop/ has changes that aren't in patches/:"$'\n'"$unexpected"
 
 # --- build -------------------------------------------------------------------------
-# build_target <aarch64|x86_64> <image> <containerfile> <package format>
+# build_target <aarch64|x86_64> <image> <containerfile> <build directory>
 build_target() {
-  local arch=$1 image=$2 recipe=$3 format=$4
-  local build=build-$arch
+  local arch=$1 image=$2 recipe=$3 build=$4
   # The container is rebuilt only when its recipe changes: its packages come from repositories that move on.
   local recipe_sum label
   recipe_sum=$(sha256sum "$recipe" | cut -d' ' -f1)
@@ -116,16 +117,18 @@ build_target() {
   in_container "$image" none cmake -S tdesktop -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="/src/build-env/$arch-toolchain.cmake" -DCMAKE_INSTALL_PREFIX=/usr \
     -DDESKTOP_APP_USE_PACKAGED=ON -DDESKTOP_APP_DISABLE_AUTOUPDATE=ON -DDESKTOP_APP_DISABLE_CRASH_REPORTS=ON \
-    "${API_ARGS[@]}" -DCONTRAIL_GTK_DIR=/src/gtk-ui >/dev/null
+    "${API_ARGS[@]}" -DCONTRAIL_GTK_DIR=/src/gtk-ui -DCONTRAIL_BUNDLE_RPATH=ON >/dev/null
   in_container "$image" none ninja -C "$build" -j"$JOBS" Telegram
-  log "Package ($format, $arch)"
-  python3 tools/package.py "$format" --arch "$arch" --container "$image" --api "$API_KIND" \
-    --core-tag "$CORE_TAG" --core-commit "$CORE_COMMIT"
+  log "Packages ($arch)"
+  python3 tools/package.py --arch "$arch" --container "$image" --api "$API_KIND" \
+    --core-tag "$CORE_TAG" --core-commit "$CORE_COMMIT" ${CONTRAIL_FORMATS:+--formats "$CONTRAIL_FORMATS"}
 }
 
-if [[ $TARGET == phone || $TARGET == all ]]; then
-  build_target aarch64 localhost/tdesktop-cross build-env/Containerfile deb
+# The ARM64 build has directories of its own: build-aarch64 and deps-aarch64 belong to update-contrail.sh's build
+# against the phone's FuriOS libraries.
+if [[ $TARGET == aarch64 || $TARGET == all ]]; then
+  build_target aarch64 localhost/contrail-arm64 build-env/Containerfile.arm64 build-aarch64-trixie
 fi
-if [[ $TARGET == desktop || $TARGET == all ]]; then
-  build_target x86_64 localhost/contrail-desktop build-env/Containerfile.desktop appimage
+if [[ $TARGET == x86_64 || $TARGET == all ]]; then
+  build_target x86_64 localhost/contrail-desktop build-env/Containerfile.desktop build-x86_64
 fi

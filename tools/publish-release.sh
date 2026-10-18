@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Publishes a release kit made by tools/prepare_release.py on GitHub: the tag (made on the source commit the
-# kit records, if it doesn't exist yet), a draft prerelease, every file listed in SHA256SUMS (and SHA256SUMS
-# itself) uploaded and checked against GitHub's own digests, then published. Needs gh (logged in with write
+# kit records, if it doesn't exist yet), a draft release (a prerelease for versions such as 0.2.0-rc1), every
+# file listed in SHA256SUMS (and SHA256SUMS itself) uploaded and checked against GitHub's own digests, then
+# published. Needs gh (logged in with write
 # access to the repository), python3, sha256sum and curl.
 #
 #   tools/publish-release.sh DIRECTORY [TAG]       DIRECTORY holds the release files; TAG defaults to v<version>
@@ -25,6 +26,7 @@ extra=$(comm -13 <(printf '%s\n' "${FILES[@]}" | sort) <(ls -1 | sort) || true)
 [[ -z $extra ]] || die "files that SHA256SUMS doesn't list: $extra"
 VERSION=$(sed -n 's/^# Contrail \(.*\)$/\1/p' RELEASE-NOTES.md | head -1)
 TAG="${2:-v$VERSION}"
+if [[ $VERSION == *-* ]]; then PRERELEASE=true; else PRERELEASE=false; fi
 
 # The commit the packages were built from, as recorded in the source archive.
 COMMIT=$(python3 -c '
@@ -52,7 +54,7 @@ if [[ -n $ID ]]; then
   echo "    continuing with draft $ID"
 else
   ID=$(gh api -X POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="Contrail $VERSION" \
-         -f body="$NOTES" -F draft=true -F prerelease=true --jq .id)
+         -f body="$NOTES" -F draft=true -F prerelease=$PRERELEASE --jq .id)
   echo "    created draft $ID"
 fi
 
@@ -85,7 +87,7 @@ count=$(wc -l <<< "$uploaded")
 [[ $count -eq ${#FILES[@]} ]] || die "the draft has $count files, expected ${#FILES[@]}"
 
 echo "==> Publishing"
-gh api -X PATCH "repos/$REPO/releases/$ID" -F draft=false -F prerelease=true >/dev/null
+gh api -X PATCH "repos/$REPO/releases/$ID" -F draft=false -F prerelease=$PRERELEASE >/dev/null
 URL=$(gh api "repos/$REPO/releases/$ID" --jq .html_url)
 curl -fsSL "https://github.com/$REPO/releases/download/$TAG/SHA256SUMS" | cmp -s - SHA256SUMS \
   || die "the published SHA256SUMS doesn't download correctly"

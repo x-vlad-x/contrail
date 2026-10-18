@@ -4,7 +4,8 @@ Never tags, pushes or publishes anything.
 
   python3 tools/prepare_release.py [--validation]
 
-Before this: tools/build-packages.sh all (with your own API credentials), then the Debian sources:
+Before this: tools/build-packages.sh all (with your own API credentials), tools/smoke-test.sh, then the Debian
+sources:
   python3 tools/prepare_release.py --collect-sources
 --validation accepts packages built with the public test API credentials and writes the kit to
 out/release/<version>-validation/, marked as not for release: for checking the release tooling only.
@@ -19,16 +20,16 @@ import subprocess
 import tarfile
 
 from collect_debian_sources import verify_dsc, fetch_file
+from package import ARCHES, FORMATS
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ROOT / "out/packages"
 SOURCES = ROOT / "out/corresponding-sources"
-# FuriOS 14's mirror is Debian testing as of this snapshot; it serves no sources itself.
-FURIOS_SNAPSHOT = "20260615T140756Z"
 PART_SIZE = 64 * 1024 * 1024
+# Both architectures are built against Debian 13 (see tools/build-packages.sh).
 TARGETS = {
-    "arm64": dict(arch="aarch64", format="deb", container="localhost/tdesktop-cross", snapshot=FURIOS_SNAPSHOT),
-    "amd64": dict(arch="x86_64", format="appimage", container="localhost/contrail-desktop", snapshot=None),
+    "arm64": dict(arch="aarch64", container="localhost/contrail-arm64"),
+    "amd64": dict(arch="x86_64", container="localhost/contrail-desktop"),
 }
 
 
@@ -42,28 +43,27 @@ def git(*args, cwd=ROOT):
 
 
 def workspace(deb_arch):
-    target = TARGETS[deb_arch]
-    return PACKAGES / f"{target['format']}-{deb_arch}"
+    return PACKAGES / deb_arch
 
 
-def stage(deb_arch):
-    return workspace(deb_arch) / ("Contrail.AppDir" if deb_arch == "amd64" else "root")
+def records(deb_arch):
+    """The inventories of a build: what it compiled in, what the DEB/RPM/AppImage carry, what the Flatpak carries."""
+    space = workspace(deb_arch)
+    return {
+        "build-inputs": space / "stage/usr/share/doc/contrail/build-inputs.json",
+        "bundled-packages": space / "bundle/share/doc/contrail/bundled/bundled-packages.json",
+        "bundled-packages-flatpak": space / "flatpak/build/files/share/doc/contrail/bundled/bundled-packages.json",
+    }
 
 
 def inventories(deb_arch):
-    doc = stage(deb_arch) / "usr/share/doc/contrail"
-    found = [doc / "build-inputs.json"]
-    if (doc / "bundled/bundled-packages.json").exists():
-        found.append(doc / "bundled/bundled-packages.json")
-    return found
+    return list(records(deb_arch).values())
 
 
 def collect_sources():
     for deb_arch, target in TARGETS.items():
         command = ["python3", ROOT / "tools/collect_debian_sources.py", "--container", target["container"],
                    "--output", SOURCES / f"debian-{deb_arch}", *inventories(deb_arch)]
-        if target["snapshot"]:
-            command += ["--snapshot", target["snapshot"]]
         subprocess.run([str(c) for c in command], check=True)
 
 
@@ -78,6 +78,8 @@ def check_packages(version, commit, validation):
             problems.append(f"built from {info['project_commit'][:12]}{' with changes' if info['project_dirty'] else ''}")
         if info["api_credentials"] != "own" and not validation:
             problems.append("built with the public test API credentials")
+        if missing := set(FORMATS) - set(info.get("files", {})):
+            problems.append(f"no {', '.join(sorted(missing))} package")
         if problems:
             raise RuntimeError(f"Rebuild the {deb_arch} package from the clean release commit: {', '.join(problems)}")
         infos[deb_arch] = info
@@ -122,7 +124,7 @@ def core_archive(destination, core_commit):
 
 def project_archive(destination, version, commit, date):
     names = sorted(filter(None, git("ls-files", "-z").split("\0")))
-    if any(".local." in name or name.startswith(("out/", "tdesktop/", "deps-aarch64/", "deps-x86_64/", "build-aarch64/", "build-x86_64/")) or
+    if any(".local." in name or name.startswith(("out/", "tdesktop/", "deps-", "build-aarch64", "build-x86_64")) or
            name.endswith(".env") for name in names):
         raise RuntimeError("Private or generated files must not enter the source archive")
     manifest = {name: digest(ROOT / name) for name in names}
@@ -221,10 +223,10 @@ def main():
     if bundle.exists():
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True)
-    files = {}
+    files, debian_files = {}, {}
     files[core_archive(bundle, info["core_commit"])] = "telegram-desktop.tar.xz"
     for deb_arch, target in TARGETS.items():
-        deps = ROOT / f"deps-{target['arch']}/sources"
+        deps = ROOT / ARCHES[target["arch"]]["deps"] / "sources"
         manifest = json.loads((deps / "manifest.json").read_text())
         for name, record in manifest.items():
             path = deps / record["archive"]
@@ -245,18 +247,25 @@ def main():
         available = {(s["package"], s["version"]) for s in metadata["sources"]}
         if missing := wanted - available:
             raise RuntimeError(f"Debian sources missing for {deb_arch}: {sorted(missing)}")
+        # Source packages are the same for both architectures: each file goes in once.
         for source in metadata["sources"]:
             for record in source["files"]:
                 path = debian / record["name"]
                 if not path.is_file() or path.stat().st_size != record["size"] or digest(path) != record["sha256"]:
                     raise RuntimeError(f"Missing or changed Debian source file: {path}")
-                files[path] = f"debian-{deb_arch}/{record['name']}"
+                name = f"debian/{record['name']}"
+                if name in debian_files and debian_files[name] != record["sha256"]:
+                    raise RuntimeError(f"Different Debian source files with one name: {record['name']}")
+                debian_files[name] = record["sha256"]
+                if name not in files.values():
+                    files[path] = name
             verify_dsc(source, debian)
-        files[debian / "sources.json"] = f"debian-{deb_arch}/sources.json"
+        files[debian / "sources.json"] = f"debian/sources-{deb_arch}.json"
     runtime = json.loads((ROOT / "packaging/runtime-sources.json").read_text())
     tools = json.loads((ROOT / "packaging/appimage-tools.json").read_text())
-    if runtime["runtime_commit"] != tools["runtime-x86_64"]["source_commit"]:
-        raise RuntimeError("The AppImage runtime binary and source pins disagree")
+    if any(tools[f"runtime-{target['arch']}"]["source_commit"] != runtime["runtime_commit"]
+           for target in TARGETS.values()):
+        raise RuntimeError("The AppImage runtime binaries and source pins disagree")
     runtime_dir = SOURCES / "appimage-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     unavailable = []
@@ -290,7 +299,8 @@ def main():
         "These files are not needed to install Contrail. They hold the complete sources of what the packages "
         "contain besides Contrail's own code (which is in "
         f"`Contrail-{version}-sources.tar.gz`): Telegram Desktop with all its submodules, the libraries built "
-        "for the packages, the Debian source packages of the Debian parts, and the AppImage runtime.\n\n"
+        "for the packages, the Debian source packages of the Debian parts, and the AppImage runtime. (The "
+        "Flatpak's runtime is not part of it: Flatpak installs it from Flathub, which publishes its sources.)\n\n"
         f"Download all {len(parts)} files `{sources_tar.name}.part*` and `SHA256SUMS` into one folder, then:\n\n"
         "```sh\nsha256sum --check --ignore-missing SHA256SUMS\n"
         f"cat {sources_tar.name}.part* > {sources_tar.name}\n"
@@ -301,16 +311,15 @@ def main():
 
     assets = [*parts, destination / "SOURCES.md", project_archive(destination, version, commit, date)]
     for deb_arch in TARGETS:
-        name = json.loads((workspace(deb_arch) / "build-info.json").read_text())["file"]
-        shutil.copy2(PACKAGES / name, destination / name)
-        assets.append(destination / name)
+        for kind in FORMATS:
+            name = infos[deb_arch]["files"][kind]
+            shutil.copy2(PACKAGES / name, destination / name)
+            assets.append(destination / name)
         shutil.copy2(workspace(deb_arch) / "build-environment.txt", destination / f"build-environment-{deb_arch}.txt")
-        shutil.copy2(stage(deb_arch) / "usr/share/doc/contrail/build-inputs.json",
-                     destination / f"build-inputs-{deb_arch}.json")
-        assets += [destination / f"build-environment-{deb_arch}.txt", destination / f"build-inputs-{deb_arch}.json"]
-    shutil.copy2(stage("amd64") / "usr/share/doc/contrail/bundled/bundled-packages.json",
-                 destination / "bundled-packages-amd64.json")
-    assets.append(destination / "bundled-packages-amd64.json")
+        assets.append(destination / f"build-environment-{deb_arch}.txt")
+        for label, path in records(deb_arch).items():
+            shutil.copy2(path, destination / f"{label}-{deb_arch}.json")
+            assets.append(destination / f"{label}-{deb_arch}.json")
     for source, target in (("packaging/INSTALL.md", "README.md"), ("packaging/RELEASE-NOTES.md", "RELEASE-NOTES.md"),
                            ("packaging/LICENSES.md", "LICENSES.md")):
         shutil.copy2(ROOT / source, destination / target)

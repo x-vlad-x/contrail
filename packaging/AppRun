@@ -1,20 +1,5 @@
 #!/bin/sh
-# AppImage entry point: points GTK, GIO and Qt at the resources inside the AppImage, then runs the launcher
-# (usr/bin/contrail). The bundled libraries are found through their RPATH, so programs Contrail starts
-# (a browser, a file manager) don't inherit them.
+# AppImage entry point: the launcher (usr/bin/contrail) sets up the bundled GTK, GIO and Qt.
 set -eu
 APPDIR="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
-export XDG_DATA_DIRS="$APPDIR/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
-export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
-export GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-export QT_PLUGIN_PATH="$APPDIR/usr/lib/qt6/plugins"
-
-# The loader cache lists absolute paths, which change with every mount of the AppImage.
-cache="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/contrail-appimage-$(id -u)"
-mkdir -p "$cache" && chmod 700 "$cache"
-if "$APPDIR/usr/bin/gdk-pixbuf-query-loaders" > "$cache/loaders.cache.$$" 2>/dev/null; then
-  mv -f "$cache/loaders.cache.$$" "$cache/loaders.cache"
-  export GDK_PIXBUF_MODULE_FILE="$cache/loaders.cache"
-fi
 exec "$APPDIR/usr/bin/contrail" "$@"

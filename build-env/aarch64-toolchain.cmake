@@ -5,8 +5,14 @@ set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
 set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
 set(CMAKE_LIBRARY_ARCHITECTURE aarch64-linux-gnu)
 set(PKG_CONFIG_EXECUTABLE /usr/bin/aarch64-linux-gnu-pkg-config CACHE FILEPATH "")
-# Libraries Debian doesn't have (tg_owt, tde2e, tdesktop_rust) are built by build-deps.sh into /src/deps-aarch64.
-set(CMAKE_PREFIX_PATH /src/deps-aarch64/prefix /usr/lib/aarch64-linux-gnu/cmake)
+# Libraries Debian doesn't have (tg_owt, tde2e, tdesktop_rust) are built by build-deps.sh into CONTRAIL_DEPS
+# (set by the container: /src/deps-aarch64 for the phone's FuriOS build, /src/deps-aarch64-trixie for the release).
+if(DEFINED ENV{CONTRAIL_DEPS})
+  set(CONTRAIL_DEPS $ENV{CONTRAIL_DEPS})
+else()
+  set(CONTRAIL_DEPS /src/deps-aarch64)
+endif()
+set(CMAKE_PREFIX_PATH ${CONTRAIL_DEPS}/prefix /usr/lib/aarch64-linux-gnu/cmake)
 set(QT_HOST_PATH /usr CACHE PATH "")
 set(QT_HOST_PATH_CMAKE_DIR /usr/lib/x86_64-linux-gnu/cmake CACHE PATH "")
 # Generators built for aarch64 during the build (codegen, cppgir, ...) run through qemu-user.

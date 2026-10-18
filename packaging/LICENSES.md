@@ -9,43 +9,51 @@ Telegram. Telegram is a trademark of Telegram FZ-LLC.
 
 ## What the program is made of
 
-The program (`/usr/libexec/contrail/contrail`, or `usr/libexec/contrail/contrail` inside the AppImage) is
-Telegram Desktop at a pinned release tag with the patches in `patches/` and Contrail's GTK interface
-(`gtk-ui/`) compiled in. Inside the packages, `share/doc/contrail/build-info.json` names the exact Contrail
-source commit, the Telegram Desktop tag and commit, and a checksum of the patches.
+The program (`libexec/contrail/contrail` in each package: under `/usr/lib/contrail` in the DEB and RPM, `usr` in
+the AppImage, `/app` in the Flatpak) is Telegram Desktop at a pinned release tag with the patches in `patches/`
+and Contrail's GTK interface (`gtk-ui/`) compiled in. Inside the packages, `share/doc/contrail/build-info.json`
+names the exact Contrail source commit, the Telegram Desktop tag and commit, and a checksum of the patches.
 
 Compiled into the program from source:
 
 - **Telegram Desktop** and its submodules and bundled third-party code (lib_base, lib_ui, tgcalls, cld3,
   hunspell, libprisma, MicroTeX and others): their license texts are in `share/doc/contrail/upstream`.
 - **Libraries built by `build-env/build-deps.sh`** at the commits the official Telegram Desktop build uses:
-  tg_owt (WebRTC), TDLib's tde2e, rnnoise (with its neural network model), the Rust part (tlottie, wallet
-  engine and the Rust crates they use) and, for the AppImage, ada. Their license texts are in
-  `share/doc/contrail/static-libraries`; `sources.json` there lists the source archives with their SHA-256,
-  and `tdesktop_rust/crates.txt` lists the Rust crates that are linked in, with their licenses.
-- **Debian packages** used at build time: `share/doc/contrail/build-inputs.json` lists every Debian package
-  whose headers, static archives or shared libraries the build used, with the source package and version.
+  tg_owt (WebRTC), TDLib's tde2e, rnnoise (with its neural network model), ada, and the Rust part (tlottie,
+  wallet engine and the Rust crates they use). Their license texts are in `share/doc/contrail/static-libraries`;
+  `sources.json` there lists the source archives with their SHA-256, and `tdesktop_rust/crates.txt` lists the
+  Rust crates that are linked in, with their licenses.
+- **Debian packages** used at build time (Debian 13 for both architectures):
+  `share/doc/contrail/build-inputs.json` lists every Debian package whose headers, static archives or shared
+  libraries the build used, with the source package and version.
 
-## The Debian package (ARM64)
+## The DEB, RPM and AppImage
 
-The program uses the phone's own system libraries (GTK, libadwaita, Qt, FFmpeg, OpenSSL and others); the
-package declares them as dependencies and carries none of them. They keep their distribution's licenses.
-
-## The AppImage (x86_64)
-
-The AppImage carries the shared libraries, plugins, icons and schemas it needs from Debian 13. They keep
-their own licenses — including the LGPL and the GPL — and are not relicensed by Contrail.
-`share/doc/contrail/bundled` holds each package's Debian copyright file, the common license texts, and
-`bundled-packages.json`, which maps every bundled file to its Debian binary and source package and version.
-`host-libraries.txt` lists what is taken from the host system instead (glibc, graphics drivers, fontconfig).
+These packages carry the shared libraries, plugins, icons and schemas the program needs, from Debian 13 (GTK,
+libadwaita, Qt, FFmpeg, OpenSSL and others). The libraries are Debian's files, unmodified, except that a run-time
+library search path pointing into the system is replaced with the library's own folder. They keep their own
+licenses — including the LGPL and the GPL — and are not relicensed by Contrail. `share/doc/contrail/bundled` holds
+each package's Debian copyright file, the common license texts, `bundled-packages.json`, which maps every bundled
+file to its Debian binary and source package and version, and `origins.json`, where each bundled library came from.
+`host-libraries.txt` lists what is taken from the system instead (glibc, graphics drivers, fontconfig, the X11
+and Wayland client libraries, ALSA).
 
 The AppImage runtime (the small program at the start of the file that mounts it) is AppImage's type2-runtime
 under the MIT license, with statically linked libfuse (LGPL-2.1), squashfuse, musl, zstd, zlib and mimalloc;
 see `share/doc/contrail/appimage-runtime`.
 
-Replacing a bundled library: extract the AppImage with `--appimage-extract`, replace the library in
-`squashfs-root/usr/lib` and start `squashfs-root/AppRun`. Contrail adds no restriction on modifying the
-libraries or on the reverse engineering needed to debug such modifications.
+Replacing a bundled library: in the DEB and RPM, replace it in `/usr/lib/contrail/lib`; for the AppImage, extract
+it with `--appimage-extract`, replace the library in `squashfs-root/usr/lib` and start `squashfs-root/AppRun`.
+Contrail adds no restriction on modifying the libraries or on the reverse engineering needed to debug such
+modifications.
+
+## The Flatpak
+
+The Flatpak runs on the GNOME runtime from Flathub (`share/doc/contrail/flatpak-runtime.txt` names the version it
+was made for), which Flatpak installs from there; the runtime is not part of Contrail's files. The Flatpak carries
+the libraries the runtime doesn't have (Qt, FFmpeg 7.1 and others) and PulseAudio's `pactl`, from Debian 13,
+documented the same way in `share/doc/contrail/bundled`. Inside the installed Flatpak they are in
+`/app/lib`; `flatpak run --command=sh io.github.x_vlad_x.Contrail` opens a shell in the sandbox.
 
 ## Corresponding sources
 
@@ -56,7 +64,7 @@ Each release offers, next to the packages:
 - `Contrail-<version>-corresponding-sources.tar` (in numbered parts, see `SOURCES.md`): the Telegram Desktop
   source tree at the pinned tag with all submodules, the source archives of the libraries built by
   `build-deps.sh` (including the vendored Rust crates and the Cargo lockfile), the exact Debian source
-  packages of everything the AppImage carries and of the Debian libraries compiled into the programs (verified
+  packages of everything the packages carry and of the Debian libraries compiled into the programs (verified
   against the signed APT indexes and each `.dsc`), and the AppImage runtime sources.
 
 To build the packages yourself, follow "Building" in `README.md`: `tools/build-packages.sh` needs podman (or

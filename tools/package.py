@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Turn a finished build into a package. Called by tools/build-packages.sh; never installs anything.
+"""Turn a finished build into Contrail's packages. Called by tools/build-packages.sh; never installs anything.
 
-  python3 tools/package.py deb --arch aarch64 --container IMAGE --api own|test --core-tag T --core-commit C
-  python3 tools/package.py appimage --arch x86_64 ...
+  python3 tools/package.py --arch aarch64|x86_64 --container IMAGE --api own|test --core-tag T --core-commit C
+                           [--formats deb,rpm,appimage,flatpak]
 
-Commands that need the build environment (cmake --install, strip, dpkg-shlibdeps, the AppImage tools) run in
-the build container, so the result doesn't depend on the host.
+Every package of an architecture is made from the same build:
+- DEB, RPM and AppImage carry the program with every library it needs except the system's base ones
+  (packaging/bundle-host-libraries.txt): one file installs on many distributions (tools/bundle.py);
+- the Flatpak carries what its runtime (GNOME, from Flathub) doesn't have.
+Commands that need the build environment (cmake --install, strip, readelf, dpkg-shlibdeps, the AppImage tools) run
+in the Debian build container, rpmbuild in a Fedora container and the Flatpak tools in a container of their own,
+so the result doesn't depend on the host. The outputs land in out/packages/.
 """
 import argparse
 import gzip
@@ -26,12 +31,35 @@ NAME = "contrail"
 MAINTAINER = "Vladislav Shadiuk <6992531+x-vlad-x@users.noreply.github.com>"
 HOMEPAGE = "https://github.com/x-vlad-x/contrail"
 ARCHES = {
-    "aarch64": dict(deb="arm64", triple="aarch64-linux-gnu"),
-    "x86_64": dict(deb="amd64", triple="x86_64-linux-gnu"),
+    "aarch64": dict(deb="arm64", triple="aarch64-linux-gnu", build="build-aarch64-trixie",
+                    deps="deps-aarch64-trixie"),
+    "x86_64": dict(deb="amd64", triple="x86_64-linux-gnu", build="build-x86_64", deps="deps-x86_64"),
 }
+FORMATS = ("deb", "rpm", "appimage", "flatpak")
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 LICENSE_RE = re.compile(r"(^|/)(LICEN[CS]E|COPYING|NOTICE|PATENTS|AUTHORS|UNLICENSE)[^/]*$", re.I)
 SOURCE_SUFFIXES = (".c", ".cc", ".cpp", ".h", ".hpp", ".rs", ".py", ".go", ".js", ".m", ".mm", ".S", ".asm")
+# Where the DEB and RPM put the bundle (the launcher is linked into /usr/bin).
+SYSTEM_BUNDLE = "usr/lib/contrail"
+RPM_CONTAINER = ("localhost/contrail-rpm", "build-env/Containerfile.rpm")
+FLATPAK_CONTAINER = ("localhost/contrail-flatpak", "build-env/Containerfile.flatpak")
+FLATPAK_RUNTIME = ("org.gnome.Platform", "51")
+FLATPAK_REMOTE = "https://dl.flathub.org/repo/flathub.flatpakrepo"
+# The runtime's GL extension (Mesa or a vendor driver) provides these at run time.
+FLATPAK_GL = ["libEGL.so.1", "libGL.so.1", "libGLX.so.0", "libGLdispatch.so.0", "libOpenGL.so.0", "libGLESv2.so.2",
+              "libgbm.so.1", "libglapi.so.0"]
+# Sandbox permissions: what the interface and the core use (see gtk-ui/: notifications through the shell, the
+# tray icon, feedbackd's ringtone, idle inhibition during calls, logind's lock state and the proximity sensor).
+FLATPAK_PERMISSIONS = [
+    "--share=network", "--share=ipc", "--socket=wayland", "--socket=fallback-x11", "--socket=pulseaudio",
+    "--device=all", "--filesystem=xdg-download", "--filesystem=xdg-pictures",
+    "--talk-name=org.freedesktop.Notifications", "--talk-name=org.kde.StatusNotifierWatcher",
+    # The tray icon's name has the process ID, which is 2 in the sandbox (gtk-ui/tray.cpp).
+    "--own-name=org.kde.StatusNotifierItem-2-1", "--talk-name=org.sigxcpu.Feedback",
+    "--talk-name=org.gnome.SessionManager", "--system-talk-name=org.freedesktop.login1",
+    "--system-talk-name=net.hadess.SensorProxy",
+    "--env=QT_PLUGIN_PATH=/app/lib/qt6/plugins",
+]
 
 
 def run(command, **kwargs):
@@ -46,8 +74,19 @@ def container_path(path):
     return Path("/src") / Path(path).resolve().relative_to(ROOT)
 
 
-def execute(args, command, *, cwd=ROOT, capture=False, env=None, network=False):
-    """Runs a command in the build container (paths under ROOT are /src there)."""
+def ensure_image(image, recipe):
+    """Builds a packaging container when its recipe changed (labelled like build-packages.sh does)."""
+    recipe = ROOT / recipe
+    wanted = hashlib.sha256(recipe.read_bytes()).hexdigest()
+    label = subprocess.run([engine(), "image", "inspect", "--format", '{{ index .Config.Labels "contrail.recipe" }}',
+                            image], capture_output=True, text=True).stdout.strip()
+    if label != wanted:
+        run([engine(), "build", "--label", f"contrail.recipe={wanted}", "-t", image, "-f", recipe, recipe.parent])
+    return image
+
+
+def execute(image, command, *, cwd=ROOT, capture=False, env=None, network=False):
+    """Runs a command in a container (paths under ROOT are /src there)."""
     tool = engine()
     user = (["--userns=keep-id"] if Path(tool).name == "podman"
             else ["--user", f"{os.getuid()}:{os.getgid()}"])
@@ -56,7 +95,7 @@ def execute(args, command, *, cwd=ROOT, capture=False, env=None, network=False):
         options.append("--network=none")
     for key, value in (env or {}).items():
         options += ["-e", f"{key}={value}"]
-    return run([tool, *options, args.container, *command], capture_output=capture)
+    return run([tool, *options, image, *command], capture_output=capture)
 
 
 def digest(path):
@@ -88,12 +127,36 @@ def core_patch_digest():
     return hasher.hexdigest()
 
 
-def stage_paths(args):
-    deb_arch = ARCHES[args.arch]["deb"]
-    workspace = ROOT / "out/packages" / f"{args.format}-{deb_arch}"
-    stage = workspace / ("Contrail.AppDir" if args.format == "appimage" else "root")
-    return workspace, stage
+def workspace(arch):
+    return ROOT / "out/packages" / ARCHES[arch]["deb"]
 
+
+# --- file names ------------------------------------------------------------------------------------------------
+
+def deb_version(version):
+    # 0.1.0-preview1 -> 0.1.0~preview1-1: a preview sorts before the final 0.1.0.
+    return re.sub(r"-(preview|rc|beta|alpha)", r"~\1", version) + "-1"
+
+
+def rpm_version(version):
+    return re.sub(r"-(preview|rc|beta|alpha)", r"~\1", version)
+
+
+def package_file(kind, arch, version):
+    """The published file name of a package (GitHub rewrites "~", so it never appears in one)."""
+    deb_arch = ARCHES[arch]["deb"]
+    if kind == "deb":
+        return f"contrail_{deb_version(version).replace('~', '-')}_{deb_arch}.deb"
+    if kind == "rpm":
+        return f"contrail-{rpm_version(version).replace('~', '-')}-1.{arch}.rpm"
+    if kind == "appimage":
+        return f"Contrail-{version}-{arch}.AppImage"
+    if kind == "flatpak":
+        return f"Contrail-{version}-{arch}.flatpak"
+    raise ValueError(kind)
+
+
+# --- the installed program ---------------------------------------------------------------------------------------
 
 def extract_licenses(archive, destination, wanted=None):
     """Copies the license files of a source archive; `wanted` limits it to some top directories."""
@@ -120,7 +183,7 @@ def extract_licenses(archive, destination, wanted=None):
 
 def static_notices(args, doc):
     """License texts of the libraries built by build-deps.sh and linked statically into the program."""
-    sources = ROOT / f"deps-{args.arch}/sources"
+    sources = ROOT / ARCHES[args.arch]["deps"] / "sources"
     manifest = json.loads((sources / "manifest.json").read_text())
     target = doc / "static-libraries"
     target.mkdir(parents=True, exist_ok=True)
@@ -145,30 +208,33 @@ def static_notices(args, doc):
 
 
 def prepare_stage(args):
-    workspace, stage = stage_paths(args)
-    build = ROOT / f"build-{args.arch}"
+    """cmake --install of the Contrail component into STAGE/usr, stripped, with icons, notices and build records."""
+    space = workspace(args.arch)
+    stage = space / "stage"
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
+    build = ROOT / ARCHES[args.arch]["build"]
     triple = ARCHES[args.arch]["triple"]
-    execute(args, ["env", f"DESTDIR={container_path(stage)}", "cmake", "--install", container_path(build),
-                   "--component", "Contrail", "--prefix", "/usr"])
+    execute(args.container, ["env", f"DESTDIR={container_path(stage)}", "cmake", "--install", container_path(build),
+                             "--component", "Contrail", "--prefix", "/usr"])
     program = stage / "usr/libexec/contrail/contrail"
     doc = stage / "usr/share/doc/contrail"
     # The Debian packages the build used: headers, static parts, shared libraries (see LICENSES.md).
-    execute(args, ["python3", container_path(ROOT / "tools/build_inputs.py"), container_path(build),
-                   container_path(program), container_path(doc / "build-inputs.json")])
-    execute(args, [f"{triple}-strip", "--remove-section=.comment", "--remove-section=.note",
-                   container_path(program)])
+    execute(args.container, ["python3", container_path(ROOT / "tools/build_inputs.py"), container_path(build),
+                             container_path(program), container_path(doc / "build-inputs.json")])
+    execute(args.container, [f"{triple}-strip", "--remove-section=.comment", "--remove-section=.note",
+                             container_path(program)])
     icons = stage / "usr/share/icons/hicolor"
     svg = icons / f"scalable/apps/{APP_ID}.svg"
     for size in ICON_SIZES:
         png = icons / f"{size}x{size}/apps/{APP_ID}.png"
         png.parent.mkdir(parents=True, exist_ok=True)
-        execute(args, ["rsvg-convert", "-w", size, "-h", size, "-o", container_path(png), container_path(svg)])
-    execute(args, ["desktop-file-validate", container_path(stage / f"usr/share/applications/{APP_ID}.desktop")])
-    execute(args, ["appstreamcli", "validate", "--no-net", "--explain",
-                   container_path(stage / f"usr/share/metainfo/{APP_ID}.metainfo.xml")])
+        execute(args.container, ["rsvg-convert", "-w", size, "-h", size, "-o", container_path(png),
+                                 container_path(svg)])
+    execute(args.container, ["desktop-file-validate", container_path(stage / f"usr/share/applications/{APP_ID}.desktop")])
+    execute(args.container, ["appstreamcli", "validate", "--no-net", "--explain",
+                             container_path(stage / f"usr/share/metainfo/{APP_ID}.metainfo.xml")])
 
     version = (ROOT / "VERSION").read_text().strip()
     commit, dirty = project_state()
@@ -180,7 +246,6 @@ def prepare_stage(args):
     info = {
         "version": version,
         "architecture": ARCHES[args.arch]["deb"],
-        "format": args.format,
         "project_commit": commit,
         "project_dirty": dirty,
         "source_date": source_date,
@@ -190,29 +255,69 @@ def prepare_stage(args):
         "api_credentials": args.api,
         "container": args.container,
         "container_image": image,
-        "status": "for checking the packaging only, not for distribution" if args.api == "test" else "preview",
+        "status": "for checking the packaging only, not for distribution" if args.api == "test" else "release",
     }
     (doc / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
-    resources = stage / "usr/share/contrail"
     lines = [f"Contrail {version}",
              f"Telegram Desktop core {args.core_tag.removeprefix('v')} ({args.core_commit})",
              f"Source commit {commit}{' with local changes' if dirty else ''}"]
     if args.api == "test":
         lines.append("Built with Telegram's public test API credentials: not for distribution")
-    (resources / "version").write_text("\n".join(lines) + "\n")
+    (stage / "usr/share/contrail/version").write_text("\n".join(lines) + "\n")
     # The packages installed in the build container: the exact build environment.
-    listing = execute(args, ["dpkg-query", "-W", "-f=${binary:Package}\\t${Version}\\n"], capture=True).stdout
-    (workspace / "build-environment.txt").write_text(
+    listing = execute(args.container, ["dpkg-query", "-W", "-f=${binary:Package}\\t${Version}\\n"], capture=True).stdout
+    (space / "build-environment.txt").write_text(
         f"# {args.container} {image}\n" + "".join(sorted(listing.splitlines(keepends=True))))
-    return workspace, stage, version, info
+    return stage, version, info
+
+
+def bundle_step(args, action, root, *options):
+    execute(args.container, ["python3", container_path(ROOT / "tools/bundle.py"), action, container_path(root),
+                             ARCHES[args.arch]["triple"], *options])
+
+
+def make_bundle(args, stage):
+    """The self-contained tree the DEB, RPM and AppImage share: the program and everything it loads."""
+    bundle = workspace(args.arch) / "bundle"
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    shutil.copytree(stage / "usr", bundle, symlinks=True)
+    host = container_path(ROOT / "packaging/bundle-host-libraries.txt")
+    bundle_step(args, "resources", bundle, "--gtk")
+    bundle_step(args, "deploy", bundle, "--host", host)
+    bundle_step(args, "check", bundle, "--host", host)
+    bundle_step(args, "licenses", bundle)
+    return bundle
+
+
+def system_tree(bundle, root):
+    """The DEB and RPM file tree: the bundle in /usr/lib/contrail, the desktop integration in /usr/share."""
+    if root.exists():
+        shutil.rmtree(root)
+    target = root / SYSTEM_BUNDLE
+    shutil.copytree(bundle, target, symlinks=True)
+    share = root / "usr/share"
+    for name in ("applications", "metainfo", "doc"):
+        (share / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(target / "share" / name, share / name)
+    for icon in sorted((target / "share/icons/hicolor").glob(f"*/apps/{APP_ID}.*")):
+        destination = share / "icons/hicolor" / icon.relative_to(target / "share/icons/hicolor")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(icon, destination)
+    (root / "usr/bin").mkdir(parents=True)
+    (root / "usr/bin/contrail").symlink_to("../lib/contrail/bin/contrail")
+    # The migration helper looks for the system's desktop entry next to its own prefix (/usr).
+    shutil.move(target / "bin/contrail-migrate-launcher", root / "usr/bin/contrail-migrate-launcher")
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o755)
+        elif path.is_file():
+            path.chmod(0o755 if os.access(path, os.X_OK) else 0o644)
 
 
 # --- Debian package -----------------------------------------------------------------------------------------
-
-def deb_version(version):
-    # 0.1.0-preview1 -> 0.1.0~preview1-1: a preview sorts before the final 0.1.0.
-    return re.sub(r"-(preview|rc|beta|alpha)", r"~\1", version) + "-1"
-
 
 def write_copyright(doc):
     upstream_licenses = sorted(p.relative_to(doc).as_posix() for p in (doc / "upstream").rglob("*") if p.is_file())
@@ -225,8 +330,10 @@ Comment: Contrail is an unofficial Telegram client. It is not affiliated with or
  (https://github.com/telegramdesktop/tdesktop) with Contrail's GTK interface compiled in.
  The license texts of the libraries compiled into the program are in
  /usr/share/doc/contrail/upstream (Telegram Desktop's source tree) and
- /usr/share/doc/contrail/static-libraries (tg_owt, TDLib's tde2e, rnnoise, the Rust crates and others),
- see /usr/share/doc/contrail/LICENSES.md. Corresponding sources are published with each release.
+ /usr/share/doc/contrail/static-libraries (tg_owt, TDLib's tde2e, rnnoise, the Rust crates and others).
+ The libraries in /usr/lib/contrail come from Debian 13; their copyright files are in
+ /usr/share/doc/contrail/bundled. See /usr/share/doc/contrail/LICENSES.md. Corresponding sources are
+ published with each release.
 
 Files: *
 Copyright: 2026 Vladislav Shadiuk
@@ -245,61 +352,178 @@ License: GPL-3 with OpenSSL exception
     (doc / "copyright").write_text(text)
 
 
-def build_deb(args, workspace, stage, version, info):
+DESCRIPTION = """Contrail is an unofficial client that uses the Telegram API. It is built on
+the Telegram Desktop core and replaces its interface with an adaptive GTK4
+and libadwaita one, made for Linux phones (Phosh) and usable on desktops.
+The package carries the libraries it needs.
+
+Contrail is not affiliated with or endorsed by Telegram."""
+
+
+# libepoxy (GTK's GL loader) opens these with dlopen(), outside the ELF dependencies.
+DLOPENED_DEB = ["libegl1", "libgl1", "libgles2", "libopengl0"]
+DLOPENED_RPM = ["libEGL.so.1()(64bit)", "libGL.so.1()(64bit)", "libGLESv2.so.2()(64bit)", "libOpenGL.so.0()(64bit)"]
+
+
+def host_depends(args, root, depends):
+    """dpkg-shlibdeps also names the Debian packages of the bundled libraries (it finds their symbols files by
+    soname): keep only the packages of the libraries the bundle takes from the system, with the versions
+    dpkg-shlibdeps worked out for them."""
+    triple = ARCHES[args.arch]["triple"]
+    linked = json.loads((root / "usr/share/doc/contrail/host-libraries.json").read_text())["libraries"]
+    script = ("for name; do for dir in /usr/lib/$TRIPLE /lib/$TRIPLE /usr/lib /lib; do "
+              "[ -e $dir/$name ] && { dpkg-query -S $dir/$name || dpkg-query -S $(readlink -f $dir/$name); } && break; "
+              "done; done")
+    output = execute(args.container, ["sh", "-c", script, "sh", *linked], capture=True,
+                     env={"TRIPLE": triple}).stdout
+    packages = {line.split(":", 1)[0].split(",")[0].strip() for line in output.splitlines() if ":" in line}
+    if len(packages) < 1 or not {"libc6"} <= packages:
+        raise RuntimeError(f"Could not find the packages of the system libraries: {output}")
+    kept, named = [], set()
+    for entry in (e.strip() for e in depends.split(",")):
+        names = {alternative.split()[0] for alternative in entry.split("|")}
+        if names & packages:
+            kept.append(entry)
+            named |= names
+    kept += sorted(packages - named)
+    # Loaded at run time, not linked: GTK's libepoxy opens the system's GL libraries itself.
+    kept += [name for name in DLOPENED_DEB if name not in named | packages]
+    return kept
+
+
+def build_deb(args, bundle, version, info):
+    space = workspace(args.arch)
     deb_arch = ARCHES[args.arch]["deb"]
     package_version = deb_version(version)
-    doc = stage / "usr/share/doc/contrail"
+    root = space / "deb/root"
+    system_tree(bundle, root)
+    doc = root / "usr/share/doc/contrail"
     write_copyright(doc)
     date = time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime(info["source_date"]))
     changelog = (f"contrail ({package_version}) unstable; urgency=medium\n\n"
-                 f"  * Preview package. See {HOMEPAGE}/releases.\n\n -- {MAINTAINER}  {date}\n")
+                 f"  * Contrail {version}. See {HOMEPAGE}/releases.\n\n -- {MAINTAINER}  {date}\n")
     with gzip.GzipFile(doc / "changelog.Debian.gz", "wb", mtime=0) as stream:
         stream.write(changelog.encode())
 
-    # Dependencies of the program, from the shlibs/symbols files of the packages in the build container.
-    debian = workspace / "debian"
-    debian.mkdir(exist_ok=True)
+    # Dependencies on the system's libraries (those the bundle leaves to the host), from the shlibs/symbols files of
+    # the build container's packages. The bundled libraries belong to no package and are skipped.
+    debian = space / "deb/debian"
+    debian.mkdir(parents=True, exist_ok=True)
     (debian / "control").write_text(f"Source: contrail\nMaintainer: {MAINTAINER}\n\n"
                                      f"Package: contrail\nArchitecture: {deb_arch}\nDescription: Contrail\n")
-    program = container_path(stage / "usr/libexec/contrail/contrail")
+    elfs = [p for p in sorted((root / SYSTEM_BUNDLE).rglob("*")) if p.is_file() and not p.is_symlink()
+            and p.read_bytes()[:4] == b"\x7fELF"]
     env = {"DEB_HOST_ARCH": deb_arch, "DEB_HOST_MULTIARCH": ARCHES[args.arch]["triple"]}
-    output = execute(args, ["dpkg-shlibdeps", "-O", "--warnings=7", f"-e{program}"],
-                     cwd=workspace, capture=True, env=env).stdout
+    output = execute(args.container, ["dpkg-shlibdeps", "-O", "--warnings=0", "--ignore-missing-info",
+                                      f"-l{container_path(root / SYSTEM_BUNDLE / 'lib')}",
+                                      *[f"-e{container_path(p)}" for p in elfs]],
+                     cwd=space / "deb", capture=True, env=env).stdout
     depends = next(line.split("=", 1)[1] for line in output.splitlines() if line.startswith("shlibs:Depends="))
-    # Loaded at run time, not linked: Qt's WebP plugin (Telegram's emoji). The offscreen platform plugin and
-    # the TLS backend come with libqt6gui6 and libqt6network6, which the program links.
-    depends += ", qt6-image-formats-plugins, hicolor-icon-theme"
+    depends = ", ".join(host_depends(args, root, depends))
 
-    installed_size = (sum(p.stat().st_size for p in stage.rglob("*") if p.is_file()) + 1023) // 1024
-    control = stage / "DEBIAN"
+    installed_size = (sum(p.stat().st_size for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+                      + 1023) // 1024
+    control = root / "DEBIAN"
     control.mkdir()
     (control / "control").write_text(
         f"Package: contrail\nVersion: {package_version}\nArchitecture: {deb_arch}\n"
         f"Maintainer: {MAINTAINER}\nSection: net\nPriority: optional\n"
         f"Installed-Size: {installed_size}\nDepends: {depends}\n"
-        "Recommends: xdg-desktop-portal, xdg-utils, fonts-noto-color-emoji\n"
+        # pactl switches the call audio between the earpiece, the loudspeaker and headphones.
+        "Recommends: pulseaudio-utils, xdg-desktop-portal, xdg-utils, fonts-noto-color-emoji\n"
         f"Homepage: {HOMEPAGE}\n"
         "Description: unofficial Telegram client with a GTK interface for Linux phones\n"
-        " Contrail is an unofficial client that uses the Telegram API. It is built on\n"
-        " the Telegram Desktop core and replaces its interface with an adaptive GTK4\n"
-        " and libadwaita one, made for Linux phones (Phosh) and usable on desktops.\n"
-        " .\n"
-        " Contrail is not affiliated with or endorsed by Telegram. This is a preview.\n")
+        + "".join(f" {line}\n" if line else " .\n" for line in DESCRIPTION.splitlines()))
     sums = []
-    for path in sorted(stage.rglob("*")):
-        if path.is_file() and not path.is_relative_to(control):
-            sums.append(f"{hashlib.md5(path.read_bytes()).hexdigest()}  {path.relative_to(stage).as_posix()}\n")
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink() and not path.is_relative_to(control):
+            sums.append(f"{hashlib.md5(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}\n")
     (control / "md5sums").write_text("".join(sums))
-    for path in stage.rglob("*"):
-        if path.is_dir():
-            path.chmod(0o755)
-        elif path.is_file():
-            path.chmod(0o755 if os.access(path, os.X_OK) else 0o644)
+    output = ROOT / "out/packages" / package_file("deb", args.arch, version)
+    execute(args.container, ["dpkg-deb", "--root-owner-group", "-Zxz", "--build", container_path(root),
+                             container_path(output)])
+    print(execute(args.container, ["dpkg-deb", "--info", container_path(output)], capture=True).stdout)
+    return output
 
-    # Keep Debian's "~" in the package version, but not in the file name (GitHub rewrites it).
-    output = ROOT / "out/packages" / f"contrail_{package_version.replace('~', '-')}_{deb_arch}.deb"
-    execute(args, ["dpkg-deb", "--root-owner-group", "-Zxz", "--build", container_path(stage), container_path(output)])
-    print(execute(args, ["dpkg-deb", "--info", container_path(output)], capture=True).stdout)
+
+# --- RPM ---------------------------------------------------------------------------------------------------------
+
+SPEC = """%global debug_package %{nil}
+# The files are built and stripped already: no rebuilding, stripping or build-id links here.
+%global __os_install_post %{nil}
+%global _build_id_links none
+# The bundled libraries are private: they provide nothing to the system, and nothing has to provide them.
+%global __provides_exclude_from ^/usr/lib/contrail/.*$
+%global __requires_exclude ^(@BUNDLED@)
+%global _binary_payload w19T0.zstdio
+
+Name:           contrail
+Version:        @VERSION@
+Release:        1
+Summary:        Unofficial Telegram client with a GTK interface for Linux phones
+License:        GPL-3.0-only WITH LicenseRef-OpenSSL-exception AND LicenseRef-Bundled-libraries
+URL:            @HOMEPAGE@
+# libepoxy (GTK's GL loader) opens the system's GL libraries with dlopen(), outside the ELF dependencies.
+@DLOPENED@
+# pactl switches the call audio between the earpiece, the loudspeaker and headphones.
+Recommends:     pulseaudio-utils
+Recommends:     xdg-desktop-portal
+Recommends:     xdg-utils
+
+%description
+@DESCRIPTION@
+
+%install
+cp -a @TREE@/. %{buildroot}/
+
+%files
+%defattr(-,root,root,-)
+/usr/bin/contrail
+/usr/bin/contrail-migrate-launcher
+/usr/lib/contrail/
+/usr/share/applications/@APP_ID@.desktop
+/usr/share/icons/hicolor/*/apps/@APP_ID@.*
+/usr/share/metainfo/@APP_ID@.metainfo.xml
+%doc /usr/share/doc/contrail/
+
+%changelog
+* @DATE@ @MAINTAINER@ - @VERSION@-1
+- Contrail @RELEASE@. See @HOMEPAGE@/releases.
+"""
+
+
+def build_rpm(args, bundle, version, info):
+    space = workspace(args.arch) / "rpm"
+    if space.exists():
+        shutil.rmtree(space)
+    tree = space / "tree"
+    system_tree(bundle, tree)
+    host = set((ROOT / "packaging/bundle-host-libraries.txt").read_text().split())
+    bundled = sorted(p.name for p in (tree / SYSTEM_BUNDLE / "lib").glob("*.so*") if p.name not in host)
+    spec = space / "contrail.spec"
+    date = time.strftime("%a %b %d %Y", time.gmtime(info["source_date"]))
+    replacements = {
+        "@BUNDLED@": "|".join(re.escape(name) for name in bundled),
+        "@VERSION@": rpm_version(version), "@RELEASE@": version, "@HOMEPAGE@": HOMEPAGE, "@APP_ID@": APP_ID,
+        "@DESCRIPTION@": DESCRIPTION, "@TREE@": str(container_path(tree)), "@DATE@": date,
+        "@MAINTAINER@": MAINTAINER,
+        "@DLOPENED@": "\n".join(f"Requires:       {name}" for name in DLOPENED_RPM),
+    }
+    text = SPEC
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    spec.write_text(text)
+    image = ensure_image(*RPM_CONTAINER)
+    output = ROOT / "out/packages" / package_file("rpm", args.arch, version)
+    execute(image, ["rpmbuild", "-bb", "--target", f"{args.arch}-linux", "--define", f"_topdir {container_path(space)}",
+                    "--define", f"_rpmdir {container_path(space / 'RPMS')}",
+                    "--define", "_build_name_fmt %{NAME}.rpm", "--define", "_buildhost contrail-build",
+                    "--define", "use_source_date_epoch_as_buildtime 1",
+                    "--define", "clamp_mtime_to_source_date_epoch 1",
+                    container_path(spec)], env={"SOURCE_DATE_EPOCH": str(info["source_date"])})
+    shutil.move(space / "RPMS/contrail.rpm", output)
+    print(execute(image, ["rpm", "-qp", "--info", "--requires", "--recommends", container_path(output)],
+                  capture=True).stdout)
     return output
 
 
@@ -321,56 +545,119 @@ def download_tools():
     return directory
 
 
-def build_appimage(args, workspace, stage, version, info):
-    if args.arch != "x86_64":
-        raise RuntimeError("The AppImage recipe targets x86_64 only")
+def build_appimage(args, bundle, version, info):
     tools = download_tools()
-    doc = stage / "usr/share/doc/contrail"
+    appdir = workspace(args.arch) / "appimage/Contrail.AppDir"
+    if appdir.parent.exists():
+        shutil.rmtree(appdir.parent)
+    appdir.mkdir(parents=True)
+    shutil.copytree(bundle, appdir / "usr", symlinks=True)
+    doc = appdir / "usr/share/doc/contrail"
     shutil.copytree(ROOT / "packaging/licenses/appimage-runtime", doc / "appimage-runtime", dirs_exist_ok=True)
     shutil.copy2(ROOT / "packaging/runtime-sources.json", doc / "appimage-runtime/runtime-sources.json")
-    # Resources loaded at run time (Qt and GIO plugins, loaders, schemas, icons), from the build container.
-    execute(args, ["python3", container_path(ROOT / "tools/prepare_appimage.py"), "resources", container_path(stage)])
-    desktop = stage / f"usr/share/applications/{APP_ID}.desktop"
-    plugins = sorted(p for p in (stage / "usr/lib/qt6/plugins").rglob("*.so"))
-    plugins += sorted(p for p in (stage / "usr/lib/gio/modules").glob("*.so"))
-    plugins += sorted(p for p in (stage / "usr/lib/gdk-pixbuf-2.0").rglob("*.so"))
-    command = [container_path(tools / "linuxdeploy-x86_64.AppImage"), "--appimage-extract-and-run",
-               "--appdir", container_path(stage),
-               # The real program, not the shell launcher: linuxdeploy follows ELF dependencies only.
-               "--deploy-deps-only", container_path(stage / "usr/libexec/contrail/contrail"),
-               "--desktop-file", container_path(desktop),
-               "--icon-file", container_path(stage / f"usr/share/icons/hicolor/256x256/apps/{APP_ID}.png"),
-               "--custom-apprun", container_path(ROOT / "packaging/AppRun")]
-    for plugin in plugins:
-        command += ["--deploy-deps-only", container_path(plugin)]
-    execute(args, command)
-    # Everything the program and the plugins load must be resolvable inside the AppImage (except the base
-    # system libraries linuxdeploy leaves to the host on purpose).
-    execute(args, ["python3", container_path(ROOT / "tools/prepare_appimage.py"), "check", container_path(stage)])
-    execute(args, ["python3", container_path(ROOT / "tools/prepare_appimage.py"), "licenses", container_path(stage)])
-    output = ROOT / "out/packages" / f"Contrail-{version}-x86_64.AppImage"
-    execute(args, ["env", "ARCH=x86_64", "VERSION=" + version, container_path(tools / "appimagetool-x86_64.AppImage"),
-                   "--appimage-extract-and-run", "--no-appstream",
-                   "--runtime-file", container_path(tools / "runtime-x86_64"),
-                   container_path(stage), container_path(output)])
+    shutil.copy2(ROOT / "packaging/AppRun", appdir / "AppRun")
+    (appdir / "AppRun").chmod(0o755)
+    shutil.copy2(appdir / f"usr/share/applications/{APP_ID}.desktop", appdir / f"{APP_ID}.desktop")
+    shutil.copy2(appdir / f"usr/share/icons/hicolor/256x256/apps/{APP_ID}.png", appdir / f"{APP_ID}.png")
+    (appdir / ".DirIcon").symlink_to(f"{APP_ID}.png")
+    output = ROOT / "out/packages" / package_file("appimage", args.arch, version)
+    # appimagetool (x86_64) only packs the tree: the runtime prepended to it is the target's.
+    execute(args.container, ["env", f"ARCH={args.arch}", "VERSION=" + version,
+                             container_path(tools / "appimagetool-x86_64.AppImage"), "--appimage-extract-and-run",
+                             "--no-appstream", "--runtime-file", container_path(tools / f"runtime-{args.arch}"),
+                             container_path(appdir), container_path(output)])
+    return output
+
+
+# --- Flatpak -------------------------------------------------------------------------------------------------
+
+def flatpak_runtime(args, image):
+    """Downloads the runtime into out/flatpak/ (once) and lists the libraries it provides."""
+    runtime, branch = FLATPAK_RUNTIME
+    env = {"FLATPAK_USER_DIR": str(container_path(ROOT / "out/flatpak/user"))}
+    (ROOT / "out/flatpak/user").mkdir(parents=True, exist_ok=True)
+    ref = f"{runtime}/{args.arch}/{branch}"
+    script = (f"flatpak remote-add --user --if-not-exists flathub {FLATPAK_REMOTE} && "
+              f"(flatpak info --user {ref} >/dev/null 2>&1 || "
+              f"flatpak install --user -y --noninteractive --no-related --arch={args.arch} flathub {ref}) && "
+              f"flatpak info --user --show-commit {ref} && flatpak info --user --show-location {ref}")
+    output = execute(image, ["sh", "-c", script], env=env, network=True, capture=True).stdout.split()
+    commit, location = output[-2], output[-1]
+    files = ROOT / "out/flatpak/user" / Path(location).relative_to(container_path(ROOT / "out/flatpak/user")) / "files"
+    triple = ARCHES[args.arch]["triple"]
+    names = set(FLATPAK_GL)
+    for directory in (files / "lib" / triple, files / "lib"):
+        for path in directory.glob("*.so*"):
+            names.add(path.name)
+    listing = workspace(args.arch) / "flatpak/runtime-libraries.txt"
+    listing.parent.mkdir(parents=True, exist_ok=True)
+    listing.write_text(f"# {ref} {commit} and its GL extension: left to the runtime by the Flatpak\n"
+                       + "".join(f"{name}\n" for name in sorted(names)))
+    return f"{runtime}/{args.arch}/{branch}", commit, listing
+
+
+def build_flatpak(args, stage, version, info):
+    space = workspace(args.arch) / "flatpak"
+    image = ensure_image(*FLATPAK_CONTAINER)
+    ref, commit, listing = flatpak_runtime(args, image)
+    build = space / "build"
+    for path in (build, space / "repo"):
+        if path.exists():
+            shutil.rmtree(path)
+    files = build / "files"
+    shutil.copytree(stage / "usr", files, symlinks=True)
+    (files / "bin/contrail-migrate-launcher").unlink()  # nothing to migrate inside a sandbox
+    bundle_step(args, "resources", files, "--pactl")
+    bundle_step(args, "deploy", files, "--host", container_path(listing))
+    bundle_step(args, "check", files, "--host", container_path(listing))
+    bundle_step(args, "licenses", files)
+    doc = files / "share/doc/contrail"
+    (doc / "flatpak-runtime.txt").write_text(f"{ref} {commit}\n{FLATPAK_REMOTE}\n")
+    sdk = ref.replace("Platform", "Sdk")
+    (build / "metadata").write_text(f"[Application]\nname={APP_ID}\nruntime={ref}\nsdk={sdk}\ncommand=contrail\n")
+    output = ROOT / "out/packages" / package_file("flatpak", args.arch, version)
+    repo = container_path(space / "repo")
+    script = " && ".join([
+        f"flatpak build-finish {' '.join(FLATPAK_PERMISSIONS)} --command=contrail {container_path(build)}",
+        # The icon validator runs unsandboxed: bwrap can't mount /proc in an unprivileged container (the icons
+        # are the package's own).
+        f"flatpak build-export --disable-sandbox --arch={args.arch} --subject='Contrail {version}' {repo} "
+        f"{container_path(build)} stable",
+        f"flatpak build-bundle --arch={args.arch} --runtime-repo={FLATPAK_REMOTE} {repo} {container_path(output)} "
+        f"{APP_ID} stable",
+    ])
+    execute(image, ["sh", "-c", script])
+    print((build / "metadata").read_text())
     return output
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("format", choices=["deb", "appimage"])
     parser.add_argument("--arch", choices=sorted(ARCHES), required=True)
     parser.add_argument("--container", required=True, help="the image the build ran in")
     parser.add_argument("--api", choices=["own", "test"], required=True)
     parser.add_argument("--core-tag", required=True)
     parser.add_argument("--core-commit", required=True)
+    parser.add_argument("--formats", default=",".join(FORMATS))
     args = parser.parse_args()
-    workspace, stage, version, info = prepare_stage(args)
-    build = build_deb if args.format == "deb" else build_appimage
-    output = build(args, workspace, stage, version, info)
-    (workspace / "build-info.json").write_text(json.dumps({**info, "file": output.name}, indent=2) + "\n")
-    output.with_name(output.name + ".sha256").write_text(f"{digest(output)}  {output.name}\n")
-    print(f"\nCreated: {output}")
+    formats = [f for f in args.formats.split(",") if f]
+    if unknown := set(formats) - set(FORMATS):
+        parser.error(f"unknown formats: {sorted(unknown)}")
+    stage, version, info = prepare_stage(args)
+    outputs = {}
+    if {"deb", "rpm", "appimage"} & set(formats):
+        bundle = make_bundle(args, stage)
+        for kind, build in (("deb", build_deb), ("rpm", build_rpm), ("appimage", build_appimage)):
+            if kind in formats:
+                outputs[kind] = build(args, bundle, version, info)
+    if "flatpak" in formats:
+        outputs["flatpak"] = build_flatpak(args, stage, version, info)
+    for path in outputs.values():
+        path.with_name(path.name + ".sha256").write_text(f"{digest(path)}  {path.name}\n")
+    (workspace(args.arch) / "build-info.json").write_text(
+        json.dumps({**info, "files": {kind: path.name for kind, path in outputs.items()}}, indent=2) + "\n")
+    for path in outputs.values():
+        print(f"Created: {path} ({path.stat().st_size / 2**20:.1f} MiB)")
     if args.api == "test":
         print("Built with the public test API credentials: for checking the packaging only, not for release.")
 

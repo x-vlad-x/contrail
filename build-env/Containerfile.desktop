@@ -1,7 +1,7 @@
-# x86_64 desktop build for the AppImage. Debian 13 (trixie) is the oldest Debian with GTK 4.12+ and
-# libadwaita 1.6+; the AppImage carries those libraries and needs glibc 2.39 or newer on the host (see the
-# AppImage's usr/share/doc/contrail/host-libraries.txt). tools/build-packages.sh records the exact package
-# versions of this image.
+# x86_64 build for the release packages (DEB, RPM, AppImage, Flatpak; the ARM64 one is Containerfile.arm64).
+# Debian 13 (trixie) is the oldest Debian with GTK 4.12+ and libadwaita 1.6+; the packages carry those libraries
+# and need glibc 2.39 or newer on the host (see usr/share/doc/contrail/host-libraries.txt in a package).
+# tools/package.py records the exact package versions of this image.
 FROM docker.io/library/debian:trixie-20261005
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       build-essential cmake ninja-build pkgconf python3 git ca-certificates file curl \
@@ -39,3 +39,8 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile mini
       && chmod -R a+rwX /opt/rustup /opt/cargo
 ENV PKG_CONFIG_PATH=/src/deps-x86_64/prefix/lib/pkgconfig \
     GI_GIR_PATH=/usr/lib/x86_64-linux-gnu/gir-1.0:/usr/share/gir-1.0
+# Showing an incoming call over a phone's lock screen (layer shell), as in the ARM64 build; PulseAudio's pactl
+# (the call audio routes), which the Flatpak carries.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libgtk4-layer-shell-dev pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*

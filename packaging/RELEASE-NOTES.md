@@ -1,30 +1,56 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.1.0-preview1
+# Contrail 0.1.0
 
-The first installable preview of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on
-Linux phones, built on the Telegram Desktop 7.3.1 core. Contrail is an unofficial client that uses the
-Telegram API; it is not affiliated with or endorsed by Telegram.
+The first release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones
+and desktops, built on the Telegram Desktop 7.3.1 core. Contrail is an unofficial client that uses the Telegram
+API; it is not affiliated with or endorsed by Telegram.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chats.png" width="180" alt="Chat list">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation">
-  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/channel.png" width="180" alt="A channel">
+  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/call.png" width="180" alt="An incoming call">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chats-dark.png" width="180" alt="Chat list, dark style">
 </p>
 <p align="center"><sub>Screenshots of a made-up account.</sub></p>
 
 ## Downloads
 
-| Device | Download | Install |
+| Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
 | --- | --- | --- |
-| Linux phone, ARM64 (FuriOS, Debian-based) | `contrail_0.1.0-preview1-1_arm64.deb` | `sudo apt install ./contrail_0.1.0-preview1-1_arm64.deb` |
-| Linux computer, x86_64 (glibc 2.39+) | `Contrail-0.1.0-preview1-x86_64.AppImage` | `chmod +x` it and run it |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.1.0-1_amd64.deb` | `contrail_0.1.0-1_arm64.deb` |
+| Fedora, openSUSE | `contrail-0.1.0-1.x86_64.rpm` | `contrail-0.1.0-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.1.0-x86_64.flatpak` | `Contrail-0.1.0-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.1.0-x86_64.AppImage` | `Contrail-0.1.0-aarch64.AppImage` |
 
-No building and no Telegram API keys are needed. `README.md` below is the installation guide, including the
-move from the earlier SSH install (`contrail-migrate-launcher`, which keeps your account and chats).
+```sh
+sudo apt install ./contrail_0.1.0-1_arm64.deb              # DEB
+sudo dnf install ./contrail-0.1.0-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
+flatpak install --user ./Contrail-0.1.0-aarch64.flatpak    # Flatpak
+chmod +x Contrail-0.1.0-x86_64.AppImage && ./Contrail-0.1.0-x86_64.AppImage
+```
 
-## What's in it
+No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
+needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
+keeps your account and chats). The DEB installs over the 0.1.0-preview1 package.
+
+## What's new since 0.1.0-preview1
+
+- **Packages for every common system**: DEB, RPM, AppImage and Flatpak, each for x86_64 and ARM64. The DEB, RPM
+  and AppImage carry the libraries Contrail needs, so one file installs on Debian 13, Ubuntu 24.04, Fedora,
+  openSUSE, FuriOS and other systems with glibc 2.39 or newer; the Flatpak runs on the GNOME runtime.
+- **Running in the background** (Settings): closing the window keeps messages, notifications and calls coming;
+  an icon in the notification area on desktops, the app's launcher on a phone brings the window back.
+- **Notifications through the shell**, also while the window is closed, with the phone's own message sound.
+- **Incoming calls like the phone's own**: the phone's ringtone (feedbackd), Accept and Decline from the
+  notification, and on a locked phone the call fills the lock screen with Mute, the loudspeaker and End Call,
+  without unlocking.
+- **Where a call is heard**: headphones or Bluetooth when connected, otherwise the earpiece, switchable to the
+  loudspeaker or another device; each output keeps its own call volume. The screen goes dark at the ear and
+  doesn't lock during a call.
+- **Read marks**: opening a chat marks the messages seen as read.
+
+## Everything it does
 
 - Sign-in (code, cloud password), the chat list with pinned chats, archive, search and long-press actions.
 - Chats with history loaded while scrolling, replies, forwards, formatted text, photos, stickers, files,
@@ -33,35 +59,38 @@ move from the earlier SSH install (`contrail-migrate-launcher`, which keeps your
 - Sponsored messages in channels, as the Telegram API terms require of clients that show channels.
 - An adaptive layout: one column on a phone, the chat list and the chat side by side on a wider window, with a
   normal header and window buttons on desktops.
-- Packages: system integration (app list entry, icon at all standard sizes, `contrail --version`), its own
-  version independent of the core, license notices and the complete corresponding sources.
 
 ## Known limitations
 
-- The AppImage is large (about 190 MB): it carries Debian's full FFmpeg with all its codec libraries.
-- Emoji in messages need a color emoji font on the system (the Debian package recommends Noto Color Emoji).
-- No RPM package yet; on RPM-based systems use the AppImage.
+- The packages are large (110–190 MB): they carry Debian's full FFmpeg with all its codec libraries.
+- The Flatpak keeps its own account and chats, apart from the other packages (see the installation guide), and
+  takes `flatpak update` only from a newer file.
+- The RPM isn't signed.
+- Emoji in messages need a color emoji font on the system (the DEB recommends Noto Color Emoji).
 
 ## Not there yet
 
-Group calls, screen sharing, stories, reactions, forwarding and selecting messages, sticker and emoji panels,
-recording video messages, folders, multiple accounts. Secret chats aren't planned: Telegram Desktop doesn't
-have them either.
+Group calls, screen sharing, stories, reactions, voting in polls, forwarding and selecting messages, sticker
+and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't planned: Telegram
+Desktop doesn't have them either.
 
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- These files were installed and started in clean containers with an offline, made-up demo account
-  (`tools/smoke-test.sh`): the Debian package with `apt` in a FuriOS 14 (Debian testing) ARM64 userland, the
-  AppImage on Ubuntu 24.04, Debian 13, Fedora 42 and Arch Linux (X11).
-- Not checked yet with these files: the phone itself, signing in and chatting with a real account, calls,
-  Wayland desktops.
+- Each package was installed the way users do and started in a clean container with an offline, made-up demo
+  account (`tools/smoke-test.sh`, on X11): the DEB with `apt` on Debian 13 and Ubuntu 24.04 (ARM64 also in
+  FuriOS 14's userland), the RPM with `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on
+  Debian 13, Ubuntu 24.04, Fedora 44 and (x86_64) Arch Linux, the x86_64 Flatpak with `flatpak` on Fedora 44.
+  The ARM64 containers ran under qemu-user emulation.
+- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage and Flatpak ran as a second, offline instance
+  with the demo account.
+- Not checked with these files: signing in and chatting with a real account, calls, Wayland desktops.
 
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.1.0-preview1-sources.tar.gz` holds
-Contrail's sources; the `Contrail-0.1.0-preview1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold
-everything else the packages are built from. Checksums: `SHA256SUMS`.
+contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.1.0-sources.tar.gz` holds Contrail's
+sources; the `Contrail-0.1.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
+packages are built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.

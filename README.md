@@ -74,38 +74,28 @@ planned: Telegram Desktop doesn't have them either.
 
 ## Installing
 
-Download the package for your device from the [releases page](https://github.com/x-vlad-x/contrail/releases):
+Download the package for your system from the [releases page](https://github.com/x-vlad-x/contrail/releases).
+Every package comes for x86_64 (`amd64`) and ARM64 (`aarch64`, Linux phones):
 
-| Device | Package |
-| --- | --- |
-| Linux phone, ARM64 (FuriOS and other Debian-based systems) | `contrail_<version>_arm64.deb` |
-| Linux computer, x86_64 (glibc 2.39 or newer) | `Contrail-<version>-x86_64.AppImage` |
+| System | Package | Install |
+| --- | --- | --- |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_<version>-1_<arm64\|amd64>.deb` | `sudo apt install ./contrail_*.deb` |
+| Fedora, openSUSE | `contrail-<version>-1.<aarch64\|x86_64>.rpm` | `sudo dnf install ./contrail-*.rpm` |
+| Any distribution with Flatpak | `Contrail-<version>-<arch>.flatpak` | `flatpak install --user ./Contrail-*.flatpak` |
+| Any distribution | `Contrail-<version>-<arch>.AppImage` | `chmod +x` it and run it |
 
-On the phone:
+The packages are ready to use: no building and no Telegram API keys needed. The DEB, RPM and AppImage carry the
+libraries Contrail needs and run on systems with glibc 2.39 or newer (Debian 13, Ubuntu 24.04, Fedora 40, openSUSE
+Leap 16 or newer); the Flatpak uses the GNOME runtime from Flathub. The account and the cache are kept in
+`~/.local/share/contrail-data` (the Flatpak's in `~/.var/app/io.github.x_vlad_x.Contrail`), separate from the
+official Telegram Desktop. The installation guide that comes with each release (`README.md` among its files) has
+the details, including moving from the earlier SSH install to a package (`contrail-migrate-launcher`).
 
-```bash
-sudo apt install ./contrail_<version>_arm64.deb
-```
-
-On a computer:
-
-```bash
-chmod +x Contrail-<version>-x86_64.AppImage
-./Contrail-<version>-x86_64.AppImage
-```
-
-The packages are ready to use: no building and no Telegram API keys needed. The account and the cache are
-kept in `~/.local/share/contrail-data`, separate from the official Telegram Desktop. The installation guide
-that comes with each release (`README.md` among its files) has the details, including moving from the earlier
-SSH install to the package (`contrail-migrate-launcher`).
-
-Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). The Debian package uses the
-phone's own GTK, Qt, FFmpeg and other libraries; other aarch64 phones and tablets need GTK 4.12+ and libadwaita
-1.6+. Choosing where a call is heard needs `pactl` (PulseAudio, or PipeWire's PulseAudio server); the
-earpiece and the loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs
-a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from
-feedbackd, and a call over the lock screen needs gtk4-layer-shell (bundled with the phone build) and a shell
-with the layer shell, as Phosh.
+Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). Choosing where a call is heard
+needs `pactl` (PulseAudio, or PipeWire's PulseAudio server; the Flatpak carries it); the earpiece and the
+loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs a proximity sensor
+behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from feedbackd, and a call
+over the lock screen needs a shell with the layer shell, as Phosh (gtk4-layer-shell comes with the packages).
 
 ## Building
 
@@ -120,15 +110,19 @@ TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 ### Packages
 
 ```bash
-tools/build-packages.sh phone      # out/packages/contrail_<version>_arm64.deb
-tools/build-packages.sh desktop    # out/packages/Contrail-<version>-x86_64.AppImage
+tools/build-packages.sh aarch64    # ARM64: DEB, RPM, AppImage and Flatpak in out/packages/
+tools/build-packages.sh x86_64     # x86_64: the same four
+tools/smoke-test.sh all-amd64      # install and start each package in clean containers (all-arm64, all)
 ```
 
-This needs git, patch, python3 and podman (or docker); everything else happens in build containers. The
-Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes.
-Nothing is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages,
-corresponding sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LICENSES.md), and
-`tools/publish-release.sh` publishes them as a GitHub release for an existing tag.
+This needs git, patch, python3 and podman (or docker); everything else happens in containers. Both architectures
+are built against Debian 13 (ARM64 cross-compiled), once each, and packaged four ways by `tools/package.py`: the
+DEB, RPM and AppImage carry every library the program needs except the system's base ones
+(`tools/bundle.py`, `packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. The
+Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes. Nothing
+is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages, corresponding
+sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LICENSES.md), and
+`tools/publish-release.sh` publishes them as a GitHub release.
 
 ### Development install over SSH
 
@@ -170,8 +164,8 @@ uses, so nothing has to be installed on the build machine.
 | --- | --- |
 | `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `style.css`, `icons/` |
 | `patches/` | The patches for Telegram Desktop |
-| `build-env/` | The build containers (ARM64 cross build, x86_64 desktop build), CMake toolchains, the build of the extra libraries |
-| `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, release documents |
+| `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
+| `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
 | `tools/` | Package and release scripts, testing helpers |
 | `tests/` | Regression tests (`test-gtk.sh`) and packaging tests (`python3 -m unittest discover tests`) |
 
