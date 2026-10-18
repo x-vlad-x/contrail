@@ -1,7 +1,7 @@
 // Remote control for testing on the phone without touching it (only with CONTRAIL_DEBUG=1):
 //   gdbus call --session --dest io.github.x_vlad_x.Contrail --object-path /io/github/x_vlad_x/Contrail/Debug
 //     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
-// Commands: testmode | login phone|code|name TEXT | chat N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
+// Commands: testmode | login phone|code|name TEXT | chat N | open NAME | topic N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
 //           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
 //           close | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           screenshot [call] PATH
@@ -21,7 +21,11 @@
 #include "core/core_settings.h"
 #include "mtproto/mtp_instance.h"
 #include "mtproto/mtproto_dc_options.h"
+#include "data/data_session.h"
 #include "data/data_user.h"
+#include "dialogs/dialogs_indexed_list.h"
+#include "dialogs/dialogs_main_list.h"
+#include "dialogs/dialogs_row.h"
 
 #include <string>
 
@@ -93,6 +97,18 @@ void Run(MainWindow &w, const std::string &cmdline) {
   const auto arg = (space == std::string::npos) ? std::string() : cmdline.substr(space + 1);
   if (cmd == "chat") {
     w.debugOpenChat(std::atoi(arg.c_str()));
+  } else if (cmd == "topic") {
+    w.debugOpenTopic(std::atoi(arg.c_str()));
+  } else if (cmd == "open") {
+    // A chat of the main list by (a part of) its name.
+    if (const auto session = w.session()) {
+      for (const auto &row : session->data().chatsList()->indexed()->all()) {
+        if (const auto history = row->history(); history && history->peer->name().contains(Q(arg.c_str()))) {
+          w.openHistory(history);
+          break;
+        }
+      }
+    }
   } else if (cmd == "testmode") {
     // Telegram's test servers for a new account, as the "testmode" code on Telegram Desktop's intro.
     auto &domain = Core::App().domain();

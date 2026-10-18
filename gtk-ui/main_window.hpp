@@ -15,6 +15,11 @@ class Session;
 class Account;
 } // namespace Main
 
+namespace Data {
+class Forum;
+class Thread;
+} // namespace Data
+
 namespace Contrail {
 
 class LoginView;
@@ -34,10 +39,15 @@ public:
   void present();
   void showToast(const QString &text);
 
-  // Opens a chat in the content pane (on a phone: pushes it over the chat list).
+  // Opens a chat in the content pane (on a phone: pushes it over the chat list). A group with
+  // topics opens its list of topics in the sidebar instead; a topic opens as a chat of its own.
   void openHistory(not_null<History *> history, MsgId showAt = 0);
+  void openThread(not_null<Data::Thread *> thread, MsgId showAt = 0);
   void openPeer(not_null<PeerData *> peer);
+  void openForum(not_null<History *> history);
+  void closeForum(Data::Forum *forum);
   [[nodiscard]] History *currentHistory() const;
+  [[nodiscard]] Data::Thread *currentThread() const;
   void closeChat();
   void openSettings();
   void openArchive();
@@ -56,6 +66,7 @@ public:
 
   // For the debug actions.
   void debugOpenChat(int index);
+  void debugOpenTopic(int index);
   void debugBack();
   void debugScroll(bool top);
   void debugCallPreview(bool incoming, bool video = false, const QString &name = u"Contrail"_q);
@@ -87,6 +98,7 @@ private:
   std::unique_ptr<LoginView> _login;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
+  std::unique_ptr<ChatList> _forum;
   std::unique_ptr<ChatView> _chat;
   std::unique_ptr<SettingsView> _settings;
   rpl::lifetime _sessionLifetime;

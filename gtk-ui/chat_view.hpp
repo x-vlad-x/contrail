@@ -4,6 +4,7 @@
 
 #include "base/timer.h"
 #include "base/weak_ptr.h"
+#include "data/data_messages.h"
 
 #include <rpl/lifetime.h>
 
@@ -16,20 +17,27 @@ class PeerData;
 class PhotoData;
 class DocumentData;
 
+namespace Data {
+class Thread;
+class ForumTopic;
+} // namespace Data
+
 namespace Contrail {
 
 class MainWindow;
 class MessageWidget;
 
 // An open chat: the messages (loaded page by page through the core, like Telegram Desktop's
-// HistoryWidget does) and the message field.
+// HistoryWidget does) and the message field. A topic of a group with topics is a chat of its own:
+// its messages come from the core's list of the topic (Data::RepliesList), as in RepliesWidget.
 class ChatView final : public base::has_weak_ptr {
 public:
-  ChatView(not_null<History *> history, not_null<MainWindow *> window, MsgId showAt);
+  ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt);
   ~ChatView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
   [[nodiscard]] not_null<History *> history() const { return _history; }
+  [[nodiscard]] not_null<Data::Thread *> thread() const { return _thread; }
 
   void showAt(MsgId id);
   bool handleEscape();  // Cancels a reply or an edit; false if there was nothing to cancel.
@@ -56,6 +64,11 @@ private:
   void loadOlder();
   void loadNewer();
   void requestHistory(MsgId offsetId, int addOffset, int limit, bool older, bool initial);
+  void viewTopic();
+  void applyTopicSlice(Data::MessagesSlice &&slice);
+  [[nodiscard]] bool loadedAtTop() const;
+  [[nodiscard]] bool loadedAtBottom() const;
+  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;
   void reload(MsgId showAt);
   void sync();
   void addRow(not_null<HistoryItem *> item);
@@ -96,7 +109,9 @@ private:
   [[nodiscard]] QString composerText() const;
   void setComposerText(const QString &text);
 
+  const not_null<Data::Thread *> _thread;
   const not_null<History *> _history;
+  Data::ForumTopic *const _topic = nullptr;
   const not_null<MainWindow *> _window;
 
   GtkWidget *_root = nullptr;
@@ -143,6 +158,16 @@ private:
 
   int _olderRequest = 0;
   int _newerRequest = 0;
+  // The part of a topic shown: a slice of its messages around a position, growing as it scrolls.
+  Data::MessagePosition _topicAround;
+  int _topicLimitBefore = 0;
+  int _topicLimitAfter = 0;
+  bool _topicOlderWaiting = false;
+  bool _topicNewerWaiting = false;
+  std::vector<FullMsgId> _topicIds;
+  std::optional<int> _topicSkippedBefore;
+  std::optional<int> _topicSkippedAfter;
+  rpl::lifetime _topicViewer;
   bool _initialLoaded = false;
   bool _stickToBottom = true;
   bool _adjustingScroll = false;

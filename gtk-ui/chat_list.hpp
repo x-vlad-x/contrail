@@ -17,10 +17,13 @@ class Session;
 
 namespace Data {
 class Folder;
+class Forum;
+class Thread;
 } // namespace Data
 
 namespace Dialogs {
 class Entry;
+class MainList;
 } // namespace Dialogs
 
 namespace Contrail {
@@ -29,13 +32,16 @@ class MainWindow;
 
 // The chat list (or the archive) in the sidebar, kept in sync with Telegram Desktop's own list
 // (Data::Session::chatsList): the same order, pinned chats, unread badges and previews.
+// With a forum it is the list of the group's topics (Data::Forum::topicsList).
 class ChatList final : public base::has_weak_ptr {
 public:
-  ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_null<MainWindow *> window);
+  ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_null<MainWindow *> window,
+           Data::Forum *forum = nullptr);
   ~ChatList();
 
   [[nodiscard]] AdwNavigationPage *page() const { return _page; }
-  void setCurrent(History *history);
+  [[nodiscard]] Data::Forum *forum() const { return _forum; }
+  void setCurrent(Data::Thread *thread);
   void startSearch(const QString &query = QString());
   void openRow(int index);
 
@@ -53,8 +59,11 @@ private:
     GtkWidget *badge = nullptr;
   };
 
+  [[nodiscard]] not_null<Dialogs::MainList *> list() const;
+  [[nodiscard]] QString title() const;
   void buildPage();
   GtkWidget *buildMenu();
+  void removeEntry(Dialogs::Entry *entry);
   void refreshRows();
   void scheduleRefresh();
   Row &createRow(not_null<Dialogs::Entry *> entry);
@@ -69,6 +78,7 @@ private:
   const not_null<Main::Session *> _session;
   Data::Folder *const _folder;
   const not_null<MainWindow *> _window;
+  Data::Forum *const _forum;
 
   AdwNavigationPage *_page = nullptr;
   GtkWidget *_list = nullptr;
@@ -83,7 +93,7 @@ private:
   mtpRequestId _globalRequest = 0;
 
   std::unordered_map<Dialogs::Entry *, std::unique_ptr<Row>> _rows;
-  History *_current = nullptr;
+  Data::Thread *_current = nullptr;
   bool _refreshScheduled = false;
   base::Timer _searchTimer;
   rpl::lifetime _lifetime;

@@ -12,6 +12,8 @@
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "data/data_folder.h"
+#include "data/data_forum.h"
+#include "data/data_forum_topic.h"
 #include "data/data_histories.h"
 #include "data/data_peer.h"
 #include "data/data_send_action.h"
@@ -64,11 +66,12 @@ TextWithEntities EntryPreview(not_null<Dialogs::Entry *> entry) {
     }
     return {names.join(u", "_q)};
   }
-  const auto history = entry->asHistory();
-  if (!history) {
+  const auto thread = entry->asThread();
+  if (!thread) {
     return {};
   }
-  if (const auto draft = history->localDraft(MsgId(), PeerId())) {
+  const auto history = thread->owningHistory();
+  if (const auto draft = history->localDraft(thread->topicRootId(), thread->monoforumPeerId())) {
     if (!draft->textWithTags.text.isEmpty()) {
       auto result = Ui::Text::Colorized(tr::lng_from_draft(tr::now) + u": "_q);
       result.append(draft->textWithTags.text);
@@ -101,21 +104,33 @@ TextWithEntities OneLine(TextWithEntities text) {
 
 }  // namespace
 
-ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_null<MainWindow *> window)
-    : _session(session), _folder(folder), _window(window), _searchTimer([=] { searchGlobal(_query); }) {
+ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_null<MainWindow *> window,
+                   Data::Forum *forum)
+    : _session(session), _folder(folder), _window(window), _forum(forum), _searchTimer([=] { searchGlobal(_query); }) {
   buildPage();
   refreshRows();
 
   auto &data = _session->data();
-  data.chatsListChanges() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
-    scheduleRefresh();
-  }, _lifetime);
-  data.chatsListLoadedEvents() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
-    scheduleRefresh();
-  }, _lifetime);
+  if (_forum) {
+    _forum->chatsListChanges() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
+    _forum->chatsListLoadedEvents() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
+    using TopicFlag = Data::TopicUpdate::Flag;
+    _session->changes().topicUpdates(TopicFlag::Title | TopicFlag::Notifications | TopicFlag::Closed
+                                     | TopicFlag::UnreadView | TopicFlag::UnreadMentions | TopicFlag::CloudDraft)
+        | rpl::on_next([=](const Data::TopicUpdate &update) { updateEntry(update.topic); }, _lifetime);
+  } else {
+    data.chatsListChanges() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
+      scheduleRefresh();
+    }, _lifetime);
+    data.chatsListLoadedEvents() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
+      scheduleRefresh();
+    }, _lifetime);
+  }
   _session->changes().entryUpdates(Data::EntryUpdate::Flag::Repaint | Data::EntryUpdate::Flag::LocalDraftSet)
       | rpl::on_next([=](const Data::EntryUpdate &update) { updateEntry(update.entry); }, _lifetime);
   _session->changes().entryUpdates(Data::EntryUpdate::Flag::Destroyed) | rpl::on_next([=](const Data::EntryUpdate &update) {
+    // A deleted topic goes at once: its row must not outlive it until the next refresh.
+    removeEntry(update.entry);
     scheduleRefresh();
   }, _lifetime);
   using HistoryFlag = Data::HistoryUpdate::Flag;
@@ -136,14 +151,19 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
         }, _lifetime);
   data.newItemAdded() | rpl::on_next([=](not_null<HistoryItem *> item) {
     updateEntry(item->history());
+    updateEntry(item->topic());
     scheduleRefresh();
   }, _lifetime);
   data.itemRemoved() | rpl::on_next([=](not_null<const HistoryItem *> item) {
     updateEntry(item->history());
+    updateEntry(item->topic());
   }, _lifetime);
   data.itemDataChanges() | rpl::on_next([=](not_null<HistoryItem *> item) {
     if (item->history()->chatListMessage() == item) {
       updateEntry(item->history());
+    }
+    if (const auto topic = item->topic(); topic && topic->chatListMessage() == item) {
+      updateEntry(topic);
     }
   }, _lifetime);
   data.dialogsRowReplacements() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
@@ -151,6 +171,7 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
       | rpl::filter([](const Data::SendActionManager::AnimationUpdate &update) { return update.textUpdated; })
       | rpl::on_next([=](const Data::SendActionManager::AnimationUpdate &update) {
           updateEntry(update.thread->owningHistory());
+          updateEntry(update.thread);
         }, _lifetime);
 
   // "Connecting..." in the header while there is no connection.
@@ -166,11 +187,25 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
   timer->callEach(1000);
   _lifetime.add([=] { delete timer; });
 
-  if (_folder) {
+  if (_forum) {
+    _forum->requestTopics();
+    // The group stopped being a forum: there are no topics to show.
+    _forum->destroyed() | rpl::on_next([=] {
+      crl::on_main(_window.get(), [window = _window, forum = _forum] { window->closeForum(forum); });
+    }, _lifetime);
+  } else if (_folder) {
     _session->api().requestDialogs(_folder);
   } else {
     _session->api().requestMoreDialogsIfNeeded();
   }
+}
+
+not_null<Dialogs::MainList *> ChatList::list() const {
+  return _forum ? _forum->topicsList() : _session->data().chatsList(_folder);
+}
+
+QString ChatList::title() const {
+  return _forum ? _forum->peer()->name() : _folder ? tr::lng_archived_name(tr::now) : u"Contrail"_q;
 }
 
 ChatList::~ChatList() {
@@ -184,10 +219,9 @@ ChatList::~ChatList() {
 void ChatList::buildPage() {
   auto *view = adw_toolbar_view_new();
   auto *header = adw_header_bar_new();
-  auto *title = adw_window_title_new(
-      _folder ? U8(tr::lng_archived_name(tr::now)).c_str() : "Contrail", "");
+  auto *title = adw_window_title_new(U8(this->title()).c_str(), "");
   adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), title);
-  if (!_folder) {
+  if (!_folder && !_forum) {
     auto *menuButton = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menuButton), "open-menu-symbolic");
     gtk_menu_button_set_primary(GTK_MENU_BUTTON(menuButton), TRUE);
@@ -307,8 +341,8 @@ void ChatList::buildPage() {
   gtk_stack_add_named(GTK_STACK(_stack), _scroll, "list");
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), _stack);
 
-  _page = adw_navigation_page_new(view, _folder ? U8(tr::lng_archived_name(tr::now)).c_str() : "Contrail");
-  adw_navigation_page_set_tag(_page, _folder ? "archive" : "chats");
+  _page = adw_navigation_page_new(view, U8(this->title()).c_str());
+  adw_navigation_page_set_tag(_page, _forum ? "forum" : _folder ? "archive" : "chats");
   g_object_ref_sink(_page);
   g_object_set_data(G_OBJECT(_page), "contrail-title", title);
 }
@@ -356,12 +390,12 @@ void ChatList::scheduleRefresh() {
 }
 
 void ChatList::refreshRows() {
-  const auto list = _session->data().chatsList(_folder);
+  const auto list = this->list();
   std::unordered_map<Dialogs::Entry *, bool> present;
   for (const auto &row : list->indexed()->all()) {
     const auto entry = row->entry().get();
-    // In the main list the archive is a row of its own; topics and other entries aren't shown.
-    if (!entry->asHistory() && !entry->asFolder()) {
+    // In the main list the archive is a row of its own; topics are in a list of their own.
+    if (_forum ? !entry->asTopic() : (!entry->asHistory() && !entry->asFolder())) {
       continue;
     }
     present[entry] = true;
@@ -378,6 +412,7 @@ void ChatList::refreshRows() {
     }
   }
   gtk_list_box_invalidate_sort(GTK_LIST_BOX(_list));
+  if (_forum && g_getenv("CONTRAIL_DEBUG")) g_message("Topics: %d", int(_rows.size()));
   const auto loaded = list->loaded() || !_rows.empty();
   gtk_stack_set_visible_child_name(GTK_STACK(_stack), loaded ? "list" : "loading");
 }
@@ -393,6 +428,9 @@ ChatList::Row &ChatList::createRow(not_null<Dialogs::Entry *> entry) {
   gtk_widget_set_margin_bottom(box, 6);
   if (const auto history = entry->asHistory()) {
     row->avatar = MakeAvatar(history->peer, 48, true);
+  } else if (const auto topic = entry->asTopic()) {
+    // A topic has a colored letter (or "#" for General) instead of a picture.
+    row->avatar = adw_avatar_new(48, U8(topic->isGeneral() ? u"#"_q : topic->title()).c_str(), TRUE);
   } else {
     row->avatar = adw_avatar_new(48, nullptr, FALSE);
     adw_avatar_set_icon_name(ADW_AVATAR(row->avatar), "folder-symbolic");
@@ -472,17 +510,34 @@ ChatList::Row &ChatList::createRow(not_null<Dialogs::Entry *> entry) {
 }
 
 void ChatList::updateEntry(Dialogs::Entry *entry) {
+  if (!entry) {
+    return;
+  }
   if (const auto i = _rows.find(entry); i != _rows.end()) {
     updateRow(*i->second);
     gtk_list_box_row_changed(GTK_LIST_BOX_ROW(i->second->row));
   }
 }
 
+void ChatList::removeEntry(Dialogs::Entry *entry) {
+  if (const auto i = _rows.find(entry); i != _rows.end()) {
+    gtk_list_box_remove(GTK_LIST_BOX(_list), i->second->row);
+    _rows.erase(i);
+    if (_current == entry) {
+      _current = nullptr;
+    }
+  }
+}
+
 void ChatList::updateRow(Row &row) {
   const auto entry = row.entry;
   gtk_label_set_text(GTK_LABEL(row.name), U8(EntryName(entry)).c_str());
-  const auto history = entry->asHistory();
-  gtk_widget_set_visible(row.muted, history && history->muted());
+  const auto thread = entry->asThread();
+  const auto history = thread ? thread->owningHistory().get() : nullptr;
+  gtk_widget_set_visible(row.muted, thread && thread->muted());
+  if (const auto topic = entry->asTopic(); topic && row.avatar) {
+    adw_avatar_set_text(ADW_AVATAR(row.avatar), U8(topic->isGeneral() ? u"#"_q : topic->title()).c_str());
+  }
 
   const auto item = entry->chatListMessage();
   const auto time = entry->chatListTimeId();
@@ -495,7 +550,7 @@ void ChatList::updateRow(Row &row) {
       statusIcon = "dialog-error-symbolic";
     } else if (item->isSending()) {
       statusIcon = "contrail-clock-symbolic";
-    } else if (item->unread(history)) {
+    } else if (item->unread(thread)) {
       statusIcon = "contrail-check-symbolic";
     } else {
       statusIcon = "contrail-check-double-symbolic";
@@ -506,7 +561,7 @@ void ChatList::updateRow(Row &row) {
     gtk_image_set_from_icon_name(GTK_IMAGE(row.status), statusIcon);
   }
 
-  if (const auto action = history ? history->sendActionPainter()->actionText() : QString(); !action.isEmpty()) {
+  if (const auto action = thread ? thread->sendActionPainter()->actionText() : QString(); !action.isEmpty()) {
     gtk_label_set_markup(GTK_LABEL(row.preview), ("<span color=\"#3584e4\">" + Escape(action) + "</span>").c_str());
   } else {
     gtk_label_set_markup(GTK_LABEL(row.preview), ToMarkup(OneLine(EntryPreview(entry)), false, false).c_str());
@@ -535,10 +590,14 @@ void ChatList::updateRow(Row &row) {
   }
 }
 
-void ChatList::setCurrent(History *history) {
-  _current = history;
-  if (history) {
-    if (const auto i = _rows.find(history); i != _rows.end()) {
+void ChatList::setCurrent(Data::Thread *thread) {
+  // The main list marks the group of an open topic.
+  if (thread && !_forum && thread->asTopic()) {
+    thread = thread->owningHistory();
+  }
+  _current = thread;
+  if (thread) {
+    if (const auto i = _rows.find(thread); i != _rows.end()) {
       gtk_list_box_select_row(GTK_LIST_BOX(_list), GTK_LIST_BOX_ROW(i->second->row));
       return;
     }
@@ -553,6 +612,8 @@ void ChatList::activated(GtkListBoxRow *row) {
   }
   if (entry->asFolder()) {
     _window->openArchive();
+  } else if (const auto topic = entry->asTopic()) {
+    _window->openThread(topic);
   } else if (const auto history = entry->asHistory()) {
     _window->openHistory(history);
   }
@@ -565,33 +626,41 @@ void ChatList::openRow(int index) {
 }
 
 void ChatList::showContextMenu(Row &row, double x, double y) {
+  const auto thread = row.entry->asThread();
+  const auto topic = row.entry->asTopic();
   const auto history = row.entry->asHistory();
-  if (!history) {
+  if (!thread) {
     return;
   }
-  const auto peer = history->peer;
+  const auto peer = thread->peer();
   auto *menu = g_menu_new();
-  const auto pinned = history->isPinnedDialog(FilterId());
-  g_menu_append(menu, U8(pinned ? tr::lng_context_unpin_from_top(tr::now) : tr::lng_context_pin_to_top(tr::now)).c_str(),
-                "row.pin");
+  if (history) {
+    const auto pinned = history->isPinnedDialog(FilterId());
+    g_menu_append(menu, U8(pinned ? tr::lng_context_unpin_from_top(tr::now) : tr::lng_context_pin_to_top(tr::now)).c_str(),
+                  "row.pin");
+  }
   if (!peer->isSelf()) {
-    g_menu_append(menu, U8(history->muted() ? tr::lng_context_unmute(tr::now) : tr::lng_context_mute(tr::now)).c_str(),
+    g_menu_append(menu, U8(thread->muted() ? tr::lng_context_unmute(tr::now) : tr::lng_context_mute(tr::now)).c_str(),
                   "row.mute");
   }
-  if (history->chatListBadgesState().unread) {
+  if (thread->chatListBadgesState().unread) {
     g_menu_append(menu, U8(tr::lng_context_mark_read(tr::now)).c_str(), "row.read");
   }
-  if (!peer->isSelf() && !peer->isRepliesChat()) {
+  if (topic) {
+    // Pinning, archiving and leaving are for the whole group.
+  } else if (!peer->isSelf() && !peer->isRepliesChat()) {
     const auto archived = history->folder() != nullptr;
     g_menu_append(menu, U8(archived ? tr::lng_archived_remove(tr::now) : tr::lng_archived_add(tr::now)).c_str(),
                   "row.archive");
   }
-  g_menu_append(menu,
-                U8(peer->isChannel() ? (peer->isMegagroup() ? tr::lng_profile_leave_group(tr::now)
-                                                            : tr::lng_profile_leave_channel(tr::now))
-                                     : tr::lng_profile_delete_conversation(tr::now))
-                    .c_str(),
-                "row.delete");
+  if (history) {
+    g_menu_append(menu,
+                  U8(peer->isChannel() ? (peer->isMegagroup() ? tr::lng_profile_leave_group(tr::now)
+                                                              : tr::lng_profile_leave_channel(tr::now))
+                                       : tr::lng_profile_delete_conversation(tr::now))
+                      .c_str(),
+                  "row.delete");
+  }
 
   auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
   g_object_unref(menu);
@@ -626,14 +695,20 @@ void ChatList::showContextMenu(Row &row, double x, double y) {
   });
   add("mute", [=] {
     auto value = Data::MuteValue();
-    if (history->muted()) {
+    if (thread->muted()) {
       value.unmute = true;
     } else {
       value.forever = true;
     }
-    session->data().notifySettings().update(history, value);
+    session->data().notifySettings().update(thread, value);
   });
-  add("read", [=] { session->data().histories().readInbox(history); });
+  add("read", [=] {
+    if (topic) {
+      topic->readTillEnd();
+    } else {
+      session->data().histories().readInbox(history);
+    }
+  });
   add("archive", [=] {
     const auto archive = (history->folder() == nullptr);
     session->api().toggleHistoryArchived(history, archive, [=] {
@@ -647,7 +722,9 @@ void ChatList::showContextMenu(Row &row, double x, double y) {
 }
 
 void ChatList::loadMore() {
-  if (_folder) {
+  if (_forum) {
+    _forum->requestTopics();
+  } else if (_folder) {
     _session->api().requestDialogs(_folder);
   } else {
     _session->api().requestMoreBlockedByDateDialogs();
@@ -671,7 +748,7 @@ void ChatList::applySearch() {
   if (_globalRequest) {
     _session->api().request(base::take(_globalRequest)).cancel();
   }
-  if (_query.size() >= 3 && !_folder) {
+  if (_query.size() >= 3 && !_folder && !_forum) {
     _searchTimer.callOnce(400);
   } else {
     _searchTimer.cancel();
