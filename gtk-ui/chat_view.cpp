@@ -23,7 +23,10 @@
 #include "data/data_document.h"
 #include "data/data_document_media.h"
 #include "data/data_file_origin.h"
+#include "data/data_forum.h"
+#include "data/data_forum_topic.h"
 #include "data/data_histories.h"
+#include "data/data_replies_list.h"
 #include "data/data_peer_values.h"
 #include "data/data_photo.h"
 #include "data/data_photo_media.h"
@@ -94,8 +97,9 @@ void LaunchFile(const QString &path) {
 
 }  // namespace
 
-ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, MsgId showAt)
-    : _history(history), _window(window), _pendingShowAt(showAt), _readTimer([=] { markAsRead(); }),
+ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt)
+    : _thread(thread), _history(thread->owningHistory()), _topic(thread->asTopic()), _window(window),
+      _pendingShowAt(showAt), _readTimer([=] { markAsRead(); }),
       _statusTimer([=] { refreshHeader(); }), _reserveTimer([=] { maintainTopReserve(); }) {
   _root = adw_toolbar_view_new();
   g_object_ref_sink(_root);
@@ -110,13 +114,19 @@ ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, M
 
   const auto session = &_history->session();
   auto &data = session->data();
-  data.newItemAdded() | rpl::filter([=](not_null<HistoryItem *> item) { return item->history() == _history; })
-      | rpl::on_next([=](not_null<HistoryItem *> item) {
+  data.newItemAdded() | rpl::filter([=](not_null<HistoryItem *> item) {
+    return item->history() == _history && (!_topic || item->topicRootId() == _topic->rootId());
+  }) | rpl::on_next([=](not_null<HistoryItem *> item) {
           // Seen right away while the chat is in front (HistoryWidget::newItemAdded): no notification.
           if (item->showNotification() && _stickToBottom && _window->isActive()
-              && _window->currentHistory() == _history) {
-            _history->owner().histories().readInboxOnNewMessage(item);
-            Core::App().notifications().clearFromHistory(_history);
+              && _window->currentThread() == _thread) {
+            if (_topic) {
+              // The topic's list gets the message a moment later: read when it is shown (markAsRead).
+              Core::App().notifications().clearFromTopic(_topic);
+            } else {
+              _history->owner().histories().readInboxOnNewMessage(item);
+              Core::App().notifications().clearFromHistory(_history);
+            }
           }
           if (!_syncScheduled) {
             _syncScheduled = true;
@@ -146,9 +156,23 @@ ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, M
           refreshHeader();
           refreshComposerState();
         }, _lifetime);
+  if (_topic) {
+    using TopicFlag = Data::TopicUpdate::Flag;
+    session->changes().topicUpdates(_topic, TopicFlag::Title | TopicFlag::Closed | TopicFlag::Notifications)
+        | rpl::on_next([=] {
+            refreshHeader();
+            refreshComposerState();
+          }, _lifetime);
+    // A deleted topic: nothing left to show.
+    _topic->destroyed() | rpl::on_next([=] {
+      crl::on_main(_window.get(), [window = _window, thread = _thread] {
+        if (window->currentThread() == thread) window->closeChat();
+      });
+    }, _lifetime);
+  }
   data.sendActionManager().animationUpdated()
       | rpl::filter([=](const Data::SendActionManager::AnimationUpdate &update) {
-          return update.textUpdated && update.thread == _history.get();
+          return update.textUpdated && update.thread == _thread.get();
         })
       | rpl::on_next([=] { refreshHeader(); }, _lifetime);
   session->downloaderTaskFinished() | rpl::on_next([=] {
@@ -188,7 +212,15 @@ ChatView::ChatView(not_null<History *> history, not_null<MainWindow *> window, M
   });
 
   // Opening a chat with unread messages starts at the first of them, under an "Unread messages" bar.
-  if (!_pendingShowAt && _history->unreadCount() > 0 && _history->inboxReadTillId() > 0) {
+  if (_pendingShowAt) {
+  } else if (_topic) {
+    const auto replies = _topic->replies();
+    if (const auto readTill = replies->computeInboxReadTillFull();
+        replies->unreadCountKnown() && replies->unreadCountCurrent() > 0 && readTill > 0) {
+      _unreadAfter = readTill;
+      _pendingShowAt = _unreadAfter + 1;
+    }
+  } else if (_history->unreadCount() > 0 && _history->inboxReadTillId() > 0) {
     _unreadAfter = _history->inboxReadTillId();
     _pendingShowAt = _unreadAfter + 1;
   }
@@ -213,6 +245,7 @@ ChatView::~ChatView() {
     _recordLifetime.destroy();
     ::Media::Capture::instance()->stop();
   }
+  _topicViewer.destroy();
   _lifetime.destroy();
   if (_olderRequest) {
     _history->owner().histories().cancelRequest(_olderRequest);
@@ -225,12 +258,15 @@ ChatView::~ChatView() {
   const auto reply = _editing ? _beforeEditReplyTo : _replyTo;
   if (text != _loadedDraft || reply != _loadedReplyTo) {
     if (text.trimmed().isEmpty()) {
-      _history->clearLocalDraft(MsgId(), PeerId());
+      _history->clearLocalDraft(_thread->topicRootId(), _thread->monoforumPeerId());
     } else {
+      auto replyTo = FullReplyTo{reply};
+      replyTo.topicRootId = _thread->topicRootId();
+      replyTo.monoforumPeerId = _thread->monoforumPeerId();
       _history->setLocalDraft(std::make_unique<Data::Draft>(
-          TextWithTags{text, {}}, FullReplyTo{reply}, SuggestOptions(), MessageCursor(), Data::WebPageDraft()));
+          TextWithTags{text, {}}, replyTo, SuggestOptions(), MessageCursor(), Data::WebPageDraft()));
     }
-    _history->session().api().saveDraftToCloudDelayed(_history);
+    _history->session().api().saveDraftToCloudDelayed(_thread);
   }
   _waitingMedia.clear();
   _rows.clear();
@@ -267,7 +303,11 @@ void ChatView::refreshHeader() {
   const auto peer = _history->peer;
   auto name = peer->isSelf() ? tr::lng_saved_messages(tr::now) : peer->name();
   QString status;
-  if (const auto user = peer->asUser()) {
+  if (_topic) {
+    // The topic, and the group it is in.
+    name = _topic->title();
+    status = peer->name();
+  } else if (const auto user = peer->asUser()) {
     if (user->isSelf()) {
       status = QString();
     } else if (user->isBot()) {
@@ -285,7 +325,7 @@ void ChatView::refreshHeader() {
     }
   }
   // "typing...", "sending a photo..." while someone does.
-  if (const auto action = _history->sendActionPainter()->actionText(); !action.isEmpty()) {
+  if (const auto action = _thread->sendActionPainter()->actionText(); !action.isEmpty()) {
     status = action;
   }
   adw_window_title_set_title(ADW_WINDOW_TITLE(_title), U8(name).c_str());
@@ -485,7 +525,7 @@ void ChatView::buildList() {
   gtk_widget_set_margin_bottom(_toBottom, 18);
   gtk_widget_set_visible(_toBottom, FALSE);
   _signals.clicked(_toBottom, [this] {
-    if (!_history->loadedAtBottom()) {
+    if (!loadedAtBottom()) {
       // Jumped somewhere into the past: reload the end of the chat.
       reload(0);
     } else {
@@ -513,6 +553,14 @@ void ChatView::buildList() {
 
 void ChatView::loadInitial() {
   if (_olderRequest || _newerRequest || _applyingPage) return;
+  if (_topic) {
+    _topicAround = (_pendingShowAt > 0)
+        ? Data::MessagePosition{.fullId = FullMsgId(_history->peer->id, _pendingShowAt)}
+        : Data::MaxMessagePosition;
+    _topicLimitBefore = _topicLimitAfter = kMessagesPerPage;
+    viewTopic();
+    return;
+  }
   if (_pendingShowAt > 0) {
     if (_history->owner().message(_history->peer, _pendingShowAt)) {
       sync();
@@ -542,7 +590,15 @@ void ChatView::loadInitial() {
 }
 
 void ChatView::loadOlder() {
-  if (_olderRequest || _newerRequest || _applyingPage || _loadFailed || !_initialLoaded || _history->loadedAtTop()) {
+  if (_olderRequest || _newerRequest || _applyingPage || _loadFailed || !_initialLoaded || loadedAtTop()) {
+    return;
+  }
+  if (_topic) {
+    if (!_topicOlderWaiting) {
+      _topicOlderWaiting = true;
+      _topicLimitBefore += kMessagesPerPage;
+      viewTopic();
+    }
     return;
   }
   const auto minId = _history->minMsgId();
@@ -553,7 +609,15 @@ void ChatView::loadOlder() {
 }
 
 void ChatView::loadNewer() {
-  if (_olderRequest || _newerRequest || _applyingPage || _loadFailed || !_initialLoaded || _history->loadedAtBottom()) {
+  if (_olderRequest || _newerRequest || _applyingPage || _loadFailed || !_initialLoaded || loadedAtBottom()) {
+    return;
+  }
+  if (_topic) {
+    if (!_topicNewerWaiting) {
+      _topicNewerWaiting = true;
+      _topicLimitAfter += kMessagesPerPage;
+      viewTopic();
+    }
     return;
   }
   const auto maxId = _history->maxMsgId();
@@ -664,22 +728,94 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
       });
 }
 
+// A topic's messages are a slice of the topic's list; it asks the server for more by itself when
+// the slice is wider than what it has (RepliesList::buildFromData), and sends a new one.
+void ChatView::viewTopic() {
+  _topicViewer.destroy();
+  gtk_widget_set_visible(_loading, TRUE);
+  gtk_widget_set_visible(_retry, FALSE);
+  _topic->replies()->source(_topicAround, _topicLimitBefore, _topicLimitAfter)
+      | rpl::on_next([=](Data::MessagesSlice &&slice) { applyTopicSlice(std::move(slice)); }, _topicViewer);
+}
+
+void ChatView::applyTopicSlice(Data::MessagesSlice &&slice) {
+  const auto first = !_initialLoaded;
+  // Older messages go above the ones on the screen: measure how much they add, as for a page.
+  const auto olderAdded = !slice.ids.empty() && (_topicIds.empty() || slice.ids.front() < _topicIds.front());
+  const auto newerAdded = !slice.ids.empty() && (_topicIds.empty() || _topicIds.back() < slice.ids.back());
+  const auto keepPosition = !first && olderAdded && !_topicIds.empty();
+  const auto heightBefore = keepPosition ? listHeight() : 0;
+  _topicIds = std::move(slice.ids);
+  _topicSkippedBefore = slice.skippedBefore;
+  _topicSkippedAfter = slice.skippedAfter;
+  if (olderAdded || loadedAtTop()) _topicOlderWaiting = false;
+  if (newerAdded || loadedAtBottom()) _topicNewerWaiting = false;
+  _initialLoaded = true;
+  _applyingPage = true;
+  sync();
+  if (keepPosition) {
+    if (const auto added = listHeight() - heightBefore; added > 0) {
+      const auto fromReserve = std::min(added, _topReserve);
+      setTopReserve(_topReserve - fromReserve, added - fromReserve);
+    }
+  }
+  if (first) {
+    setTopReserve(loadedAtTop() ? 0 : kTopReserve, 0);
+    if (_pendingShowAt > 0) {
+      if (!scrollToLoaded(base::take(_pendingShowAt))) scrollToBottom();
+    } else {
+      scrollToBottom();
+      _readTimer.callOnce(500);
+    }
+  }
+  _applyingPage = false;
+  gtk_widget_set_visible(_loading, _topicOlderWaiting || _topicNewerWaiting);
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("Topic slice: %d messages, skipped %d/%d", int(_topicIds.size()),
+      _topicSkippedBefore.value_or(-1), _topicSkippedAfter.value_or(-1));
+  scheduleViewportUpdate();
+}
+
+bool ChatView::loadedAtTop() const {
+  return _topic ? (_topicSkippedBefore == 0) : _history->loadedAtTop();
+}
+
+bool ChatView::loadedAtBottom() const {
+  return _topic ? (_topicSkippedAfter == 0) : _history->loadedAtBottom();
+}
+
+// The messages of the chat, oldest first.
+std::vector<not_null<HistoryItem *>> ChatView::items() const {
+  auto result = std::vector<not_null<HistoryItem *>>();
+  if (_topic) {
+    result.reserve(_topicIds.size());
+    for (const auto &id : _topicIds) {
+      if (const auto item = _history->owner().message(id)) {
+        result.push_back(item);
+      }
+    }
+  } else {
+    for (const auto &block : _history->blocks) {
+      for (const auto &view : block->messages) {
+        result.push_back(view->data());
+      }
+    }
+  }
+  return result;
+}
+
 void ChatView::sync() {
   std::set<const HistoryItem *> present;
   auto lastRegular = MsgId();
   _sponsoredAfter.clear();
-  for (const auto &block : _history->blocks) {
-    for (const auto &view : block->messages) {
-      const auto item = view->data();
-      if (item->isSponsored()) {
-        _sponsoredAfter.emplace(item, lastRegular);
-      } else if (item->isRegular()) {
-        lastRegular = item->id;
-      }
-      present.insert(item);
-      if (!_rows.contains(item)) {
-        addRow(item);
-      }
+  for (const auto &item : items()) {
+    if (item->isSponsored()) {
+      _sponsoredAfter.emplace(item, lastRegular);
+    } else if (item->isRegular()) {
+      lastRegular = item->id;
+    }
+    present.insert(item);
+    if (!_rows.contains(item)) {
+      addRow(item);
     }
   }
   for (auto i = _rows.begin(); i != _rows.end();) {
@@ -781,8 +917,8 @@ bool ChatView::scrollIdleIgnoringShift() const {
 }
 
 void ChatView::maintainTopReserve() {
-  if (!_initialLoaded || _applyingPage || _olderRequest) return;
-  const auto wanted = _history->loadedAtTop() ? 0 : (_topReserve < kTopReserveLow) ? kTopReserve : _topReserve;
+  if (!_initialLoaded || _applyingPage || _olderRequest || _topicOlderWaiting) return;
+  const auto wanted = loadedAtTop() ? 0 : (_topReserve < kTopReserveLow) ? kTopReserve : _topReserve;
   if (wanted == _topReserve) return;
   if (!scrollIdle()) {
     _reserveTimer.callOnce(300);
@@ -834,7 +970,7 @@ void ChatView::updateViewport() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto value = gtk_adjustment_get_value(_adjustment);
-  const auto bottom = value + page >= upper - 40 && _history->loadedAtBottom();
+  const auto bottom = value + page >= upper - 40 && loadedAtBottom();
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
   preloadVisibleEdges();
   if (bottom) {
@@ -846,7 +982,7 @@ void ChatView::updateViewport() {
 
 void ChatView::showSponsored() {
   auto &sponsored = _history->session().sponsoredMessages();
-  if (!_initialLoaded || !_history->loadedAtBottom() || !sponsored.canHaveFor(_history)
+  if (_topic || !_initialLoaded || !_history->loadedAtBottom() || !sponsored.canHaveFor(_history)
       || sponsored.isTopBarFor(_history)) {
     return;
   }
@@ -903,8 +1039,8 @@ void ChatView::preloadVisibleEdges() {
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  if (value - _topReserve < kPreloadHeight && !_history->loadedAtTop()) loadOlder();
-  else if (value + page > upper - kPreloadHeight && !_history->loadedAtBottom()) loadNewer();
+  if (value - _topReserve < kPreloadHeight && !loadedAtTop()) loadOlder();
+  else if (value + page > upper - kPreloadHeight && !loadedAtBottom()) loadNewer();
 }
 
 void ChatView::showAt(MsgId id) {
@@ -924,6 +1060,10 @@ void ChatView::reload(MsgId showAt) {
   setTopReserve(0, 0);
   _history->owner().histories().cancelRequest(base::take(_olderRequest));
   _history->owner().histories().cancelRequest(base::take(_newerRequest));
+  _topicViewer.destroy();
+  _topicIds.clear();
+  _topicSkippedBefore = _topicSkippedAfter = std::nullopt;
+  _topicOlderWaiting = _topicNewerWaiting = false;
   _waitingMedia.clear();
   _rows.clear();
   _pendingShowAt = showAt;
@@ -990,7 +1130,7 @@ void ChatView::scrolled() {
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  const auto atBottom = value + page >= upper - 40 && _history->loadedAtBottom();
+  const auto atBottom = value + page >= upper - 40 && loadedAtBottom();
   // GTK also changes the adjustment while allocating newly inserted rows. Those changes do not
   // represent a user drag and must not drop the bottom/anchor/target requested before layout.
   // Only input events opt out of bottom following. Layout/clamping changes also emit this signal
@@ -1017,28 +1157,36 @@ void ChatView::debugHistory(const QString &action) {
     }
   }
   g_message("History state: rows=%zu min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
-      _rows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(_history->loadedAtTop()),
-      int(_history->loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
+      _rows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
+      int(loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
       gtk_adjustment_get_value(_adjustment), gtk_adjustment_get_upper(_adjustment), gtk_adjustment_get_page_size(_adjustment));
   const auto zero = std::count_if(_rows.begin(), _rows.end(), [](const auto &pair) {
     return gtk_widget_get_height(pair.second->row()) <= 0;
   });
-  g_message("History layout: zero-rows=%d target=%d reserve=%d source=%u mapped=%d sticky=%d list-height=%d kind=%s",
+  g_message("History layout: zero-rows=%d target=%d reserve=%d source=%u mapped=%d sticky=%d list-height=%d kind=%s composer=%s",
       int(zero), int(_scrollTarget.msg.bare), _topReserve, _viewportSource,
       int(gtk_widget_get_mapped(_root)), int(_stickToBottom), gtk_widget_get_height(_list),
-      _history->peer->isUser() ? "user" : _history->peer->isBroadcast() ? "channel" : "group");
+      _topic ? "topic" : _history->peer->isUser() ? "user" : _history->peer->isBroadcast() ? "channel" : "group",
+      gtk_stack_get_visible_child_name(GTK_STACK(_composerStack)));
 }
 
 void ChatView::markAsRead() {
-  if (!_window->isActive() || _window->currentHistory() != _history || !_initialLoaded || _scrollTarget
+  if (!_window->isActive() || _window->currentThread() != _thread || !_initialLoaded || _scrollTarget
       || !gtk_widget_get_mapped(_root)) {
     return;
   }
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   if (page <= 0) return;
   const auto atBottom = gtk_adjustment_get_value(_adjustment) + page >= gtk_adjustment_get_upper(_adjustment) - 40
-      && _history->loadedAtBottom();
+      && loadedAtBottom();
   if (_stickToBottom || atBottom) {
+    if (_topic) {
+      if (_topic->chatListBadgesState().unread) {
+        _topic->readTillEnd();
+      }
+      Core::App().notifications().clearFromTopic(_topic);
+      return;
+    }
     if (_history->unreadCount() > 0 || _history->unreadMark() || _history->chatListBadgesState().unread) {
       _history->owner().histories().readInbox(_history);
     }
@@ -1049,14 +1197,19 @@ void ChatView::markAsRead() {
   // puts its first unread message on the screen, and the list may have nowhere further to scroll.
   HistoryItem *till = nullptr;
   for (const auto &[item, row] : _rows) {
-    if (item->out() || !item->isRegular() || !item->unread(_history) || (till && item->id < till->id)) continue;
+    if (item->out() || !item->isRegular() || !item->unread(_thread) || (till && item->id < till->id)) continue;
     double y = 0;
     const auto height = gtk_widget_get_height(row->row());
     if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height >= 0 && y + height <= page) {
       till = row->item();
     }
   }
-  if (till) _history->owner().histories().readInboxTill(till);
+  if (!till) {
+  } else if (_topic) {
+    _topic->replies()->readTill(till);
+  } else {
+    _history->owner().histories().readInboxTill(till);
+  }
 }
 
 // --- composer ----------------------------------------------------------------
@@ -1135,7 +1288,7 @@ void ChatView::buildComposer() {
     gtk_widget_set_sensitive(_sendButton, !empty && !_editPending);
     gtk_stack_set_visible_child_name(GTK_STACK(_sendStack), (empty && !_editing) ? "mic" : "send");
     if (!empty && !_settingComposerText) {
-      _history->session().sendProgressManager().update(_history, Api::SendProgressType::Typing);
+      _history->session().sendProgressManager().update(_history, _thread->topicRootId(), Api::SendProgressType::Typing);
     }
   });
 
@@ -1168,13 +1321,11 @@ void ChatView::buildComposer() {
           return TRUE;
         } else if (key == GDK_KEY_Up && composerText().isEmpty() && !_editing) {
           // Up in an empty field edits the last sent message.
-          for (auto i = _history->blocks.rbegin(); i != _history->blocks.rend(); ++i) {
-            for (auto j = (*i)->messages.rbegin(); j != (*i)->messages.rend(); ++j) {
-              const auto item = (*j)->data();
-              if (item->out() && item->allowsEdit(base::unixtime::now())) {
-                edit(item);
-                return TRUE;
-              }
+          const auto list = items();
+          for (auto i = list.rbegin(); i != list.rend(); ++i) {
+            if ((*i)->out() && (*i)->allowsEdit(base::unixtime::now())) {
+              edit(*i);
+              return TRUE;
             }
           }
         }
@@ -1195,12 +1346,12 @@ void ChatView::buildComposer() {
       _history->session().api().joinChannel(channel);
     } else {
       auto value = Data::MuteValue();
-      if (_history->muted()) {
+      if (_thread->muted()) {
         value.unmute = true;
       } else {
         value.forever = true;
       }
-      _history->owner().notifySettings().update(_history, value);
+      _history->owner().notifySettings().update(_thread, value);
     }
   });
   gtk_stack_add_named(GTK_STACK(_composerStack), _joinButton, "join");
@@ -1246,7 +1397,7 @@ void ChatView::buildComposer() {
   setupRecordGesture();
 
   // Restore the draft (the core turns one typed on another device into the local one).
-  if (const auto draft = _history->localDraft(MsgId(), PeerId())) {
+  if (const auto draft = _history->localDraft(_thread->topicRootId(), _thread->monoforumPeerId())) {
     _loadedDraft = draft->textWithTags.text;
     _loadedReplyTo = draft->reply.messageId;
     setComposerText(draft->textWithTags.text);
@@ -1261,14 +1412,14 @@ void ChatView::buildComposer() {
 void ChatView::refreshComposerState() {
   const auto peer = _history->peer;
   const auto channel = peer->asChannel();
-  if (channel && !channel->amIn() && !channel->isForum()) {
+  if (channel && !channel->amIn()) {
     gtk_button_set_label(GTK_BUTTON(_joinButton), U8(channel->isBroadcast() ? tr::lng_profile_join_channel(tr::now)
                                                                             : tr::lng_profile_join_group(tr::now))
                                                       .c_str());
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "join");
-  } else if (!Data::CanSendTexts(_history)) {
+  } else if (!Data::CanSendTexts(_thread)) {
     gtk_button_set_label(GTK_BUTTON(_joinButton),
-                         U8(_history->muted() ? tr::lng_channel_unmute(tr::now) : tr::lng_channel_mute(tr::now)).c_str());
+                         U8(_thread->muted() ? tr::lng_channel_unmute(tr::now) : tr::lng_channel_mute(tr::now)).c_str());
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "join");
   } else {
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "field");
@@ -1355,7 +1506,7 @@ bool ChatView::handleEscape() {
 }
 
 void ChatView::send() {
-  if (_editPending || _recording || !Data::CanSendTexts(_history)) return;
+  if (_editPending || _recording || !Data::CanSendTexts(_thread)) return;
   const auto text = composerText().trimmed();
   const auto session = &_history->session();
   if (_editing) {
@@ -1397,25 +1548,25 @@ void ChatView::send() {
   if (text.isEmpty()) {
     return;
   }
-  auto action = Api::SendAction(_history);
+  auto action = Api::SendAction(_thread);
   if (_replyTo) {
-    action.replyTo = FullReplyTo{.messageId = _replyTo};
+    action.replyTo.messageId = _replyTo;
   }
   auto message = Api::MessageToSend(action);
   message.textWithTags = TextWithTags{text, {}};
   session->api().sendMessage(std::move(message));
   setComposerText(QString());
   cancelReplyOrEdit();
-  _history->clearLocalDraft(MsgId(), PeerId());
-  _history->clearCloudDraft(MsgId(), PeerId());
+  _history->clearLocalDraft(_thread->topicRootId(), _thread->monoforumPeerId());
+  _history->clearCloudDraft(_thread->topicRootId(), _thread->monoforumPeerId());
   _loadedDraft.clear();
   _loadedReplyTo = FullMsgId();
   scrollToBottom();
 }
 
 void ChatView::sendText(const QString &text) {
-  if (!Data::CanSendTexts(_history) || text.trimmed().isEmpty()) return;
-  auto message = Api::MessageToSend(Api::SendAction(_history));
+  if (!Data::CanSendTexts(_thread) || text.trimmed().isEmpty()) return;
+  auto message = Api::MessageToSend(Api::SendAction(_thread));
   message.textWithTags = TextWithTags{text, {}};
   _history->session().api().sendMessage(std::move(message));
   scrollToBottom();
@@ -1453,7 +1604,7 @@ void ChatView::chooseFiles() {
 }
 
 void ChatView::sendFiles(const QStringList &paths) {
-  if (paths.isEmpty() || !Data::CanSendTexts(_history)) return;
+  if (paths.isEmpty() || !Data::CanSendTexts(_thread)) return;
   const auto session = &_history->session();
   auto list = Storage::PrepareMediaList(paths, 400, session->premium());
   if (list.error != Ui::PreparedList::Error::None) {
@@ -1461,9 +1612,9 @@ void ChatView::sendFiles(const QStringList &paths) {
     return;
   }
   // Pictures go as photos, everything else as files, each one separately.
-  auto action = Api::SendAction(_history);
+  auto action = Api::SendAction(_thread);
   if (_replyTo) {
-    action.replyTo = FullReplyTo{.messageId = _replyTo};
+    action.replyTo.messageId = _replyTo;
   }
   for (auto &file : list.files) {
     auto single = Ui::PreparedList();
@@ -1515,7 +1666,7 @@ void ChatView::setupRecordGesture() {
 }
 
 void ChatView::startRecording() {
-  if (_editing || !Data::CanSendTexts(_history)) return;
+  if (_editing || !Data::CanSendTexts(_thread)) return;
   const auto capture = ::Media::Capture::instance();
   if (_recording || !capture->available()) {
     if (!capture->available()) {
@@ -1543,7 +1694,7 @@ void ChatView::startRecording() {
     finishRecording(false);
     ShowToast(tr::lng_record_audio_problem(tr::now));
   }, _recordLifetime);
-  _history->session().sendProgressManager().update(_history, Api::SendProgressType::RecordVoice);
+  _history->session().sendProgressManager().update(_history, _thread->topicRootId(), Api::SendProgressType::RecordVoice);
 }
 
 void ChatView::lockRecording() {
@@ -1597,13 +1748,13 @@ void ChatView::finishRecording(bool send) {
   refreshComposerState();
   scheduleViewportUpdate();
   const auto history = _history;
-  auto action = Api::SendAction(_history);
+  auto action = Api::SendAction(_thread);
   if (_replyTo) {
-    action.replyTo = FullReplyTo{.messageId = _replyTo};
+    action.replyTo.messageId = _replyTo;
   }
   if (!send) {
     ::Media::Capture::instance()->stop();
-    history->session().sendProgressManager().cancel(history, Api::SendProgressType::RecordVoice);
+    history->session().sendProgressManager().cancel(history, _thread->topicRootId(), Api::SendProgressType::RecordVoice);
     return;
   }
   cancelReplyOrEdit();
@@ -1622,7 +1773,7 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
   if (item->isSponsored()) return;
   auto *menu = g_menu_new();
   const auto now = base::unixtime::now();
-  if (!item->isService() && Data::CanSendTexts(_history)) {
+  if (!item->isService() && Data::CanSendTexts(_thread)) {
     g_menu_append(menu, U8(tr::lng_context_reply_msg(tr::now)).c_str(), "msg.reply");
   }
   if (!item->originalText().text.isEmpty()) {

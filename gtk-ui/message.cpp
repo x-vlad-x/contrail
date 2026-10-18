@@ -239,6 +239,12 @@ GtkWidget *MessageWidget::buildReply() {
   if (!reply || (!reply->messageId() && reply->fields().quote.text.isEmpty())) {
     return nullptr;
   }
+  // In a group with topics every message "replies" to the start of its topic: that is no reply
+  // (Element::countIsTopicRootReply), unless it quotes it.
+  if (_item->history()->isForum() && reply->messageId() == _item->topicRootId()
+      && reply->fields().quote.text.isEmpty()) {
+    return nullptr;
+  }
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_add_css_class(box, "reply-quote");
   QString name;

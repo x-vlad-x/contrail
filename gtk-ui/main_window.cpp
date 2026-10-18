@@ -14,10 +14,13 @@
 #include "core/application.h"
 #include "core/core_settings.h"
 #include "data/data_folder.h"
+#include "data/data_forum.h"
+#include "data/data_forum_topic.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
 #include "history/history.h"
+#include "history/history_item.h"
 #include "lang/lang_cloud_manager.h"
 #include "lang/lang_keys.h"
 #include "settings.h"
@@ -176,11 +179,16 @@ void MainWindow::followCoreWindow() {
   window->sessionControllerValue() | rpl::map([](Window::SessionController *controller) {
     return controller ? controller->activeChatEntryChanges() : rpl::never<Dialogs::RowDescriptor>();
   }) | rpl::flatten_latest() | rpl::on_next([=](const Dialogs::RowDescriptor &row) {
-    const auto history = row.key.history();
+    const auto thread = row.key.thread();
+    const auto history = thread ? thread->owningHistory().get() : nullptr;
     if (!history || !_session || &history->session() != _session) {
       return;
     }
-    openHistory(history, row.fullId.msg);
+    if (const auto topic = row.key.topic()) {
+      openThread(topic, row.fullId.msg);
+    } else {
+      openHistory(history, row.fullId.msg);
+    }
     present();
     // Close it there, so it isn't read in the background and opens again next time.
     crl::on_main(this, [peer = history->peer] {
@@ -240,6 +248,7 @@ void MainWindow::clearSessionUi() {
   }
   _settings = nullptr;
   _archive = nullptr;
+  _forum = nullptr;
   if (_chatList) {
     adw_navigation_view_remove(_sidebarNav, _chatList->page());
     _chatList = nullptr;
@@ -300,22 +309,47 @@ void MainWindow::openHistory(not_null<History *> history, MsgId showAt) {
   if (!_session) {
     return;
   }
-  if (_chat && _chat->history() == history) {
+  if (const auto forum = history->peer->forum()) {
+    // Messages of a group with topics are written and read in their topics.
+    const auto item = showAt ? history->owner().message(history->peer, showAt) : nullptr;
+    if (const auto topic = item ? item->topic() : nullptr) {
+      openThread(topic, showAt);
+    } else {
+      openForum(history);
+    }
+    return;
+  }
+  openThread(history, showAt);
+}
+
+void MainWindow::openThread(not_null<Data::Thread *> thread, MsgId showAt) {
+  if (!_session) {
+    return;
+  }
+  if (_chat && _chat->thread() == thread) {
     if (showAt) {
       _chat->showAt(showAt);
     }
   } else {
     auto old = std::move(_chat);
-    _chat = std::make_unique<ChatView>(history, this, showAt);
+    _chat = std::make_unique<ChatView>(thread, this, showAt);
     adw_navigation_page_set_child(_contentPage, _chat->widget());
-    adw_navigation_page_set_title(_contentPage, U8(history->peer->name()).c_str());
+    const auto topic = thread->asTopic();
+    adw_navigation_page_set_title(_contentPage, U8(topic ? topic->title() : thread->peer()->name()).c_str());
     old = nullptr;
   }
+  if (const auto topic = thread->asTopic(); topic && (!_forum || _forum->forum() != topic->forum())) {
+    // A topic opened from a notification or a link: Back on a phone leads to the other topics.
+    openForum(topic->history());
+  }
   if (_chatList) {
-    _chatList->setCurrent(history);
+    _chatList->setCurrent(thread);
   }
   if (_archive) {
-    _archive->setCurrent(history);
+    _archive->setCurrent(thread);
+  }
+  if (_forum) {
+    _forum->setCurrent(thread);
   }
   adw_navigation_split_view_set_show_content(_split, TRUE);
 }
@@ -324,8 +358,60 @@ void MainWindow::openPeer(not_null<PeerData *> peer) {
   openHistory(peer->owner().history(peer));
 }
 
+void MainWindow::openForum(not_null<History *> history) {
+  const auto forum = history->peer->forum();
+  if (!_session || !forum) {
+    return;
+  }
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (_forum && _forum->forum() == forum) {
+    if (adw_navigation_view_find_page(_sidebarNav, "forum")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _forum->page());
+    } else {
+      adw_navigation_view_push(_sidebarNav, _forum->page());
+    }
+    return;
+  }
+  if (_forum) {
+    // Another group's topics: this one takes their place.
+    if (adw_navigation_view_find_page(_sidebarNav, "forum")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _forum->page());
+      adw_navigation_view_pop(_sidebarNav);
+    }
+    _forum = nullptr;
+  }
+  _forum = std::make_unique<ChatList>(_session, nullptr, this, forum);
+  _forum->setCurrent(currentThread());
+  adw_navigation_view_push(_sidebarNav, _forum->page());
+  Connect<void(AdwNavigationPage *)>(_forum->page(), "hidden", [this, page = _forum->page()](AdwNavigationPage *) {
+    crl::on_main(this, [=] {
+      if (_forum && _forum->page() == page && adw_navigation_view_find_page(_sidebarNav, "forum") != page) {
+        _forum = nullptr;
+      }
+    });
+  });
+}
+
+void MainWindow::closeForum(Data::Forum *forum) {
+  if (!_forum || _forum->forum() != forum) {
+    return;
+  }
+  if (const auto topic = currentThread() ? currentThread()->asTopic() : nullptr; topic && topic->forum() == forum) {
+    closeChat();
+  }
+  if (adw_navigation_view_find_page(_sidebarNav, "forum") == _forum->page()) {
+    adw_navigation_view_pop_to_page(_sidebarNav, _forum->page());
+    adw_navigation_view_pop(_sidebarNav);
+  }
+  _forum = nullptr;
+}
+
 History *MainWindow::currentHistory() const {
   return _chat ? _chat->history().get() : nullptr;
+}
+
+Data::Thread *MainWindow::currentThread() const {
+  return _chat ? _chat->thread().get() : nullptr;
 }
 
 void MainWindow::closeChat() {
@@ -340,6 +426,9 @@ void MainWindow::closeChat() {
   }
   if (_archive) {
     _archive->setCurrent(nullptr);
+  }
+  if (_forum) {
+    _forum->setCurrent(nullptr);
   }
 }
 
@@ -468,6 +557,12 @@ void MainWindow::debugHistory(const QString &action) {
 void MainWindow::debugOpenChat(int index) {
   if (_chatList) {
     _chatList->openRow(index);
+  }
+}
+
+void MainWindow::debugOpenTopic(int index) {
+  if (_forum) {
+    _forum->openRow(index);
   }
 }
 
