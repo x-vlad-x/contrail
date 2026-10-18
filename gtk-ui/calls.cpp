@@ -18,6 +18,8 @@
 #include "ui/text/format_values.h"
 #include "webrtc/webrtc_video_track.h"
 #include "webrtc/webrtc_environment.h"
+#include "ui/userpic_view.h"
+#include "window/notifications_utilities.h"
 
 #include <QtGui/QPainter>
 
@@ -98,6 +100,14 @@ CallView::CallView(not_null<MainWindow *> window)
     : _parent(window)
     , _audio([=] { updateAudioRoute(); }, cWorkingDir() + u"tdata/contrail-call-volumes.ini"_q)
     , _proximity([=](bool near) { setProximityShield(near); })
+    , _notification({
+          .accept = [=] { crl::on_main(this, [=] {
+            if (const auto call = _call.get(); call && !_ending && call->isIncomingWaiting()) call->answer();
+          }); },
+          .decline = [=] { crl::on_main(this, [=] { hangup(); }); },
+          .hangup = [=] { crl::on_main(this, [=] { hangup(); }); },
+          .open = [=] { crl::on_main(this, [=] { _parent->present(); present(); }); },
+      })
     , _timer([=] { refresh(); }) {
   _window = adw_window_new();
   g_object_ref_sink(_window);
@@ -273,6 +283,7 @@ void CallView::hangup() {
   const auto call = _call.get();
   if (!call) {
     _audio.end();
+    _notification.close();
     gtk_widget_set_visible(_window, FALSE);
     return;
   }
@@ -299,6 +310,7 @@ void CallView::setCall(Calls::Call *call) {
     Core::App().settings().setCallPlaybackDeviceId(QString());
     Core::App().saveSettingsDelayed();
     _parent->setCallStatus(QString(), false);
+    _notification.close();
     gtk_widget_set_visible(_window, FALSE);
     return;
   }
@@ -394,10 +406,24 @@ void CallView::refresh() {
   }
   refreshDevices();
   updateProximity();
+  updateNotification();
   _parent->setCallStatus(call->user()->name() + u" · "_q + status, !final);
   if (final) {
     _timer.cancel();
     crl::on_main(call, [=] { if (call->ratingInPanel()) call->finishRating(); });
+  }
+}
+
+void CallView::updateNotification() {
+  const auto call = _call.get();
+  if (!call || _ending) {
+    _notification.close();
+  } else if (call->isIncomingWaiting()) {
+    Ui::PeerUserpicView userpic;
+    _notification.showIncoming(call->user()->name(), tr::lng_call_incoming(tr::now),
+        Window::Notifications::GenerateUserpic(call->user(), userpic));
+  } else {
+    _notification.showOngoing(call->user()->name(), CallStatus(call));
   }
 }
 
@@ -599,6 +625,7 @@ void CallView::preview(bool incoming, bool video, const QString &name) {
     gtk_widget_set_visible(_localFrame, TRUE);
     gtk_widget_set_visible(_avatarBox, FALSE);
   }
+  if (incoming) _notification.showIncoming(name, tr::lng_call_incoming(tr::now), QImage());
   gtk_window_present(GTK_WINDOW(_window));
 }
 

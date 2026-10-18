@@ -55,7 +55,9 @@ or dark style and accent color.
   camera in a corner. As in the phone apps, a call is heard where the sound already goes (Bluetooth or
   wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
   each of the phone's outputs keeps its own call volume, apart from the media volume. The screen goes
-  dark while the phone is held to the ear, and doesn't lock during a call.
+  dark while the phone is held to the ear, and doesn't lock during a call. An incoming call also comes as
+  a notification with Accept and Decline, which Phosh shows on the lock screen too, then End Call while
+  it goes on.
 - **Notifications** through the core's native Linux notifications; tapping one opens the chat.
 - **Running in the background** (Settings): closing the window keeps messages, notifications and calls
   coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
@@ -162,7 +164,7 @@ uses, so nothing has to be installed on the build machine.
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `dialogs`, `settings`, `style.css`, `icons/` |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `dialogs`, `settings`, `style.css`, `icons/` |
 | `patches/` | The patches for Telegram Desktop |
 | `build-env/` | The build containers (ARM64 cross build, x86_64 desktop build), CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, release documents |
