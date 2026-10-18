@@ -83,7 +83,8 @@ Desktop doesn't have them either.
   Arch Linux, the Flatpak with `flatpak` on Fedora 44 (all on X11).
 - On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage and Flatpak ran as a second, offline instance
   with the demo account.
-- Not checked with these files: signing in and chatting with a real account, calls, Wayland desktops.
+- Not checked with these files: installing the ARM64 DEB and RPM (they carry the same files as the ARM64
+  AppImage), signing in and chatting with a real account, calls, Wayland desktops.
 
 ## Sources and licenses
 

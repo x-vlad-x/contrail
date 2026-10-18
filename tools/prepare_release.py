@@ -223,7 +223,7 @@ def main():
     if bundle.exists():
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True)
-    files = {}
+    files, debian_files = {}, {}
     files[core_archive(bundle, info["core_commit"])] = "telegram-desktop.tar.xz"
     for deb_arch, target in TARGETS.items():
         deps = ROOT / ARCHES[target["arch"]]["deps"] / "sources"
@@ -247,14 +247,20 @@ def main():
         available = {(s["package"], s["version"]) for s in metadata["sources"]}
         if missing := wanted - available:
             raise RuntimeError(f"Debian sources missing for {deb_arch}: {sorted(missing)}")
+        # Source packages are the same for both architectures: each file goes in once.
         for source in metadata["sources"]:
             for record in source["files"]:
                 path = debian / record["name"]
                 if not path.is_file() or path.stat().st_size != record["size"] or digest(path) != record["sha256"]:
                     raise RuntimeError(f"Missing or changed Debian source file: {path}")
-                files[path] = f"debian-{deb_arch}/{record['name']}"
+                name = f"debian/{record['name']}"
+                if name in debian_files and debian_files[name] != record["sha256"]:
+                    raise RuntimeError(f"Different Debian source files with one name: {record['name']}")
+                debian_files[name] = record["sha256"]
+                if name not in files.values():
+                    files[path] = name
             verify_dsc(source, debian)
-        files[debian / "sources.json"] = f"debian-{deb_arch}/sources.json"
+        files[debian / "sources.json"] = f"debian/sources-{deb_arch}.json"
     runtime = json.loads((ROOT / "packaging/runtime-sources.json").read_text())
     tools = json.loads((ROOT / "packaging/appimage-tools.json").read_text())
     if any(tools[f"runtime-{target['arch']}"]["source_commit"] != runtime["runtime_commit"]
