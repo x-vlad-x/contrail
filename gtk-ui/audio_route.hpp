@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QtCore/QHash>
 #include <QtCore/QProcess>
 #include <QtCore/QStringList>
 #include <deque>
@@ -11,6 +12,8 @@ namespace Contrail {
 // Where a call is heard, chosen as in the phone apps: the earpiece, the loudspeaker, headphones or
 // another device (Bluetooth). FuriOS exposes the earpiece, the loudspeaker and the wired jack as ports
 // of one PulseAudio sink, not as separate devices; every other sink is one output.
+// Those ports share the sink's volume, so a call keeps a volume of its own for each of them (in
+// volumesFile) and the sink gets its volume back after the call, as phones keep call and media volumes apart.
 class AudioRoute final {
 public:
   enum class Kind { Earpiece, Speaker, Headphones, Bluetooth, Other };
@@ -24,7 +27,7 @@ public:
   };
   using Changed = std::function<void()>;
 
-  explicit AudioRoute(Changed changed);
+  explicit AudioRoute(Changed changed, QString volumesFile = QString());
   ~AudioRoute();
 
   // A call starts where the sound goes now: headphones or another device when one is the default
@@ -49,6 +52,7 @@ private:
     QString activePort;
     QString bus;
     QString formFactor;
+    int volume = -1;
     std::vector<Port> ports;
     bool skip = false;
   };
@@ -63,6 +67,9 @@ private:
   void parseSinks(const QByteArray &json);
   void queried();
   void apply(const Output &output);
+  void setVolume(const QString &sink, int volume, bool call = true);
+  void rememberVolume(const QString &port, int volume);
+  void trackVolume();
   void startMonitor();
   void stopMonitor();
   [[nodiscard]] const Output *find(const QString &id) const;
@@ -80,11 +87,16 @@ private:
   QString _defaultSink;
   QString _knownDefaultSink;
   QString _currentId;
-  // The port of the phone's sink before the call, to put back afterwards unless someone else
-  // changed it in the meantime.
+  // The port and the volume of the phone's sink before the call, to put back afterwards unless
+  // someone else changed the port in the meantime.
   QString _restoreSink;
   QString _originalPort;
   QString _selectedPort;
+  int _originalVolume = -1;
+  int _appliedVolume = -1;
+  int _volumesPending = 0;
+  QString _volumesFile;
+  QHash<QString, int> _callVolumes;
   bool _active = false;
   bool _video = false;
   bool _queryQueued = false;

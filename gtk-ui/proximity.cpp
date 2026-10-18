@@ -19,10 +19,6 @@ GDBusConnection *SessionBus() {
   return bus;
 }
 
-GVariant *PowerSaveMode(int mode) {
-  return g_variant_new("(ssv)", "org.gnome.Mutter.DisplayConfig", "PowerSaveMode", g_variant_new_int32(mode));
-}
-
 bool Cancelled(GError *error) {
   const auto result = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
   if (error && !result && g_getenv("CONTRAIL_DEBUG")) g_message("Proximity: %s", error->message);
@@ -36,13 +32,6 @@ Proximity::Proximity(Changed changed) : _changed(std::move(changed)), _cancellab
 
 Proximity::~Proximity() {
   g_cancellable_cancel(_cancellable);
-  if (_blanked && SessionBus()) {
-    // Never leave the display off behind us.
-    auto *result = g_dbus_connection_call_sync(SessionBus(), "org.gnome.Mutter.DisplayConfig",
-        "/org/gnome/Mutter/DisplayConfig", "org.freedesktop.DBus.Properties", "Set", PowerSaveMode(0), nullptr,
-        G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr);
-    if (result) g_variant_unref(result);
-  }
   if (_sensor) {
     g_signal_handlers_disconnect_by_data(_sensor, this);
     // The service drops the claim when the app leaves the bus; release it now if the app stays.
@@ -134,17 +123,58 @@ void Proximity::setNear(bool near) {
   if (_near == near) return;
   _near = near;
   if (g_getenv("CONTRAIL_DEBUG")) g_message("Proximity: %s", near ? "near" : "far");
-  blank(near);
   _changed(near);
 }
 
-void Proximity::blank(bool off) {
-  if (off == _blanked || !SessionBus()) return;
-  _blanked = off;
-  // 0 is on; anything else turns the display off (Phosh and Mutter alike).
-  g_dbus_connection_call(SessionBus(), "org.gnome.Mutter.DisplayConfig",
-      "/org/gnome/Mutter/DisplayConfig", "org.freedesktop.DBus.Properties", "Set", PowerSaveMode(off ? 3 : 0), nullptr,
-      G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, nullptr, nullptr);
+void Proximity::debugSetNear(bool near) {
+  if (_enabled) setNear(near);
+}
+
+IdleInhibitor::IdleInhibitor() : _cancellable(g_cancellable_new()) {
+}
+
+IdleInhibitor::~IdleInhibitor() {
+  g_cancellable_cancel(_cancellable);
+  set(false);
+  g_object_unref(_cancellable);
+}
+
+void IdleInhibitor::set(bool inhibit) {
+  if (_requested == inhibit || !SessionBus()) return;
+  _requested = inhibit;
+  if (!inhibit) {
+    uninhibit();
+    return;
+  }
+  if (_pending || _cookie) return;
+  _pending = true;
+  // Flags: 4 suspending, 8 the session becoming idle (which blanks and then locks the screen).
+  g_dbus_connection_call(SessionBus(), "org.gnome.SessionManager", "/org/gnome/SessionManager",
+      "org.gnome.SessionManager", "Inhibit", g_variant_new("(susu)", "io.github.x_vlad_x.Contrail", 0u,
+      "A call is in progress", 4u | 8u), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
+      +[](GObject *source, GAsyncResult *result, gpointer data) {
+        GError *error = nullptr;
+        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
+        if (Cancelled(error)) {
+          g_error_free(error);
+          return;
+        }
+        g_clear_error(&error);
+        const auto self = static_cast<IdleInhibitor *>(data);
+        self->_pending = false;
+        if (!reply) return;
+        g_variant_get(reply, "(u)", &self->_cookie);
+        g_variant_unref(reply);
+        if (!self->_requested) self->uninhibit();
+      }, this);
+}
+
+void IdleInhibitor::uninhibit() {
+  if (!_cookie) return;
+  g_dbus_connection_call(SessionBus(), "org.gnome.SessionManager", "/org/gnome/SessionManager",
+      "org.gnome.SessionManager", "Uninhibit", g_variant_new("(u)", _cookie), nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
+      nullptr, nullptr, nullptr);
+  _cookie = 0;
 }
 
 } // namespace Contrail

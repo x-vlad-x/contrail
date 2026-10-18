@@ -36,6 +36,7 @@ private:
   void updateAudioRoute();
   void chooseAudioOutput();
   void updateProximity();
+  void setProximityShield(bool near);
   void hangup();
 
   const not_null<MainWindow *> _parent;
@@ -63,6 +64,8 @@ private:
   QString _playbackOutput;
   AudioRoute _audio;
   Proximity _proximity;
+  IdleInhibitor _idle;
+  bool _shieldFullscreen = false;
   VideoFrameConverter _incomingConverter;
   VideoFrameConverter _outgoingConverter;
   base::Timer _timer;

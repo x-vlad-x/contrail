@@ -4,6 +4,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
 #include <QtCore/QProcessEnvironment>
+#include <QtCore/QSettings>
 #include <algorithm>
 
 namespace Contrail {
@@ -17,9 +18,23 @@ bool WiredPort(const QString &port) {
   return PhonePort(port, "wired") || PhonePort(port, "headset") || PhonePort(port, "headphone");
 }
 
+// PulseAudio's 100%. The earpiece is quiet: a call starts loud enough on it.
+constexpr auto kNormalVolume = 65536;
+constexpr auto kEarpieceVolume = kNormalVolume * 4 / 5;
+const auto kVolumesGroup = QStringLiteral("call-volume");
+
 } // namespace
 
-AudioRoute::AudioRoute(Changed changed) : _changed(std::move(changed)) {
+AudioRoute::AudioRoute(Changed changed, QString volumesFile)
+    : _changed(std::move(changed)), _volumesFile(std::move(volumesFile)) {
+  if (!_volumesFile.isEmpty()) {
+    QSettings settings(_volumesFile, QSettings::IniFormat);
+    settings.beginGroup(kVolumesGroup);
+    for (const auto &port : settings.childKeys()) {
+      const auto volume = settings.value(port).toInt();
+      if (volume > 0) _callVolumes.insert(port, volume);
+    }
+  }
   auto environment = QProcessEnvironment::systemEnvironment();
   environment.insert(QStringLiteral("LC_ALL"), QStringLiteral("C"));
   _process.setProcessEnvironment(environment);
@@ -125,6 +140,9 @@ void AudioRoute::parseSinks(const QByteArray &json) {
       .formFactor = properties.value(QStringLiteral("device.form_factor")).toString(),
     };
     if (sink.description.isEmpty()) sink.description = sink.name;
+    for (const auto &channel : object.value(QStringLiteral("volume")).toObject()) {
+      sink.volume = std::max(sink.volume, channel.toObject().value(QStringLiteral("value")).toInt(-1));
+    }
     // OpenAL Soft names devices by their descriptions in this order, numbering repeated ones.
     sink.device = sink.description;
     for (auto count = 1; devices.contains(sink.device);) {
@@ -211,31 +229,33 @@ void AudioRoute::queried() {
   }
 
   if (!_active) {
-    // After the call: put the phone's port back, unless it was changed by someone else since.
-    if (!_restoreSink.isEmpty()) {
-      const auto restoreSink = _restoreSink;
-      const auto original = _originalPort;
-      const auto target = sink(restoreSink);
-      if (target && !_selectedPort.isEmpty() && target->activePort == _selectedPort && _selectedPort != original) {
-        run({QStringLiteral("set-sink-port"), restoreSink, original}, [=, this](int code, const QByteArray &) {
-          if (code != 0) return;
-          if (const auto target = sink(restoreSink)) target->activePort = original;
-          // A call started meanwhile keeps the original port to come back to.
-          _selectedPort.clear();
-          if (!_active) {
-            _restoreSink.clear();
-            _originalPort.clear();
-          }
+    // After the call: put the phone's port and volume back, unless the port was changed by someone else
+    // since. A call starting meanwhile queries after these commands and starts from the result.
+    const auto target = _restoreSink.isEmpty() ? nullptr : sink(_restoreSink);
+    if (target) {
+      const auto name = target->name;
+      const auto ours = target->activePort == _selectedPort;
+      if (ours) trackVolume();
+      if (ours && _selectedPort != _originalPort) {
+        const auto original = _originalPort;
+        run({QStringLiteral("set-sink-port"), name, original}, [=, this](int code, const QByteArray &) {
+          if (code == 0) if (const auto target = sink(name)) target->activePort = original;
         });
-      } else {
-        _restoreSink.clear();
-        _originalPort.clear();
-        _selectedPort.clear();
+      }
+      // The volume goes back also after another app moved the port, unless that changed the volume too.
+      if (_originalVolume >= 0 && (ours || target->volume == _appliedVolume)
+          && (target->volume != _originalVolume || _volumesPending)) {
+        setVolume(name, _originalVolume, false);
       }
     }
+    _restoreSink.clear();
+    _originalPort.clear();
+    _selectedPort.clear();
+    _originalVolume = _appliedVolume = -1;
     notify();
     return;
   }
+  trackVolume();
 
   // During the call: follow the system to a newly connected device, as the phone apps do.
   const auto defaultChanged = !_knownDefaultSink.isEmpty() && _defaultSink != _knownDefaultSink;
@@ -262,27 +282,66 @@ void AudioRoute::select(const QString &id) {
 void AudioRoute::apply(const Output &output) {
   _currentId = output.id;
   const auto target = output.port.isEmpty() ? nullptr : sink(output.sink);
-  if (target && target->activePort != output.port) {
+  if (target) {
     if (_restoreSink.isEmpty()) {
       _restoreSink = target->name;
-      _originalPort = target->activePort;
+      _originalPort = _selectedPort = target->activePort;
+      _originalVolume = target->volume;
     }
     const auto name = output.sink;
     const auto port = output.port;
-    run({QStringLiteral("set-sink-port"), name, port}, [=, this](int code, const QByteArray &) {
-      const auto target = sink(name);
-      if (code == 0) {
-        if (target) target->activePort = port;
-        _selectedPort = port;
-      } else if (target && _currentId == name + u'/' + port) {
-        // The route stays where the sound actually is.
-        const auto actual = find(name + u'/' + target->activePort);
-        _currentId = actual ? actual->id : QString();
-      }
-      notify();
-    });
+    if (target->activePort != port) {
+      run({QStringLiteral("set-sink-port"), name, port}, [=, this](int code, const QByteArray &) {
+        const auto target = sink(name);
+        if (code == 0) {
+          if (target) target->activePort = port;
+          _selectedPort = port;
+        } else if (target && _currentId == name + u'/' + port) {
+          // The route stays where the sound actually is.
+          const auto actual = find(name + u'/' + target->activePort);
+          _currentId = actual ? actual->id : QString();
+        }
+        notify();
+      });
+    }
+    // Queued right after the port: no query sees the new port with the old volume.
+    const auto saved = _callVolumes.find(port);
+    const auto volume = saved != _callVolumes.end() ? *saved
+        : output.kind == Kind::Earpiece ? kEarpieceVolume
+        : _originalVolume;
+    if (volume >= 0 && (volume != target->volume || _volumesPending)) setVolume(name, volume);
+    else _appliedVolume = target->volume;
   }
   notify();
+}
+
+void AudioRoute::setVolume(const QString &name, int volume, bool call) {
+  ++_volumesPending;
+  run({QStringLiteral("set-sink-volume"), name, QString::number(volume)}, [=, this](int code, const QByteArray &) {
+    --_volumesPending;
+    if (code != 0) return;
+    if (const auto target = sink(name)) target->volume = volume;
+    if (call) _appliedVolume = volume;
+  });
+}
+
+// A volume changed during the call (the volume keys, the shell's slider) belongs to the call's port.
+void AudioRoute::trackVolume() {
+  const auto output = find(_currentId);
+  const auto target = _restoreSink.isEmpty() ? nullptr : sink(_restoreSink);
+  if (_volumesPending || !output || !target || output->sink != target->name || output->port != target->activePort
+      || target->volume < 0 || target->volume == _appliedVolume) {
+    return;
+  }
+  if (_appliedVolume >= 0) rememberVolume(output->port, target->volume);
+  _appliedVolume = target->volume;
+}
+
+void AudioRoute::rememberVolume(const QString &port, int volume) {
+  _callVolumes.insert(port, volume);
+  if (_volumesFile.isEmpty()) return;
+  QSettings settings(_volumesFile, QSettings::IniFormat);
+  settings.setValue(kVolumesGroup + u'/' + port, volume);
 }
 
 void AudioRoute::end() {

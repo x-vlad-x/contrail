@@ -54,7 +54,8 @@ or dark style and accent color.
   encryption emoji, back to an ongoing call from any chat. The remote video fills the window with your
   camera in a corner. As in the phone apps, a call is heard where the sound already goes (Bluetooth or
   wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
-  the screen goes dark while the phone is held to the ear.
+  each of the phone's outputs keeps its own call volume, apart from the media volume. The screen goes
+  dark while the phone is held to the ear, and doesn't lock during a call.
 - **Notifications** through the core's native Linux notifications; tapping one opens the chat.
 - **Running in the background** (Settings): closing the window keeps messages, notifications and calls
   coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
@@ -98,8 +99,7 @@ Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). T
 phone's own GTK, Qt, FFmpeg and other libraries; other aarch64 phones and tablets need GTK 4.12+ and libadwaita
 1.6+. Choosing where a call is heard needs `pactl` (PulseAudio, or PipeWire's PulseAudio server); the
 earpiece and the loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs
-a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service) and a shell with Mutter's
-DisplayConfig interface, as Phosh has.
+a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service).
 
 ## Building
 

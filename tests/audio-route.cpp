@@ -86,6 +86,8 @@ int main(int argc, char **argv) {
   const auto state = path("port");
   const auto pactl = path("pactl");
   write(state, "output-speaker");
+  const auto volume = path("volume");
+  write(volume, "13107");
   write(pactl, R"py(#!/usr/bin/python3
 import json, os, pathlib, sys, time
 state = pathlib.Path(os.environ['CONTRAIL_TEST_AUDIO_STATE'])
@@ -95,8 +97,10 @@ if sys.argv[1:] == ['--format=json', 'info']:
     print(json.dumps({'default_sink_name': default}))
 elif sys.argv[1:] == ['--format=json', 'list', 'sinks']:
     wired = 'available' if other('wired').exists() else 'not available'
+    volume = int(other('volume').read_text())
     sinks = [{'name': 'phone-output', 'description': 'Phone audio', 'driver': 'module-droid-card.c',
-        'active_port': state.read_text(), 'properties': {}, 'ports': [
+        'active_port': state.read_text(), 'properties': {},
+        'volume': {'front-left': {'value': volume}, 'front-right': {'value': volume}}, 'ports': [
             {'name': 'output-parking', 'availability': 'available'},
             {'name': 'output-speaker', 'availability': 'available'},
             {'name': 'output-earpiece', 'availability': 'available'},
@@ -113,13 +117,23 @@ elif len(sys.argv) == 4 and sys.argv[1:3] == ['set-sink-port', 'phone-output']:
     time.sleep(0.1)
     if other('fail').exists(): sys.exit(1)
     state.write_text(sys.argv[3])
+elif len(sys.argv) == 4 and sys.argv[1:3] == ['set-sink-volume', 'phone-output']:
+    other('volume').write_text(sys.argv[3])
+elif sys.argv[1:] == ['subscribe']:
+    # Someone else changed the sink: the test creates the "event" file.
+    while True:
+        if other('event').exists():
+            other('event').unlink()
+            print("Event 'change' on sink #1", flush=True)
+        time.sleep(0.02)
 else: sys.exit(1)
 )py");
   assert(QFile::setPermissions(pactl, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
   qputenv("PATH", directory.path().toUtf8() + ':' + qgetenv("PATH"));
   qputenv("CONTRAIL_TEST_AUDIO_STATE", state.toUtf8());
 
-  Contrail::AudioRoute route([] {});
+  const auto volumes = path("volumes.ini");
+  auto route = Contrail::AudioRoute([] {}, volumes);
   // An audio call starts on the earpiece; the parking port and the placeholder sink are no outputs.
   route.begin(false);
   waitFor([&] { return on(route, Kind::Earpiece); });
@@ -196,6 +210,36 @@ else: sys.exit(1)
   route.end();
   waitFor([&] { return !route.busy(); });
   assert(read(state) == "output-speaker");
+  // Call volumes are kept for each phone port and the sink's own volume comes back after the call.
+  assert(QFile::remove(path("bluetooth")) && QFile::remove(path("default")));
+  write(volume, "13107");
+  route.begin(false);
+  waitFor([&] { return on(route, Kind::Earpiece) && read(volume) == "52428"; });
+  write(volume, "30000");
+  write(path("event"), "");
+  waitFor([&] { return !QFile::exists(path("event")); });
+  // The event reaches the route a little later and makes it query the sink.
+  for (QElapsedTimer timer; !timer.isValid() || timer.elapsed() < 300;) {
+    if (!timer.isValid()) timer.start();
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+  }
+  waitFor([&] { return !route.busy(); });
+  route.select(output(route, Kind::Speaker)->id);
+  waitFor([&] { return on(route, Kind::Speaker) && read(volume) == "13107"; });
+  write(volume, "20000");
+  route.end();
+  waitFor([&] { return !route.busy() && read(state) == "output-speaker"; });
+  assert(read(volume) == "13107");
+  {
+    auto again = Contrail::AudioRoute([] {}, volumes);
+    again.begin(false);
+    waitFor([&] { return on(again, Kind::Earpiece) && read(volume) == "30000"; });
+    again.select(output(again, Kind::Speaker)->id);
+    waitFor([&] { return on(again, Kind::Speaker) && read(volume) == "20000"; });
+    again.end();
+    waitFor([&] { return !again.busy(); });
+    assert(read(volume) == "13107");
+  }
   std::puts("Audio regressions: earpiece/speaker, restore, hangup during switching, external route, failed switching, "
-            "video, headphones and Bluetooth passed");
+            "video, headphones, Bluetooth and call volumes passed");
 }

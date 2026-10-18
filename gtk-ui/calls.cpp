@@ -13,6 +13,7 @@
 #include "main/main_session.h"
 #include "data/data_user.h"
 #include "lang/lang_keys.h"
+#include "settings.h"
 #include "ui/emoji_config.h"
 #include "ui/text/format_values.h"
 #include "webrtc/webrtc_video_track.h"
@@ -94,9 +95,10 @@ QString OutputName(const AudioRoute::Output &output) {
 } // namespace
 
 CallView::CallView(not_null<MainWindow *> window)
-    : _parent(window), _audio([=] { updateAudioRoute(); }), _proximity([=](bool near) {
-        gtk_widget_set_visible(_shield, near);
-      }), _timer([=] { refresh(); }) {
+    : _parent(window)
+    , _audio([=] { updateAudioRoute(); }, cWorkingDir() + u"tdata/contrail-call-volumes.ini"_q)
+    , _proximity([=](bool near) { setProximityShield(near); })
+    , _timer([=] { refresh(); }) {
   _window = adw_window_new();
   g_object_ref_sink(_window);
   gtk_widget_add_css_class(_window, "call-window");
@@ -172,7 +174,7 @@ CallView::CallView(not_null<MainWindow *> window)
   gtk_widget_add_css_class(_hangup, "destructive-action");
   gtk_box_append(GTK_BOX(controls), buttons);
   gtk_overlay_add_overlay(GTK_OVERLAY(stage), controls);
-  // While the phone is held to the ear the display is off; the shield keeps the cheek off the buttons.
+  // While the phone is held to the ear the screen is black and the cheek can't press the buttons.
   _shield = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_add_css_class(_shield, "call-proximity-shield");
   gtk_widget_set_visible(_shield, FALSE);
@@ -291,6 +293,7 @@ void CallView::setCall(Calls::Call *call) {
     _call.reset();
     _audio.end();
     updateProximity();
+    _idle.set(false);
     // Contrail has no setting for the calls' output device: each call follows its own route.
     _playbackOutput.clear();
     Core::App().settings().setCallPlaybackDeviceId(QString());
@@ -340,6 +343,7 @@ void CallView::setCall(Calls::Call *call) {
   attachVideo(call->videoIncoming(), _video);
   attachVideo(call->videoOutgoing(), _localVideo);
   _audio.begin(call->isSharingCamera());
+  _idle.set(true);
   _timer.callEach(1000);
   _parent->present();
   present();
@@ -545,6 +549,19 @@ void CallView::updateProximity() {
       && output && output->kind == OutputKind::Earpiece);
 }
 
+// As Phosh does for GNOME Calls: the whole screen black, the display itself stays on.
+void CallView::setProximityShield(bool near) {
+  gtk_widget_set_visible(_shield, near);
+  if (near) {
+    _shieldFullscreen = !gtk_window_is_fullscreen(GTK_WINDOW(_window));
+    if (_shieldFullscreen) gtk_window_fullscreen(GTK_WINDOW(_window));
+    gtk_window_present(GTK_WINDOW(_window));
+  } else if (_shieldFullscreen) {
+    _shieldFullscreen = false;
+    gtk_window_unfullscreen(GTK_WINDOW(_window));
+  }
+}
+
 void CallView::preview(bool incoming, bool video, const QString &name) {
   if (_call) return;
   _ending = false;
@@ -587,11 +604,13 @@ void CallView::preview(bool incoming, bool video, const QString &name) {
 
 void CallView::debugLocalCall(const QString &action) {
   auto &calls = Core::App().calls();
-  if (action == u"end"_q || action == u"camera"_q || action == u"mute"_q || action == u"audio"_q) {
+  if (action == u"end"_q || action == u"camera"_q || action == u"mute"_q || action == u"audio"_q
+      || action == u"near"_q || action == u"far"_q) {
     const auto call = calls.currentCall();
     if (call && call->state() == Calls::Call::WaitingUserConfirmation && !call->id()) {
       if (action == u"camera"_q) switchCamera();
       else if (action == u"audio"_q) chooseAudioOutput();
+      else if (action == u"near"_q || action == u"far"_q) _proximity.debugSetNear(action == u"near"_q);
       else if (action == u"mute"_q) {
         g_signal_emit_by_name(_mute, "clicked");
         g_message("Local call regression: microphone %s", call->muted() ? "muted" : "unmuted");
