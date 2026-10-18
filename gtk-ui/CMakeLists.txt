@@ -20,6 +20,13 @@ target_sources(Telegram PRIVATE ${CONTRAIL_SRC})
 target_include_directories(Telegram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(Telegram PRIVATE CONTRAIL_GTK)
 target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_GTK_DEPS)
+# Optional: an incoming call over the phone's lock screen. The library wraps libwayland-client's calls,
+# so the executable itself lists it (libwayland-client comes later, through GTK).
+pkg_check_modules(CONTRAIL_LAYER_SHELL IMPORTED_TARGET GLOBAL gtk4-layer-shell-0)
+if (CONTRAIL_LAYER_SHELL_FOUND)
+  target_compile_definitions(Telegram PRIVATE CONTRAIL_LAYER_SHELL)
+  target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_LAYER_SHELL)
+endif()
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. Telegram Desktop limits GLib to 2.56
 # for its own code, the interface needs newer.
 set_source_files_properties(${CONTRAIL_SRC} PROPERTIES

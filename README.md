@@ -55,10 +55,12 @@ or dark style and accent color.
   camera in a corner. As in the phone apps, a call is heard where the sound already goes (Bluetooth or
   wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
   each of the phone's outputs keeps its own call volume, apart from the media volume. The screen goes
-  dark while the phone is held to the ear, and doesn't lock during a call. An incoming call also comes as
-  a notification with Accept and Decline, which Phosh shows on the lock screen too, then End Call while
-  it goes on.
-- **Notifications** through the core's native Linux notifications; tapping one opens the chat.
+  dark while the phone is held to the ear, and doesn't lock during a call. An incoming call rings with the
+  phone's own ringtone and, on a locked phone, fills the lock screen as the phone's dialer does: Accept and
+  Decline, then Mute, the loudspeaker and End Call without unlocking. It also comes as a notification with
+  Accept and Decline, then End Call while it goes on.
+- **Notifications** through the core's native Linux notifications, with the phone's own message sound;
+  tapping one opens the chat.
 - **Running in the background** (Settings): closing the window keeps messages, notifications and calls
   coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
   launcher does.
@@ -101,7 +103,9 @@ Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). T
 phone's own GTK, Qt, FFmpeg and other libraries; other aarch64 phones and tablets need GTK 4.12+ and libadwaita
 1.6+. Choosing where a call is heard needs `pactl` (PulseAudio, or PipeWire's PulseAudio server); the
 earpiece and the loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs
-a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service).
+a proximity sensor behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from
+feedbackd, and a call over the lock screen needs gtk4-layer-shell (bundled with the phone build) and a shell
+with the layer shell, as Phosh.
 
 ## Building
 
@@ -164,7 +168,7 @@ uses, so nothing has to be installed on the build machine.
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `dialogs`, `settings`, `style.css`, `icons/` |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `style.css`, `icons/` |
 | `patches/` | The patches for Telegram Desktop |
 | `build-env/` | The build containers (ARM64 cross build, x86_64 desktop build), CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, release documents |

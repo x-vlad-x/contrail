@@ -108,6 +108,23 @@ CallView::CallView(not_null<MainWindow *> window)
           .hangup = [=] { crl::on_main(this, [=] { hangup(); }); },
           .open = [=] { crl::on_main(this, [=] { _parent->present(); present(); }); },
       })
+    , _lockScreen({
+          .accept = [=] {
+            if (const auto call = _call.get(); call && !_ending && call->isIncomingWaiting()) call->answer();
+          },
+          .hangup = [=] { hangup(); },
+          .mute = [=] {
+            if (const auto call = _call.get(); call && !_ending) call->setMuted(!call->muted());
+          },
+          .speaker = [=] { if (!_ending) toggleSpeaker(); },
+      })
+    , _screenLock([=](bool locked) {
+        crl::on_main(this, [=] {
+          updateLockScreen();
+          // Unlocked during the call: the call window is in front.
+          if (!locked && _call && !_ending) { _parent->present(); present(); }
+        });
+      })
     , _timer([=] { refresh(); }) {
   _window = adw_window_new();
   g_object_ref_sink(_window);
@@ -284,6 +301,8 @@ void CallView::hangup() {
   if (!call) {
     _audio.end();
     _notification.close();
+    _ringer.stop();
+    _lockScreen.hide();
     gtk_widget_set_visible(_window, FALSE);
     return;
   }
@@ -311,10 +330,14 @@ void CallView::setCall(Calls::Call *call) {
     Core::App().saveSettingsDelayed();
     _parent->setCallStatus(QString(), false);
     _notification.close();
+    _ringer.stop();
+    _lockScreen.hide();
+    _audioStarted = false;
     gtk_widget_set_visible(_window, FALSE);
     return;
   }
   _call = call;
+  _audioStarted = false;
   HideCoreWindow();
   _ending = false;
   _localSourceSize = _remoteSourceSize = QSize();
@@ -354,7 +377,6 @@ void CallView::setCall(Calls::Call *call) {
   };
   attachVideo(call->videoIncoming(), _video);
   attachVideo(call->videoOutgoing(), _localVideo);
-  _audio.begin(call->isSharingCamera());
   _idle.set(true);
   _timer.callEach(1000);
   _parent->present();
@@ -372,6 +394,13 @@ void CallView::refresh() {
   const auto finishing = _ending || final || call->state() == Calls::Call::HangingUp
       || call->state() == Calls::Call::FailedHangingUp || call->state() == Calls::Call::MigrationHangingUp;
   if (finishing && !_ending) { _ending = true; stopVideo(); }
+  // An incoming call rings on the loudspeaker: the call's own route (the earpiece) only once answered.
+  if (!incoming && !finishing && !_audioStarted) {
+    _audioStarted = true;
+    _audio.begin(call->isSharingCamera());
+  }
+  if (incoming && !finishing) _ringer.start();
+  else _ringer.stop();
   const auto status = CallStatus(call);
   gtk_label_set_text(GTK_LABEL(_status), U8(status).c_str());
   gtk_widget_set_visible(_accept, (incoming || busy) && !finishing);
@@ -407,6 +436,7 @@ void CallView::refresh() {
   refreshDevices();
   updateProximity();
   updateNotification();
+  updateLockScreen();
   _parent->setCallStatus(call->user()->name() + u" · "_q + status, !final);
   if (final) {
     _timer.cancel();
@@ -424,6 +454,32 @@ void CallView::updateNotification() {
         Window::Notifications::GenerateUserpic(call->user(), userpic));
   } else {
     _notification.showOngoing(call->user()->name(), CallStatus(call));
+  }
+}
+
+void CallView::updateLockScreen() {
+  const auto call = _call.get();
+  if (!call || _ending || !_screenLock.locked()) {
+    _lockScreen.hide();
+    return;
+  }
+  if (!_lockScreen.shown()) _lockScreen.show(call->user(), call->user()->name());
+  const auto incoming = call->isIncomingWaiting();
+  const auto output = _audio.current();
+  _lockScreen.update(incoming ? tr::lng_call_incoming(tr::now) : CallStatus(call), incoming, call->muted(),
+      output && output->kind == OutputKind::Speaker);
+  _lockScreen.setShield(_proximity.near());
+}
+
+// Over the lock screen: between the earpiece and the loudspeaker only.
+void CallView::toggleSpeaker() {
+  const auto current = _audio.current();
+  const auto speaker = current && current->kind == OutputKind::Speaker;
+  for (const auto &output : _audio.outputs()) {
+    if (output.kind == (speaker ? OutputKind::Earpiece : OutputKind::Speaker)) {
+      _audio.select(output.id);
+      return;
+    }
   }
 }
 
@@ -528,6 +584,7 @@ void CallView::updateAudioRoute() {
     }
   }
   updateProximity();
+  updateLockScreen();
 }
 
 void CallView::chooseAudioOutput() {
@@ -577,6 +634,7 @@ void CallView::updateProximity() {
 
 // As Phosh does for GNOME Calls: the whole screen black, the display itself stays on.
 void CallView::setProximityShield(bool near) {
+  _lockScreen.setShield(near);
   gtk_widget_set_visible(_shield, near);
   if (near) {
     _shieldFullscreen = !gtk_window_is_fullscreen(GTK_WINDOW(_window));
@@ -625,7 +683,14 @@ void CallView::preview(bool incoming, bool video, const QString &name) {
     gtk_widget_set_visible(_localFrame, TRUE);
     gtk_widget_set_visible(_avatarBox, FALSE);
   }
-  if (incoming) _notification.showIncoming(name, tr::lng_call_incoming(tr::now), QImage());
+  if (incoming) {
+    _notification.showIncoming(name, tr::lng_call_incoming(tr::now), QImage());
+    _ringer.start();
+    if (_screenLock.locked()) {
+      _lockScreen.show(nullptr, name);
+      _lockScreen.update(tr::lng_call_incoming(tr::now), true, false, false);
+    }
+  }
   gtk_window_present(GTK_WINDOW(_window));
 }
 

@@ -318,3 +318,24 @@ avatar.archive-avatar {
 .call-proximity-shield {
   background: black;
 }
+/* The call over the lock screen: big round buttons, as in the phone's dialer. */
+.lockscreen-call-button {
+  min-width: 40px;
+  min-height: 40px;
+  padding: 16px;
+  background: alpha(white, 0.15);
+  color: white;
+  -gtk-icon-size: 28px;
+}
+.lockscreen-call-button.active {
+  background: white;
+  color: #101820;
+}
+.lockscreen-call-button.destructive-action {
+  background: #e53945;
+  color: white;
+}
+.lockscreen-call-button.lockscreen-call-accept {
+  background: #2ec27e;
+  color: white;
+}

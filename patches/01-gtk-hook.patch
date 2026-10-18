@@ -16,6 +16,37 @@ index 811707d..7e94351 100644
      include(GNUInstallDirs)
      configure_file("../lib/xdg/org.telegram.desktop.service" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.service" @ONLY)
      configure_file("../lib/xdg/org.telegram.desktop.metainfo.xml" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.metainfo.xml" @ONLY)
+diff --git a/Telegram/SourceFiles/calls/calls_call.cpp b/Telegram/SourceFiles/calls/calls_call.cpp
+index a67723f..898a7fb 100644
+--- a/Telegram/SourceFiles/calls/calls_call.cpp
++++ b/Telegram/SourceFiles/calls/calls_call.cpp
+@@ -43,6 +43,12 @@ class InstanceV2Impl;
+ class InstanceV2ReferenceImpl;
+ } // namespace tgcalls
+ 
++#ifdef CONTRAIL_GTK
++namespace Contrail {
++bool SystemRingtone();
++} // namespace Contrail
++#endif // CONTRAIL_GTK
++
+ namespace Calls {
+ namespace {
+ 
+@@ -735,6 +741,13 @@ QString Call::getDebugLog() const {
+ }
+ 
+ void Call::startWaitingTrack() {
++#ifdef CONTRAIL_GTK
++	// The phone rings with its own ringtone (see Contrail's calls).
++	if (_type == Type::Incoming && Contrail::SystemRingtone()) {
++		_waitingTrack = nullptr;
++		return;
++	}
++#endif // CONTRAIL_GTK
+ 	_waitingTrack = Media::Audio::Current().createTrack();
+ 	const auto trackFileName = Core::App().settings().getSoundPath(
+ 		(_type == Type::Outgoing)
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
 index 7a309ac..32d347e 100644
 --- a/Telegram/SourceFiles/core/application.cpp

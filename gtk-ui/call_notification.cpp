@@ -122,8 +122,9 @@ void CallNotification::send(const QString &name, const QString &status) {
   g_variant_builder_add(hints, "{sv}", "urgency", g_variant_new_byte(incoming ? 2 : 1));
   // The buttons answer the call, the notification is replaced or closed here.
   g_variant_builder_add(hints, "{sv}", "resident", g_variant_new_boolean(TRUE));
-  // The call rings by itself: the shell only vibrates.
-  g_variant_builder_add(hints, "{sv}", "suppress-sound", g_variant_new_boolean(TRUE));
+  // The call rings by itself (Ringer): no sound or vibration of the notification's own.
+  // (Not suppress-sound: Phosh takes it for vibration.)
+  g_variant_builder_add(hints, "{sv}", "x-phosh-fb-profile", g_variant_new_string("none"));
   if (!_userpic.isNull()) {
     g_variant_builder_add(hints, "{sv}", "image-data", ImageData(_userpic));
   }
