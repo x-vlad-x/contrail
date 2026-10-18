@@ -15,3 +15,5 @@ Categories=Network;InstantMessaging;Chat;GTK;
 Keywords=Telegram;tg;chat;im;messaging;messenger;
 MimeType=x-scheme-handler/tg;x-scheme-handler/tonsite;
 X-Purism-FormFactor=Workstation;Mobile;
+# Phosh: the incoming call notification's Accept and Decline (and End Call) work on the lock screen.
+X-Phosh-Lockscreen-Actions=call-;

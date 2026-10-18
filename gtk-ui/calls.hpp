@@ -2,6 +2,9 @@
 
 #include "app.hpp"
 #include "audio_route.hpp"
+#include "call_lockscreen.hpp"
+#include "call_notification.hpp"
+#include "call_shell.hpp"
 #include "proximity.hpp"
 #include "video_frame.hpp"
 #include "base/timer.h"
@@ -38,6 +41,9 @@ private:
   void updateProximity();
   void setProximityShield(bool near);
   void hangup();
+  void updateNotification();
+  void updateLockScreen();
+  void toggleSpeaker();
 
   const not_null<MainWindow *> _parent;
   GtkWidget *_window = nullptr;
@@ -64,6 +70,11 @@ private:
   QString _playbackOutput;
   AudioRoute _audio;
   Proximity _proximity;
+  CallNotification _notification;
+  Ringer _ringer;
+  LockScreenCall _lockScreen;
+  ScreenLock _screenLock;
+  bool _audioStarted = false;
   IdleInhibitor _idle;
   bool _shieldFullscreen = false;
   VideoFrameConverter _incomingConverter;

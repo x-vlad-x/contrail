@@ -51,3 +51,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       librsvg2-bin desktop-file-utils appstream \
     && rm -rf /var/lib/apt/lists/*
+# Showing an incoming call over the phone's lock screen (layer shell).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libgtk4-layer-shell-dev:arm64 \
+    && rm -rf /var/lib/apt/lists/*

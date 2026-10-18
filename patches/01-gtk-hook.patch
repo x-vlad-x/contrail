@@ -16,6 +16,37 @@ index 811707d..7e94351 100644
      include(GNUInstallDirs)
      configure_file("../lib/xdg/org.telegram.desktop.service" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.service" @ONLY)
      configure_file("../lib/xdg/org.telegram.desktop.metainfo.xml" "${CMAKE_CURRENT_BINARY_DIR}/org.telegram.desktop.metainfo.xml" @ONLY)
+diff --git a/Telegram/SourceFiles/calls/calls_call.cpp b/Telegram/SourceFiles/calls/calls_call.cpp
+index a67723f..898a7fb 100644
+--- a/Telegram/SourceFiles/calls/calls_call.cpp
++++ b/Telegram/SourceFiles/calls/calls_call.cpp
+@@ -43,6 +43,12 @@ class InstanceV2Impl;
+ class InstanceV2ReferenceImpl;
+ } // namespace tgcalls
+ 
++#ifdef CONTRAIL_GTK
++namespace Contrail {
++bool SystemRingtone();
++} // namespace Contrail
++#endif // CONTRAIL_GTK
++
+ namespace Calls {
+ namespace {
+ 
+@@ -735,6 +741,13 @@ QString Call::getDebugLog() const {
+ }
+ 
+ void Call::startWaitingTrack() {
++#ifdef CONTRAIL_GTK
++	// The phone rings with its own ringtone (see Contrail's calls).
++	if (_type == Type::Incoming && Contrail::SystemRingtone()) {
++		_waitingTrack = nullptr;
++		return;
++	}
++#endif // CONTRAIL_GTK
+ 	_waitingTrack = Media::Audio::Current().createTrack();
+ 	const auto trackFileName = Core::App().settings().getSoundPath(
+ 		(_type == Type::Outgoing)
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
 index 7a309ac..32d347e 100644
 --- a/Telegram/SourceFiles/core/application.cpp
@@ -57,6 +88,40 @@ index 7a309ac..32d347e 100644
  	for (const auto &window : _windowStack) {
  		if (window == _lastActiveWindow) {
  			break;
+diff --git a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
+index a229510..b4bcd7f 100644
+--- a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
++++ b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
+@@ -210,6 +210,10 @@ bool Supported() {
+ }
+ 
+ bool Enforced() {
++#ifdef CONTRAIL_GTK
++	// Qt runs offscreen under the GTK interface: its own popups are never seen.
++	return true;
++#endif // CONTRAIL_GTK
+ 	// Wayland doesn't support positioning
+ 	// and custom notifications don't work here
+ 	return IsWayland()
+@@ -695,7 +699,17 @@ void Manager::Private::showNotification(
+ 				? _sounds.path(sound).toStdString()
+ 				: std::string();
+ 
+-			if (!path.empty()) {
++#ifdef CONTRAIL_GTK
++			// Telegram's default sound gives way to the system's message
++			// sound, the one chosen in the phone's sound settings.
++			const auto systemSound = sound && !sound.id;
++#else // CONTRAIL_GTK
++			const auto systemSound = false;
++#endif // CONTRAIL_GTK
++
++			if (systemSound) {
++				// No hint: the notification server plays its own sound.
++			} else if (!path.empty()) {
+ 				hints.insert_value(
+ 					"sound-file",
+ 					GLib::Variant::new_string(path));
 diff --git a/Telegram/SourceFiles/platform/linux/specific_linux.cpp b/Telegram/SourceFiles/platform/linux/specific_linux.cpp
 index 8faa6d9..f0ec0d5 100644
 --- a/Telegram/SourceFiles/platform/linux/specific_linux.cpp
