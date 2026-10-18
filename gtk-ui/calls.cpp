@@ -13,6 +13,7 @@
 #include "main/main_session.h"
 #include "data/data_user.h"
 #include "lang/lang_keys.h"
+#include "settings.h"
 #include "ui/emoji_config.h"
 #include "ui/text/format_values.h"
 #include "webrtc/webrtc_video_track.h"
@@ -67,12 +68,37 @@ std::vector<Webrtc::DeviceInfo> CallCameras() {
   return cameras;
 }
 
+using OutputKind = AudioRoute::Kind;
+
+const char *OutputIcon(OutputKind kind) {
+  switch (kind) {
+    case OutputKind::Earpiece: return "call-start-symbolic";
+    case OutputKind::Speaker: return "audio-speakers-symbolic";
+    case OutputKind::Headphones: return "audio-headphones-symbolic";
+    case OutputKind::Bluetooth: return "bluetooth-active-symbolic";
+    default: return "audio-card-symbolic";
+  }
+}
+
+QString OutputName(const AudioRoute::Output &output) {
+  if (!output.name.isEmpty()) return output.name;
+  // Telegram Desktop has no strings for a phone's own outputs.
+  const auto language = Lang::LanguageIdOrDefault(Lang::Id());
+  const auto russian = language.startsWith(u"ru"_q), ukrainian = language.startsWith(u"uk"_q);
+  switch (output.kind) {
+    case OutputKind::Earpiece: return (russian || ukrainian) ? u"Телефон"_q : u"Phone"_q;
+    case OutputKind::Speaker: return russian ? u"Динамик"_q : ukrainian ? u"Гучномовець"_q : u"Speaker"_q;
+    default: return russian ? u"Наушники"_q : ukrainian ? u"Навушники"_q : u"Headphones"_q;
+  }
+}
+
 } // namespace
 
 CallView::CallView(not_null<MainWindow *> window)
-    : _parent(window), _audio([=](bool available, bool speaker, const QString &device) {
-        updateAudioRoute(available, speaker, device);
-      }), _timer([=] { refresh(); }) {
+    : _parent(window)
+    , _audio([=] { updateAudioRoute(); }, cWorkingDir() + u"tdata/contrail-call-volumes.ini"_q)
+    , _proximity([=](bool near) { setProximityShield(near); })
+    , _timer([=] { refresh(); }) {
   _window = adw_window_new();
   g_object_ref_sink(_window);
   gtk_widget_add_css_class(_window, "call-window");
@@ -148,6 +174,11 @@ CallView::CallView(not_null<MainWindow *> window)
   gtk_widget_add_css_class(_hangup, "destructive-action");
   gtk_box_append(GTK_BOX(controls), buttons);
   gtk_overlay_add_overlay(GTK_OVERLAY(stage), controls);
+  // While the phone is held to the ear the screen is black and the cheek can't press the buttons.
+  _shield = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class(_shield, "call-proximity-shield");
+  gtk_widget_set_visible(_shield, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(stage), _shield);
   adw_window_set_content(ADW_WINDOW(_window), stage);
 
   _signals.clicked(_accept, [=] {
@@ -170,7 +201,7 @@ CallView::CallView(not_null<MainWindow *> window)
     }
   });
   _signals.clicked(_switchCamera, [=] { switchCamera(); });
-  _signals.clicked(_speaker, [=] { if (!_ending) _audio.toggle(); });
+  _signals.clicked(_speaker, [=] { if (!_ending) chooseAudioOutput(); });
 
   Core::App().calls().currentCallValue() | rpl::on_next([=](Calls::Call *call) {
     setCall(call);
@@ -181,6 +212,7 @@ CallView::CallView(not_null<MainWindow *> window)
 
 CallView::~CallView() {
   invalidate_weak_ptrs(this);
+  _proximity.setEnabled(false);
   _lifetime.destroy();
   _callLifetime.destroy();
   stopVideo();
@@ -260,11 +292,12 @@ void CallView::setCall(Calls::Call *call) {
     if (const auto previous = _call.get()) ShowToast(CallStatus(previous));
     _call.reset();
     _audio.end();
-    auto &settings = Core::App().settings();
-    if (!_routedPlaybackDevice.isEmpty() && settings.callPlaybackDeviceId() == _routedPlaybackDevice) {
-      settings.setCallPlaybackDeviceId(_savedPlaybackDevice);
-    }
-    _routedPlaybackDevice.clear();
+    updateProximity();
+    _idle.set(false);
+    // Contrail has no setting for the calls' output device: each call follows its own route.
+    _playbackOutput.clear();
+    Core::App().settings().setCallPlaybackDeviceId(QString());
+    Core::App().saveSettingsDelayed();
     _parent->setCallStatus(QString(), false);
     gtk_widget_set_visible(_window, FALSE);
     return;
@@ -273,7 +306,8 @@ void CallView::setCall(Calls::Call *call) {
   HideCoreWindow();
   _ending = false;
   _localSourceSize = _remoteSourceSize = QSize();
-  _savedPlaybackDevice = Core::App().settings().callPlaybackDeviceId();
+  _playbackOutput.clear();
+  Core::App().settings().setCallPlaybackDeviceId(QString());
   choosePhoneCamera();
   ClearBox(_avatarBox);
   gtk_box_append(GTK_BOX(_avatarBox), MakeAvatar(call->user(), 112, true));
@@ -308,7 +342,8 @@ void CallView::setCall(Calls::Call *call) {
   };
   attachVideo(call->videoIncoming(), _video);
   attachVideo(call->videoOutgoing(), _localVideo);
-  _audio.begin();
+  _audio.begin(call->isSharingCamera());
+  _idle.set(true);
   _timer.callEach(1000);
   _parent->present();
   present();
@@ -358,6 +393,7 @@ void CallView::refresh() {
         U8(tr::lng_call_fingerprint_tooltip(tr::now, lt_user, call->user()->name())).c_str());
   }
   refreshDevices();
+  updateProximity();
   _parent->setCallStatus(call->user()->name() + u" · "_q + status, !final);
   if (final) {
     _timer.cancel();
@@ -407,7 +443,7 @@ void CallView::refreshDevices() {
   const auto cameras = CallCameras();
   const auto count = std::count_if(cameras.begin(), cameras.end(), [](const auto &camera) { return !camera.inactive; });
   gtk_widget_set_sensitive(_switchCamera, call && !_ending && call->isSharingCamera() && count > 1);
-  gtk_widget_set_sensitive(_speaker, call && !_ending && _audio.available() && !_audio.busy());
+  gtk_widget_set_sensitive(_speaker, call && !_ending && _audio.outputs().size() > 1);
 }
 
 void CallView::switchCamera() {
@@ -437,21 +473,92 @@ void CallView::switchCamera() {
   }
 }
 
-void CallView::updateAudioRoute(bool available, bool speaker, const QString &device) {
+void CallView::updateAudioRoute() {
   if (!_speaker) return;
-  gtk_button_set_icon_name(GTK_BUTTON(_speaker), speaker ? "audio-speakers-symbolic" : "call-start-symbolic");
-  gtk_widget_set_tooltip_text(_speaker, U8(tr::lng_settings_call_section_output(tr::now) + '\n' + device).c_str());
-  if (speaker) gtk_widget_add_css_class(_speaker, "active");
+  const auto output = _audio.current();
+  gtk_button_set_icon_name(GTK_BUTTON(_speaker), OutputIcon(output ? output->kind : OutputKind::Speaker));
+  gtk_widget_set_tooltip_text(_speaker, U8(tr::lng_settings_call_section_output(tr::now)
+      + (output ? u'\n' + OutputName(*output) : QString())).c_str());
+  if (output && output->kind == OutputKind::Speaker) gtk_widget_add_css_class(_speaker, "active");
   else gtk_widget_remove_css_class(_speaker, "active");
-  gtk_widget_set_sensitive(_speaker, available && bool(_call) && !_ending);
-  if (_call && available && _audio.selected()) {
-    for (const auto &output : Core::App().mediaDevices().devices(Webrtc::DeviceType::Playback)) {
-      if (output.name == device && !output.inactive) {
-        _routedPlaybackDevice = output.id;
-        Core::App().settings().setCallPlaybackDeviceId(output.id);
+  refreshDevices();
+  if (_call && output && output->device != _playbackOutput) {
+    // The core plays the call on the chosen device; a phone port is switched on the device itself.
+    auto &devices = Core::App().mediaDevices();
+    devices.validateDevices(Webrtc::DeviceType::Playback);
+    QString id;
+    for (const auto &device : devices.devices(Webrtc::DeviceType::Playback)) {
+      if (!device.inactive && (device.id == output->device || device.name == output->device)) {
+        id = device.id;
         break;
       }
     }
+    auto &settings = Core::App().settings();
+    if (settings.callPlaybackDeviceId() != id) settings.setCallPlaybackDeviceId(id);
+    if (!id.isEmpty()) _playbackOutput = output->device;
+    if (g_getenv("CONTRAIL_DEBUG")) {
+      g_message("Call audio: %s (%d outputs), playback device \"%s\"", U8(OutputName(*output)).c_str(),
+          int(_audio.outputs().size()), U8(id).c_str());
+    }
+  }
+  updateProximity();
+}
+
+void CallView::chooseAudioOutput() {
+  const auto &outputs = _audio.outputs();
+  const auto current = _audio.current();
+  if (outputs.size() < 2) return;
+  // Only the earpiece and the loudspeaker: the button switches between them, as in the phone apps.
+  if (outputs.size() == 2 && current && !outputs[0].port.isEmpty() && !outputs[1].port.isEmpty()) {
+    _audio.select(outputs[0].id == current->id ? outputs[1].id : outputs[0].id);
+    return;
+  }
+  auto *popover = gtk_popover_new();
+  auto *list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  for (const auto &output : outputs) {
+    auto *row = gtk_button_new();
+    gtk_widget_add_css_class(row, "flat");
+    auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name(OutputIcon(output.kind)));
+    auto *label = gtk_label_new(U8(OutputName(output)).c_str());
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_hexpand(label, TRUE);
+    gtk_box_append(GTK_BOX(box), label);
+    auto *check = gtk_image_new_from_icon_name("object-select-symbolic");
+    gtk_widget_set_opacity(check, current && current->id == output.id ? 1. : 0.);
+    gtk_box_append(GTK_BOX(box), check);
+    gtk_button_set_child(GTK_BUTTON(row), box);
+    const auto id = output.id;
+    OnClicked(row, [=] {
+      gtk_popover_popdown(GTK_POPOVER(popover));
+      if (_call && !_ending) _audio.select(id);
+    });
+    gtk_box_append(GTK_BOX(list), row);
+  }
+  gtk_popover_set_child(GTK_POPOVER(popover), list);
+  gtk_widget_set_parent(popover, _speaker);
+  DestroyPopoverOnClose(popover);
+  gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+void CallView::updateProximity() {
+  const auto call = _call.get();
+  const auto output = _audio.current();
+  _proximity.setEnabled(call && !_ending && !call->isIncomingWaiting() && call->state() != Calls::Call::Busy
+      && output && output->kind == OutputKind::Earpiece);
+}
+
+// As Phosh does for GNOME Calls: the whole screen black, the display itself stays on.
+void CallView::setProximityShield(bool near) {
+  gtk_widget_set_visible(_shield, near);
+  if (near) {
+    _shieldFullscreen = !gtk_window_is_fullscreen(GTK_WINDOW(_window));
+    if (_shieldFullscreen) gtk_window_fullscreen(GTK_WINDOW(_window));
+    gtk_window_present(GTK_WINDOW(_window));
+  } else if (_shieldFullscreen) {
+    _shieldFullscreen = false;
+    gtk_window_unfullscreen(GTK_WINDOW(_window));
   }
 }
 
@@ -497,10 +604,13 @@ void CallView::preview(bool incoming, bool video, const QString &name) {
 
 void CallView::debugLocalCall(const QString &action) {
   auto &calls = Core::App().calls();
-  if (action == u"end"_q || action == u"camera"_q || action == u"mute"_q) {
+  if (action == u"end"_q || action == u"camera"_q || action == u"mute"_q || action == u"audio"_q
+      || action == u"near"_q || action == u"far"_q) {
     const auto call = calls.currentCall();
     if (call && call->state() == Calls::Call::WaitingUserConfirmation && !call->id()) {
       if (action == u"camera"_q) switchCamera();
+      else if (action == u"audio"_q) chooseAudioOutput();
+      else if (action == u"near"_q || action == u"far"_q) _proximity.debugSetNear(action == u"near"_q);
       else if (action == u"mute"_q) {
         g_signal_emit_by_name(_mute, "clicked");
         g_message("Local call regression: microphone %s", call->muted() ? "muted" : "unmuted");

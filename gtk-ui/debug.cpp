@@ -3,7 +3,7 @@
 //     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
 // Commands: testmode | login phone|code|name TEXT | chat N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
 //           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
-//           check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
+//           close | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           screenshot [call] PATH
 
 #include "debug.hpp"
@@ -18,6 +18,7 @@
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "core/application.h"
+#include "core/core_settings.h"
 #include "mtproto/mtp_instance.h"
 #include "mtproto/mtproto_dc_options.h"
 #include "data/data_user.h"
@@ -142,6 +143,12 @@ void Run(MainWindow &w, const std::string &cmdline) {
     const auto value = Q(arg.c_str());
     const auto call = value.startsWith(u"call "_q);
     SaveWindowPng(call ? FindWindow("call-window") : w.widget(), U8(call ? value.mid(5) : value).c_str(), 3.);
+  } else if (cmd == "close") {
+    gtk_window_close(GTK_WINDOW(w.widget()));
+  } else if (cmd == "background") {
+    Core::App().settings().setCloseBehavior(arg == "on" ? Core::Settings::CloseBehavior::RunInBackground
+                                                        : Core::Settings::CloseBehavior::Quit);
+    w.updateBackgroundMode();
   } else if (cmd == "call-local-test") {
     w.debugLocalCall(Q(arg.c_str()));
   } else if (cmd == "check-draft") {
