@@ -841,6 +841,7 @@ void ChatView::updateViewport() {
     showSponsored();
   }
   reportSponsoredViews();
+  if (_window->isActive() && !_readTimer.isActive()) _readTimer.callOnce(300);
 }
 
 void ChatView::showSponsored() {
@@ -997,7 +998,7 @@ void ChatView::scrolled() {
   if (!_viewportSource && !_scrollTarget && atBottom) _stickToBottom = true;
   gtk_widget_set_visible(_toBottom, !atBottom && upper > page);
   if (!_viewportSource) scheduleViewportUpdate();
-  if (atBottom) _readTimer.callOnce(300);
+  if (_window->isActive() && !_readTimer.isActive()) _readTimer.callOnce(300);
 }
 
 void ChatView::debugHistory(const QString &action) {
@@ -1029,13 +1030,33 @@ void ChatView::debugHistory(const QString &action) {
 }
 
 void ChatView::markAsRead() {
-  if (!_window->isActive() || _window->currentHistory() != _history || !_stickToBottom) {
+  if (!_window->isActive() || _window->currentHistory() != _history || !_initialLoaded || _scrollTarget
+      || !gtk_widget_get_mapped(_root)) {
     return;
   }
-  if (_history->unreadCount() > 0 || _history->unreadMark() || _history->chatListBadgesState().unread) {
-    _history->owner().histories().readInbox(_history);
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  if (page <= 0) return;
+  const auto atBottom = gtk_adjustment_get_value(_adjustment) + page >= gtk_adjustment_get_upper(_adjustment) - 40
+      && _history->loadedAtBottom();
+  if (_stickToBottom || atBottom) {
+    if (_history->unreadCount() > 0 || _history->unreadMark() || _history->chatListBadgesState().unread) {
+      _history->owner().histories().readInbox(_history);
+    }
+    Core::App().notifications().clearFromHistory(_history);
+    return;
   }
-  Core::App().notifications().clearFromHistory(_history);
+  // Higher up, read till the lowest unread message seen whole, as HistoryInner does. Opening a chat
+  // puts its first unread message on the screen, and the list may have nowhere further to scroll.
+  HistoryItem *till = nullptr;
+  for (const auto &[item, row] : _rows) {
+    if (item->out() || !item->isRegular() || !item->unread(_history) || (till && item->id < till->id)) continue;
+    double y = 0;
+    const auto height = gtk_widget_get_height(row->row());
+    if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height >= 0 && y + height <= page) {
+      till = row->item();
+    }
+  }
+  if (till) _history->owner().histories().readInboxTill(till);
 }
 
 // --- composer ----------------------------------------------------------------
