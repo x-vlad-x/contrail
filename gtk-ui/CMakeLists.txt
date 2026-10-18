@@ -32,4 +32,11 @@ endif()
 set_source_files_properties(${CONTRAIL_SRC} PROPERTIES
   COMPILE_OPTIONS "-UGLIB_VERSION_MIN_REQUIRED;-UGLIB_VERSION_MAX_ALLOWED;-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_84;-DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_84;-DGDK_VERSION_MIN_REQUIRED=GDK_VERSION_4_12;-DGDK_VERSION_MAX_ALLOWED=GDK_VERSION_4_22;-DADW_VERSION_MIN_REQUIRED=ADW_VERSION_1_6;-DADW_VERSION_MAX_ALLOWED=ADW_VERSION_1_9;-Wno-missing-field-initializers;-Wno-unused-parameter")
 
+# The release packages carry their libraries in <prefix>/lib (tools/bundle.py). A DT_RPATH (not RUNPATH) on the
+# executable also applies to the libraries it loads, so the bundled ones are used without editing them.
+option(CONTRAIL_BUNDLE_RPATH "Look for libraries in ../../lib next to the installed program" OFF)
+if (CONTRAIL_BUNDLE_RPATH)
+  target_link_options(Telegram PRIVATE "LINKER:-rpath,$ORIGIN/../../lib" "LINKER:--disable-new-dtags")
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/../packaging/install.cmake)

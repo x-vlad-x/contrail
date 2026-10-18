@@ -1,0 +1,7 @@
+# Packaging only: the Flatpak runtime (downloaded into out/flatpak/, not installed on the host), the list of
+# libraries it provides, and the Flatpak bundle made from the files prepared in the Debian build containers.
+# Nothing of the target architecture runs here. (librsvg2-common: the icon check loads the SVG icon.)
+FROM docker.io/library/debian:trixie-20261005
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      flatpak ca-certificates python3 binutils desktop-file-utils librsvg2-common \
+    && rm -rf /var/lib/apt/lists/*

@@ -12,8 +12,8 @@
       list and the chat side by side on a wider screen.
     </p>
     <p>
-      Contrail is not affiliated with or endorsed by Telegram. It is a preview: group calls, stories,
-      reactions, folders and multiple accounts are not available yet.
+      Contrail is not affiliated with or endorsed by Telegram. Group calls, stories, reactions, folders and
+      multiple accounts are not available yet.
     </p>
   </description>
   <developer id="io.github.x_vlad_x">
@@ -60,6 +60,13 @@
     <content_attribute id="social-info">mild</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.1.0" date="2026-10-18" type="stable">
+      <description>
+        <p>The first release: packages for x86_64 and ARM64 as DEB, RPM, AppImage and Flatpak. Notifications and
+          incoming calls also while the window is closed, calls answered from the lock screen with the phone's
+          ringtone, a choice of where a call is heard, and messages marked as read when a chat is opened.</p>
+      </description>
+    </release>
     <release version="0.1.0~preview1" date="2026-10-15" type="development">
       <description>
         <p>First preview packages: an ARM64 Debian package for Linux phones and an x86_64 AppImage.</p>

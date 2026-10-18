@@ -9,7 +9,7 @@
 #
 # The exact sources of every library (with submodules, downloaded data, the Rust lockfile and the vendored
 # crates) are kept in deps-<arch>/sources/ as the corresponding source of the binaries they end up in;
-# deps-<arch>/sources/manifest.json lists them.
+# deps-<arch>/sources/manifest.json lists them. The container can choose another directory with CONTRAIL_DEPS.
 set -euo pipefail
 
 ARCH=${1:-aarch64}
@@ -20,7 +20,7 @@ case "$ARCH" in
 esac
 SRC=/src/tdesktop
 DOCKERFILE=$SRC/Telegram/build/docker/centos_env/Dockerfile
-DEPS=/src/deps-$ARCH
+DEPS=${CONTRAIL_DEPS:-/src/deps-$ARCH}
 PREFIX=$DEPS/prefix
 SOURCES=$DEPS/sources
 TOOLCHAIN=/src/build-env/$ARCH-toolchain.cmake
@@ -100,7 +100,7 @@ if ! built rnnoise "$RNNOISE" rnnoise; then
 fi
 
 # --- ada (Debian 13 doesn't package it) -----------------------------------------
-if [[ $CROSS -eq 0 ]] && ! pkg-config --exists ada 2>/dev/null && [[ ! -e /usr/lib/$TRIPLE/cmake/ada ]]; then
+if ! pkg-config --exists ada 2>/dev/null && [[ ! -e /usr/lib/$TRIPLE/cmake/ada ]]; then
   ADA=$(tag_of ada-url/ada.git)
   if ! built ada "$ADA" ada; then
     echo "==> ada $ADA"

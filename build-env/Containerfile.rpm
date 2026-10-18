@@ -1,0 +1,4 @@
+# Packaging only: turns the bundle made in the Debian build containers into an RPM (rpmbuild generates its
+# dependencies on the system's libraries from the ELF files). Nothing is compiled here.
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf -y --setopt=install_weak_deps=False install rpm-build desktop-file-utils python3 && dnf clean all

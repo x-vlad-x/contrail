@@ -1,0 +1,48 @@
+# ARM64 build for the release packages (DEB, RPM, AppImage, Flatpak), cross-compiled on x86_64 against
+# Debian 13 (trixie) arm64 via multiarch: the same baseline as the x86_64 build (Containerfile.desktop), so
+# both architectures carry the same libraries and need the same glibc. Code generators that Telegram Desktop
+# builds and runs during the build go through qemu-user. (The development install over SSH, update-contrail.sh,
+# builds against the phone's own FuriOS libraries with build-env/Containerfile instead.)
+FROM docker.io/library/debian:trixie-20261005
+RUN dpkg --add-architecture arm64 && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      crossbuild-essential-arm64 build-essential cmake ninja-build pkgconf python3 git ca-certificates file curl \
+      qemu-user protobuf-compiler libwayland-bin gobject-introspection qt6-base-dev-tools patchelf xz-utils \
+      autoconf automake libtool gperf qt6-shader-baker \
+    && rm -rf /var/lib/apt/lists/*
+# Telegram Desktop (the list of Debian's telegram-desktop package, for arm64; rnnoise, ada, tg_owt, tde2e and the
+# Rust part are built by build-deps.sh).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      qt6-base-dev:arm64 qt6-base-private-dev:arm64 qt6-svg-dev:arm64 qt6-wayland-dev:arm64 \
+      libavcodec-dev:arm64 libavfilter-dev:arm64 libavformat-dev:arm64 libavutil-dev:arm64 \
+      libswresample-dev:arm64 libswscale-dev:arm64 libboost-regex-dev:arm64 libexpected-dev \
+      libglib2.0-dev:arm64 libglibmm-2.68-dev:arm64 gir1.2-glib-2.0-dev:arm64 libhunspell-dev:arm64 \
+      libjpeg-dev:arm64 libkf6coreaddons-dev:arm64 liblz4-dev:arm64 libminizip-dev:arm64 libmsgsl-dev \
+      libopenal-dev:arm64 libopus-dev:arm64 libpulse-dev:arm64 libasound2-dev:arm64 libqrcodegencpp-dev:arm64 \
+      librange-v3-dev libssl-dev:arm64 libxcb1-dev:arm64 libxcb-keysyms1-dev:arm64 \
+      libxcb-record0-dev:arm64 libxcb-screensaver0-dev:arm64 libxxhash-dev:arm64 xdg-desktop-portal-dev \
+      zlib1g-dev:arm64 libvpx-dev:arm64 libopenh264-dev:arm64 \
+      libfido2-dev:arm64 libudev-dev:arm64 libprotobuf-dev:arm64 libpango1.0-dev:arm64 libxkbcommon-dev:arm64 \
+      libpipewire-0.3-dev:arm64 libx11-dev:arm64 libxext-dev:arm64 libxfixes-dev:arm64 libxtst-dev:arm64 \
+      libxrandr-dev:arm64 libxrender-dev:arm64 libxdamage-dev:arm64 libxcomposite-dev:arm64 \
+      libdrm-dev:arm64 libgbm-dev:arm64 libegl-dev:arm64 libgl-dev:arm64 \
+      libgtk-4-dev:arm64 libadwaita-1-dev:arm64 libgtk4-layer-shell-dev:arm64 \
+      qt6-image-formats-plugins:arm64 \
+    && rm -rf /var/lib/apt/lists/*
+# Resources the bundled packages load at run time (icon theme, SVG and image loaders, GIO modules), and the
+# packaging checks.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      adwaita-icon-theme hicolor-icon-theme librsvg2-common:arm64 libgdk-pixbuf2.0-bin \
+      libgdk-pixbuf-2.0-0:arm64 glib-networking:arm64 dconf-gsettings-backend:arm64 gsettings-desktop-schemas \
+      shared-mime-info librsvg2-bin desktop-file-utils appstream \
+    && rm -rf /var/lib/apt/lists/*
+# Rust, for the Rust part of Telegram Desktop (tlottie, wallet engine): the toolchain the official build pins.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.96.1 \
+      --target aarch64-unknown-linux-gnu && chmod -R a+rwX /opt/rustup /opt/cargo
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc QEMU_LD_PREFIX=/ \
+    CONTRAIL_DEPS=/src/deps-aarch64-trixie \
+    PKG_CONFIG_PATH=/src/deps-aarch64-trixie/prefix/lib/pkgconfig \
+    GI_GIR_PATH=/usr/lib/aarch64-linux-gnu/gir-1.0:/usr/share/gir-1.0
+# PulseAudio's pactl (the call audio routes): the Flatpak carries it, its runtime has none.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pulseaudio-utils:arm64 \
+    && rm -rf /var/lib/apt/lists/*
