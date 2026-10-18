@@ -1,4 +1,4 @@
-# Installing Contrail 0.1.0
+# Installing Contrail 0.1.1
 
 Contrail is an unofficial Telegram client that uses the Telegram API. It is not affiliated with or endorsed
 by Telegram. You don't need to build anything or get Telegram API keys to use these packages.
@@ -7,10 +7,10 @@ by Telegram. You don't need to build anything or get Telegram API keys to use th
 
 | Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
 | --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian and other DEB systems | `contrail_0.1.0-1_amd64.deb` | `contrail_0.1.0-1_arm64.deb` |
-| Fedora, openSUSE and other RPM systems | `contrail-0.1.0-1.x86_64.rpm` | `contrail-0.1.0-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.1.0-x86_64.flatpak` | `Contrail-0.1.0-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.1.0-x86_64.AppImage` | `Contrail-0.1.0-aarch64.AppImage` |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian and other DEB systems | `contrail_0.1.1-1_amd64.deb` | `contrail_0.1.1-1_arm64.deb` |
+| Fedora, openSUSE and other RPM systems | `contrail-0.1.1-1.x86_64.rpm` | `contrail-0.1.1-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.1.1-x86_64.flatpak` | `Contrail-0.1.1-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.1.1-x86_64.AppImage` | `Contrail-0.1.1-aarch64.AppImage` |
 
 `uname -m` prints `x86_64` or `aarch64`. The DEB, RPM and AppImage carry the libraries Contrail needs (GTK 4.18,
 libadwaita 1.7, Qt 6.8, FFmpeg 7.1 from Debian 13) and take only the base system from yours: they need glibc 2.39
@@ -22,7 +22,7 @@ libraries. The Flatpak runs on the GNOME 51 runtime, which Flatpak downloads fro
 Open a terminal in the folder with the file and run:
 
 ```sh
-sudo apt install ./contrail_0.1.0-1_arm64.deb     # or ..._amd64.deb
+sudo apt install ./contrail_0.1.1-1_arm64.deb     # or ..._amd64.deb
 ```
 
 `apt` installs what the package needs from your system's repositories. If it reports dependencies that can't be
@@ -32,8 +32,8 @@ way, also over the 0.1.0-preview1 package. `sudo apt remove contrail` removes th
 ## RPM
 
 ```sh
-sudo dnf install ./contrail-0.1.0-1.x86_64.rpm                       # Fedora (or ...aarch64.rpm)
-sudo zypper install --allow-unsigned-rpm ./contrail-0.1.0-1.x86_64.rpm  # openSUSE
+sudo dnf install ./contrail-0.1.1-1.x86_64.rpm                       # Fedora (or ...aarch64.rpm)
+sudo zypper install --allow-unsigned-rpm ./contrail-0.1.1-1.x86_64.rpm  # openSUSE
 ```
 
 The package isn't signed: the checksums below tell whether the download is intact. `sudo dnf remove contrail`
@@ -42,7 +42,7 @@ The package isn't signed: the checksums below tell whether the download is intac
 ## Flatpak
 
 ```sh
-flatpak install --user ./Contrail-0.1.0-aarch64.flatpak    # or ...x86_64.flatpak
+flatpak install --user ./Contrail-0.1.1-aarch64.flatpak    # or ...x86_64.flatpak
 flatpak run io.github.x_vlad_x.Contrail
 ```
 
@@ -57,8 +57,8 @@ state and the proximity sensor. Files you attach are picked through the system's
 ## AppImage
 
 ```sh
-chmod +x Contrail-0.1.0-x86_64.AppImage    # or ...aarch64.AppImage
-./Contrail-0.1.0-x86_64.AppImage
+chmod +x Contrail-0.1.1-x86_64.AppImage    # or ...aarch64.AppImage
+./Contrail-0.1.1-x86_64.AppImage
 ```
 
 If your system has no FUSE, run it with `--appimage-extract-and-run`.
