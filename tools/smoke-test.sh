@@ -53,7 +53,9 @@ smoke() {
   file=$(file_of "$format" "$machine")
   [[ -f out/packages/$file ]] || { echo "No out/packages/$file: run tools/build-packages.sh $machine" >&2; return 1; }
   # Under emulation the program takes minutes to start.
+  local emulated=
   if [[ $arch != "$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" ]]; then
+    emulated=1
     export SMOKE_SETTLE=${SMOKE_SETTLE:-30} SMOKE_TIMEOUT=${SMOKE_TIMEOUT:-900}
   fi
   local -A systems=()
@@ -117,11 +119,26 @@ RUN $install > /tmp/install.log 2>&1 || { tail -n 30 /tmp/install.log; exit 1; }
           contrail --check-libs
           tests/smoke/run-demo.sh /out/$out contrail" ;;
       appimage)
-        image "$tag" "$platform" build-env "FROM $base
+        if [[ -n $emulated ]]; then
+          # Under qemu-user binfmt the AppImage can't be started itself: its "AI" mark in the ELF header doesn't
+          # match the emulator's magic. Unpack the squashfs after the runtime (what --appimage-extract-and-run
+          # does) and start its AppRun.
+          offset=$(python3 -c 'import sys
+d = open(sys.argv[1], "rb").read(64)
+print(int.from_bytes(d[40:48], "little") + int.from_bytes(d[58:60], "little") * int.from_bytes(d[60:62], "little"))' \
+            "out/packages/$file")
+          image "$tag" "$platform" build-env "FROM $base
+RUN $setup && ( command -v apt-get >/dev/null && apt-get install -y -qq squashfs-tools || dnf install -q -y squashfs-tools )"
+          run "$tag" "$platform" "set -e
+            unsquashfs -q -o $offset -d /tmp/Contrail out/packages/$file >/dev/null
+            tests/smoke/run-demo.sh /out/$out /tmp/Contrail/AppRun"
+        else
+          image "$tag" "$platform" build-env "FROM $base
 RUN $setup"
-        run "$tag" "$platform" "set -e
-          cp out/packages/$file /tmp/Contrail.AppImage
-          tests/smoke/run-demo.sh /out/$out /tmp/Contrail.AppImage --appimage-extract-and-run" ;;
+          run "$tag" "$platform" "set -e
+            cp out/packages/$file /tmp/Contrail.AppImage
+            tests/smoke/run-demo.sh /out/$out /tmp/Contrail.AppImage --appimage-extract-and-run"
+        fi ;;
       flatpak)
         # The runtime comes from the packaging's own download (out/flatpak/), not from the network.
         image "$tag" "$platform" build-env "FROM $base

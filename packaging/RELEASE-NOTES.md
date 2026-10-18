@@ -77,14 +77,14 @@ Desktop doesn't have them either.
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- Each x86_64 package was installed the way users do and started in a clean container with an offline,
-  made-up demo account (`tools/smoke-test.sh`): the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
-  `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
-  Arch Linux, the Flatpak with `flatpak` on Fedora 44 (all on X11).
+- Each package was installed the way users do and started in a clean container with an offline, made-up demo
+  account (`tools/smoke-test.sh`, on X11): the DEB with `apt` on Debian 13 and Ubuntu 24.04 (ARM64 also in
+  FuriOS 14's userland), the RPM with `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on
+  Debian 13, Ubuntu 24.04, Fedora 44 and (x86_64) Arch Linux, the x86_64 Flatpak with `flatpak` on Fedora 44.
+  The ARM64 containers ran under qemu-user emulation.
 - On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage and Flatpak ran as a second, offline instance
   with the demo account.
-- Not checked with these files: installing the ARM64 DEB and RPM (they carry the same files as the ARM64
-  AppImage), signing in and chatting with a real account, calls, Wayland desktops.
+- Not checked with these files: signing in and chatting with a real account, calls, Wayland desktops.
 
 ## Sources and licenses
 
