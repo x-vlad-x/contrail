@@ -57,6 +57,21 @@ index 7a309ac..32d347e 100644
  	for (const auto &window : _windowStack) {
  		if (window == _lastActiveWindow) {
  			break;
+diff --git a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
+index a229510..0b5c02e 100644
+--- a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
++++ b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
+@@ -210,6 +210,10 @@ bool Supported() {
+ }
+ 
+ bool Enforced() {
++#ifdef CONTRAIL_GTK
++	// Qt runs offscreen under the GTK interface: its own popups are never seen.
++	return true;
++#endif // CONTRAIL_GTK
+ 	// Wayland doesn't support positioning
+ 	// and custom notifications don't work here
+ 	return IsWayland()
 diff --git a/Telegram/SourceFiles/platform/linux/specific_linux.cpp b/Telegram/SourceFiles/platform/linux/specific_linux.cpp
 index 8faa6d9..f0ec0d5 100644
 --- a/Telegram/SourceFiles/platform/linux/specific_linux.cpp
