@@ -6,6 +6,11 @@
   phone-measure.py inhibitors          what keeps the system from sleeping, and Contrail's part in it
   phone-measure.py threads SECONDS     which threads wake up how often (the background's profile)
   phone-measure.py resources           devices and streams Contrail holds: cameras, audio, sleep and idle locks
+  phone-measure.py battery-log SECONDS INTERVAL OUT
+                                       the battery every INTERVAL seconds into OUT (TSV): the charge counter, the
+                                       current, the screen's backlight and lock, whether Contrail runs and its CPU
+                                       time; then a summary line. Runs on the phone, so a lost SSH session
+                                       doesn't stop it (start it with nohup)
 
 Memory comes from /proc/PID/smaps_rollup (RSS, PSS, private, swap, kB). CPU time is user + system in
 seconds. Wakeups are the voluntary context switches of all the threads: each one is a thread that went
@@ -157,6 +162,57 @@ def threads(seconds):
             print(f'{wakeups:8d} {ticks / os.sysconf("SC_CLK_TCK"):7.2f}s  {name} ({tid})')
 
 
+def session_locked():
+    try:
+        sessions = subprocess.run(['loginctl', 'list-sessions', '--no-legend'], capture_output=True, text=True,
+                                  timeout=10).stdout
+        for line in sessions.splitlines():
+            if 'seat0' in line:
+                hint = subprocess.run(['loginctl', 'show-session', line.split()[0], '-p', 'LockedHint', '--value'],
+                                      capture_output=True, text=True, timeout=10).stdout.strip()
+                return hint == 'yes'
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def battery_log(seconds, interval, out):
+    base = '/sys/class/power_supply/battery'
+    clk = os.sysconf('SC_CLK_TCK')
+    rows = []
+    with open(out, 'w') as f:
+        f.write('time\tcharge_uah\tcurrent_ua\tvoltage_uv\tstatus\tbacklight\tlocked\tcontrail_pid\tcontrail_cpu_s\n')
+        start = time.monotonic()
+        while True:
+            pid = contrail_pid()
+            cpu = ''
+            if pid:
+                fields = read(f'/proc/{pid}/stat').rsplit(')', 1)[-1].split()
+                cpu = f'{(int(fields[11]) + int(fields[12])) / clk:.2f}' if len(fields) > 12 else ''
+            row = [time.strftime('%H:%M:%S'), read(f'{base}/charge_counter', '0').strip(),
+                   read(f'{base}/current_now', '0').strip(), read(f'{base}/voltage_now', '0').strip(),
+                   read(f'{base}/status', '?').strip(), read('/sys/class/leds/lcd-backlight/brightness', '?').strip(),
+                   {True: 'yes', False: 'no', None: '?'}[session_locked()], str(pid or ''), cpu]
+            rows.append(row)
+            f.write('\t'.join(row) + '\n')
+            f.flush()
+            elapsed = time.monotonic() - start
+            if elapsed >= seconds:
+                break
+            time.sleep(min(interval, seconds - elapsed))
+        hours = (time.monotonic() - start) / 3600
+        used = int(rows[0][1]) - int(rows[-1][1])
+        currents = [-int(r[2]) for r in rows if r[2].lstrip('-').isdigit()]
+        dark = [r for r in rows if r[5] == '0']
+        dark_currents = [-int(r[2]) for r in dark if r[2].lstrip('-').isdigit()]
+        charging = any(r[4] not in ('Discharging', 'Not charging') for r in rows)
+        f.write(f'# {hours * 60:.1f} min: charge counter {used / 1000:.1f} mAh ({used / 1000 / hours:.1f} mA average); '
+                f'current samples {sum(currents) / max(len(currents), 1) / 1000:.1f} mA average, '
+                f'{sum(dark_currents) / max(len(dark_currents), 1) / 1000:.1f} mA with the screen off; '
+                f'screen off in {len(dark)} of {len(rows)} samples; '
+                f'{"CHARGED meanwhile" if charging else "on battery throughout"}\n')
+
+
 def resources():
     pid = contrail_pid()
     if not pid:
@@ -215,6 +271,8 @@ def main():
         snapshot(sys.argv[2] if len(sys.argv) > 2 else '-')
     elif sys.argv[1] == 'inhibitors':
         inhibitors()
+    elif sys.argv[1] == 'battery-log':
+        battery_log(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif sys.argv[1] == 'resources':
         resources()
     elif sys.argv[1] == 'threads':

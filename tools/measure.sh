@@ -6,8 +6,9 @@
 #                                        and load its history with the media, close the window, then samples
 #                                        1, 5 and 15 minutes after closing
 #   tools/measure.sh energy MINUTES [NAME]
-#                                        the charge used with the window closed and the screen locked; the phone
-#                                        must be off the charger. Run once with the app stopped (NAME idle) for the
+#                                        the charge used with the window closed and the screen locked, sampled
+#                                        every 30 s with the current and the screen's state; the phone must be off
+#                                        the charger. Run once with the app stopped (NAME idle) for the
 #                                        phone's own use, then with the app in the background, under the same
 #                                        conditions (network, account, time of day), at least an hour each
 #   tools/measure.sh snapshot [LABEL]    one sample now
@@ -52,17 +53,19 @@ case "${1:-}" in
     ;;
   energy)
     minutes="${2:?minutes}"
-    file="$OUT/energy-${3:-$(version)}-$(date +%Y%m%d-%H%M).tsv"
+    name=${3:-$(version)}
+    file="$OUT/energy-$name-$(date +%Y%m%d-%H%M).tsv"
     status=$(rsh 'cat /sys/class/power_supply/battery/status')
     [[ "$status" == Discharging ]] || { echo "The phone is $status: take it off the charger first." >&2; exit 1; }
-    rsh "python3 ~/.cache/contrail-tools/phone-measure.py header" > "$file"
-    echo "# $(version), $minutes min" >> "$file"
-    start=$(rsh 'cat /sys/class/power_supply/battery/charge_counter')
-    sample start "$file"
-    sleep $(( minutes * 60 ))
-    sample end "$file"
-    end=$(rsh 'cat /sys/class/power_supply/battery/charge_counter')
-    echo "Used: $(( (start - end) / 1000 )) mAh in $minutes min ($(( (start - end) * 60 / minutes / 1000 )) mA average)" | tee -a "$file"
+    # The log is written on the phone: a lost SSH session doesn't end the run.
+    remote="/tmp/contrail-energy-$name.tsv"
+    rsh "nohup python3 ~/.cache/contrail-tools/phone-measure.py battery-log $(( minutes * 60 )) 30 $remote \
+           >/dev/null 2>&1 &"
+    sleep $(( minutes * 60 + 20 ))
+    until rsh "grep -q '^#' $remote"; do sleep 10; done
+    { echo "# $name ($(version))"; rsh "cat $remote"; } > "$file"
+    tail -n 1 "$file"
+    echo "Saved: $file"
     ;;
   *)
     sed -n '2,17p' "$0"
