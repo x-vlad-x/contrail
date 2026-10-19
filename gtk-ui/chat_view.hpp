@@ -22,17 +22,31 @@ class Thread;
 class ForumTopic;
 } // namespace Data
 
+namespace Ui {
+struct PreparedList;
+class SendFilesWay;
+} // namespace Ui
+
+namespace Api {
+struct SendAction;
+} // namespace Api
+
 namespace Contrail {
 
 class MainWindow;
 class MessageWidget;
+class AttachDialog;
+class ClipboardReader;
 
 // An open chat: the messages (loaded page by page through the core, like Telegram Desktop's
 // HistoryWidget does) and the message field. A topic of a group with topics is a chat of its own:
 // its messages come from the core's list of the topic (Data::RepliesList), as in RepliesWidget.
 class ChatView final : public base::has_weak_ptr {
 public:
-  ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt);
+  // `showAtY`: where on the screen to put the message `showAt` (the place it had before the window was
+  // closed); by default a third from the top, highlighted.
+  ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt,
+           std::optional<double> showAtY = std::nullopt);
   ~ChatView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
@@ -40,6 +54,8 @@ public:
   [[nodiscard]] not_null<Data::Thread *> thread() const { return _thread; }
 
   void showAt(MsgId id);
+  // The message at the top of the screen and its place there; none at the bottom of the chat.
+  [[nodiscard]] std::pair<MsgId, double> scrollState() const;
   bool handleEscape();  // Cancels a reply or an edit; false if there was nothing to cancel.
 
   // Used by the messages.
@@ -52,6 +68,7 @@ public:
   void debugScroll(bool top);
   void debugCheckDraft();
   void debugHistory(const QString &action);
+  void debugAttach(const QString &action);
 
 private:
   void buildHeader();
@@ -71,13 +88,16 @@ private:
   [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;
   void reload(MsgId showAt);
   void sync();
-  void addRow(not_null<HistoryItem *> item);
+  MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);
+  void setRowItems(MessageWidget *row, std::vector<not_null<HistoryItem *>> items);
+  void forgetRow(MessageWidget *row);
   void removeRow(const HistoryItem *item);
   MessageWidget *rowFor(const HistoryItem *item) const;
   void refreshItem(const HistoryItem *item);
+  void refreshTransfer(FullMsgId id);
 
   void scrollToBottom();
-  void scrollToRow(MessageWidget *row, bool highlight);
+  void scrollToItem(not_null<const HistoryItem *> item, bool highlight);
   bool scrollToLoaded(MsgId id);
   void scrolled();
   void scheduleViewportUpdate();
@@ -98,9 +118,15 @@ private:
   void cancelReplyOrEdit();
   void showReplyBar(const QString &title, const QString &text, const char *icon);
   void chooseFiles();
-  void sendFiles(const QStringList &paths);
+  // The files from the chooser or a pasted picture, shown before sending (AttachDialog).
+  void openAttach(const QStringList &paths, QImage image = QImage(), const QString &textOnCancel = QString());
+  bool sendAttachments(Ui::PreparedList &list, const Ui::SendFilesWay &way, const QString &caption,
+                       const Api::SendAction &action);
+  void paste();
+  void pasteText(const QString &text);
   void setupRecordGesture();
   void startRecording();
+  void attachRecording();
   void lockRecording();
   void showRecordState();
   void dragRecording(double dx, double dy);
@@ -148,7 +174,9 @@ private:
   rpl::lifetime _recordLifetime;
   GtkWidget *_joinButton = nullptr;
 
-  std::unordered_map<const HistoryItem *, std::unique_ptr<MessageWidget>> _rows;
+  // A row is a message, or an album (the messages of a group): every message maps to its row.
+  std::unordered_map<MessageWidget *, std::unique_ptr<MessageWidget>> _rows;
+  std::unordered_map<const HistoryItem *, MessageWidget *> _itemRows;
   std::set<MessageWidget *> _waitingMedia;
   std::set<DocumentData *> _openWhenLoaded;
   // Sponsored messages are sorted after the regular message they follow in the history.
@@ -178,6 +206,7 @@ private:
   guint _viewportSource = 0;
   FullMsgId _scrollTarget;
   bool _scrollTargetHighlight = false;
+  std::optional<double> _scrollTargetY;  // Where the target goes on the screen, by default a third from the top.
   int _topReserve = 0;        // Empty room above the messages, filled by older pages (setTopReserve).
   double _pendingShift = 0;   // Applied to the scroll position when the content height changes.
   double _shiftBase = 0;
@@ -194,6 +223,8 @@ private:
   bool _settingComposerText = false;
   int _editGeneration = 0;
   bool _syncScheduled = false;
+  base::weak_ptr<AttachDialog> _attach;
+  std::unique_ptr<ClipboardReader> _pasteReader;
   SignalConnections _signals;
   base::Timer _readTimer;
   base::Timer _statusTimer;

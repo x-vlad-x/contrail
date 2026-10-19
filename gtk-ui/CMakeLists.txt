@@ -37,6 +37,9 @@ set_source_files_properties(${CONTRAIL_SRC} PROPERTIES
 option(CONTRAIL_BUNDLE_RPATH "Look for libraries in ../../lib next to the installed program" OFF)
 if (CONTRAIL_BUNDLE_RPATH)
   target_link_options(Telegram PRIVATE "LINKER:-rpath,$ORIGIN/../../lib" "LINKER:--disable-new-dtags")
+  # No build-tree path next to it (shared libraries built by build-deps.sh would add one): editing it out later
+  # would turn the RPATH into a RUNPATH, which the libraries the program loads don't use.
+  set_target_properties(Telegram PROPERTIES SKIP_BUILD_RPATH ON)
 endif()
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/../packaging/install.cmake)

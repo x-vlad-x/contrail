@@ -58,6 +58,27 @@ cmd demo 8
 shot 2-chats
 cmd "chat 0"
 shot 3-chat
+# Pasting from the X11 clipboard: a picture opens the attach dialog with it, so do files (not in the Flatpak:
+# the host's paths aren't in its sandbox). Nothing is sent: the demo account is offline and the dialog closes.
+if command -v xclip >/dev/null; then
+  xclip -selection clipboard -t image/png -i /src/screenshots/chat.png
+  cmd "attach paste" 5
+  cmd "attach state" 1
+  shot 3-paste-picture
+  cmd "attach cancel" 1
+  grep -q "Attach state: entries=1 prepared=1" "$OUT/contrail.log"
+  case "$*" in
+    *flatpak*) ;;
+    *)
+      cp /src/screenshots/chats.png /src/screenshots/call.png "$HOME/"
+      printf 'file://%s/chats.png\r\nfile://%s/call.png\r\n' "$HOME" "$HOME" \
+        | xclip -selection clipboard -t text/uri-list
+      cmd "attach paste" 5
+      cmd "attach state" 1
+      cmd "attach cancel" 1
+      grep -q "Attach state: entries=2 prepared=2" "$OUT/contrail.log" ;;
+  esac
+fi
 cmd back
 cmd demo-sponsored
 for n in 1 2 3; do

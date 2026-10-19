@@ -24,6 +24,8 @@ public:
   ~CallView();
   void start(not_null<UserData *> user, bool video = false);
   void present();
+  // The main window was built again (it is released while closed).
+  void setParentWindow(GtkWindow *parent);
   // CONTRAIL_DEBUG only; does not call anyone.
   void preview(bool incoming, bool video = false, const QString &name = u"Contrail"_q);
   void debugLocalCall(const QString &action);

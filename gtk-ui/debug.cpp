@@ -3,7 +3,10 @@
 //     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
 // Commands: testmode | login phone|code|name TEXT | chat N | open NAME | topic N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
 //           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
-//           close | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
+//           close | present | state | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
+//           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
+//             record-cancel|state |
+//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT] |
 //           screenshot [call] PATH
 
 #include "debug.hpp"
@@ -11,6 +14,7 @@
 #include "demo.hpp"
 
 #include "main_window.hpp"
+#include "zoom_view.hpp"
 #include "core/sandbox.h"
 
 #include "history/history.h"
@@ -18,6 +22,8 @@
 #include "main/main_account.h"
 #include "main/main_domain.h"
 #include "core/application.h"
+#include "window/window_session_controller.h"
+#include "window/window_controller.h"
 #include "core/core_settings.h"
 #include "mtproto/mtp_instance.h"
 #include "mtproto/mtproto_dc_options.h"
@@ -141,7 +147,7 @@ void Run(MainWindow &w, const std::string &cmdline) {
   } else if (cmd == "search") {
     w.searchChats(Q(arg.c_str()));
   } else if (cmd == "row") {
-    ActivateRow(w.widget(), arg);
+    if (w.widget()) ActivateRow(w.widget(), arg);
   } else if (cmd == "scroll-top" || cmd == "scroll-bottom") {
     w.debugScroll(cmd == "scroll-top");
   } else if (cmd == "call-preview") {
@@ -158,15 +164,38 @@ void Run(MainWindow &w, const std::string &cmdline) {
     // screenshot [call] PATH: the window drawn by GTK itself, 3x, nothing of the phone around it.
     const auto value = Q(arg.c_str());
     const auto call = value.startsWith(u"call "_q);
-    SaveWindowPng(call ? FindWindow("call-window") : w.widget(), U8(call ? value.mid(5) : value).c_str(), 3.);
+    if (auto *window = call ? FindWindow("call-window") : w.widget()) {
+      SaveWindowPng(window, U8(call ? value.mid(5) : value).c_str(), 3.);
+    }
   } else if (cmd == "close") {
-    gtk_window_close(GTK_WINDOW(w.widget()));
+    if (w.widget()) gtk_window_close(GTK_WINDOW(w.widget()));
+  } else if (cmd == "present") {
+    w.present();
+  } else if (cmd == "state") {
+    w.debugState();
+  } else if (cmd == "core-open") {
+    // Saved Messages opened by the core, as a notification's click or a link does: "core-open [ID]".
+    const auto window = Core::App().activePrimaryWindow();
+    const auto controller = window ? window->sessionController() : nullptr;
+    if (controller) {
+      controller->showPeerHistory(controller->session().user()->id, Window::SectionShow::Way::ClearStack,
+                                  MsgId(std::atoll(arg.c_str())));
+    }
+  } else if (cmd == "reconnect") {
+    // Drops the connections as a network change would: what was being sent or uploaded is sent again.
+    if (const auto session = w.session()) session->account().mtp().restart();
+  } else if (cmd == "zoom") {
+    // The photo viewer's scale and position (history-state photo:ID opens a message's photo).
+    auto *view = ZoomViewFind(w.widget());
+    g_message("Zoom state: %s", view ? ZoomViewState(view).c_str() : "no viewer");
   } else if (cmd == "background") {
     Core::App().settings().setCloseBehavior(arg == "on" ? Core::Settings::CloseBehavior::RunInBackground
                                                         : Core::Settings::CloseBehavior::Quit);
     w.updateBackgroundMode();
   } else if (cmd == "call-local-test") {
     w.debugLocalCall(Q(arg.c_str()));
+  } else if (cmd == "attach") {
+    w.debugAttach(Q(arg.c_str()));
   } else if (cmd == "check-draft") {
     w.debugCheckDraft();
   } else if (cmd == "history-state") {
@@ -175,7 +204,7 @@ void Run(MainWindow &w, const std::string &cmdline) {
     Core::Sandbox::Instance().postponeCall([] {
       g_message("GTK/core event regression: postponed update completed");
     });
-  } else if (cmd == "layout") {
+  } else if (cmd == "layout" && w.widget()) {
     const auto width = gtk_widget_get_width(w.widget());
     const auto check = [&](const auto &self, GtkWidget *widget) -> void {
       if (!gtk_widget_get_mapped(widget)) return;

@@ -60,6 +60,15 @@
     <content_attribute id="social-info">mild</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.2.0" date="2026-10-19" type="stable">
+      <description>
+        <p>Albums: photos and videos sent together are shown as one message in a grid, and several files go out
+          as albums of up to ten. Files and pictures, chosen or pasted (Ctrl+V, a screenshot, files copied in a
+          file manager), are shown before sending, with a caption. Photos zoom with two fingers around the point
+          between them, move, and zoom in with a double tap. With the window closed, Contrail gives back the
+          memory of its interface and wakes up the phone less. The packages are smaller.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-10-18" type="stable">
       <description>
         <p>Groups with topics: a group opens its list of topics, and messages can be read and written in each

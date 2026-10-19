@@ -9,13 +9,16 @@ on x86_64 the same way; only gio-querymodules runs, through qemu-user when cross
                                                       GSettings schemas, icon themes, MIME data, translations;
                                                       with --pactl also PulseAudio's pactl (the Flatpak runtime
                                                       has none)
-  bundle.py deploy ROOT TRIPLE --host FILE            copies every shared library the ELF files in ROOT need,
+  bundle.py deploy ROOT TRIPLE --host FILE [--own DIR] copies every shared library the ELF files in ROOT need,
                                                       except those listed in FILE (the host's or the Flatpak
-                                                      runtime's), into ROOT/lib
+                                                      runtime's), into ROOT/lib; libraries built by build-deps.sh
+                                                      (DIR, its prefix's lib/: the small FFmpeg) come first
   bundle.py check ROOT TRIPLE --host FILE             every ELF resolves inside ROOT or to FILE; records what the
                                                       host must provide (share/doc/contrail/host-libraries.txt)
-  bundle.py licenses ROOT TRIPLE                      the copyright files and an inventory of the bundled Debian
-                                                      packages (share/doc/contrail/bundled/)
+  bundle.py licenses ROOT TRIPLE [--own DIR]          the copyright files and an inventory of the bundled Debian
+                                                      packages (share/doc/contrail/bundled/); the libraries built
+                                                      from a Debian source package by build-deps.sh are listed with
+                                                      that source package
 
 ROOT is the bundle's prefix: AppDir/usr in the AppImage, /usr/lib/contrail in the DEB and RPM, /app in the
 Flatpak. It has bin/, libexec/contrail/ (the program), lib/ (the bundled libraries) and share/.
@@ -159,16 +162,29 @@ def layout(path):
 
 def set_runpath_in_place(path, value):
     before = layout(path)
-    run(["patchelf", "--set-rpath", value, path])
+    # patchelf writes a RUNPATH by default: an RPATH stays one (it also applies to the libraries loaded).
+    rpath = "(RPATH)" in run(["readelf", "-dW", path], capture_output=True).stdout
+    run(["patchelf", *(["--force-rpath"] if rpath else []), "--set-rpath", value, path])
     if layout(path) != before:
         raise RuntimeError(f"patchelf moved sections of {path.name}; it can't be used as it is")
 
 
-def deploy(root, triple, host):
+def own_libraries(own):
+    """The libraries build-deps.sh built from a Debian source package (DIR/../share/contrail/own-libraries.json)."""
+    if not own:
+        return {}
+    listing = Path(own).parent / "share/contrail/own-libraries.json"
+    return json.loads(listing.read_text()) if listing.exists() else {}
+
+
+def deploy(root, triple, host, own=None):
     """Copies the libraries the ELF files in ROOT need (recursively) into ROOT/lib, leaving the host's to the
-    host, then sets every ELF's RUNPATH to ROOT/lib."""
+    host, then sets every ELF's RUNPATH to ROOT/lib. Libraries of OWN, build-deps.sh's own builds, are taken
+    before the container's, and never left to the host."""
     target_machine = MACHINES[triple]
-    default_dirs = library_dirs(triple)
+    default_dirs = ([str(own)] if own else []) + library_dirs(triple)
+    built = own_libraries(own)
+    host = host - set(built)
     origins_path = root / ORIGINS
     origins = json.loads(origins_path.read_text()) if origins_path.exists() else {}
     lib = root / "lib"
@@ -234,6 +250,9 @@ def check(root, triple, host):
     program = root / "libexec/contrail/contrail"
     if f"$ORIGIN/{os.path.relpath(root / 'lib', program.parent)}" not in dynamic(program)[1]:
         raise RuntimeError("The program has no RPATH to the bundled libraries (CONTRAIL_BUNDLE_RPATH)")
+    # A RUNPATH would only serve the program's own dependencies, not the libraries they need in turn.
+    if "(RUNPATH)" in run(["readelf", "-dW", program], capture_output=True).stdout:
+        raise RuntimeError("The program has a RUNPATH instead of an RPATH: bundled libraries' dependencies won't load")
     for path in elf_files(root):
         needed, paths = dynamic(path)
         dirs = [Path(p.replace("$ORIGIN", str(path.parent))) for p in paths]
@@ -269,8 +288,10 @@ def check(root, triple, host):
     print(target.read_text())
 
 
-def licenses(root, triple):
-    """Each bundled file is traced to the Debian package that installed it in the build container."""
+def licenses(root, triple, own=None):
+    """Each bundled file is traced to the Debian package that installed it in the build container, or, for the
+    libraries build-deps.sh built from a Debian source package, to that source package."""
+    built = own_libraries(own)
     paths, names = {}, {}
     for listing in Path("/var/lib/dpkg/info").glob("*.list"):
         package = listing.name.removesuffix(".list")
@@ -291,10 +312,14 @@ def licenses(root, triple):
         else:
             yield f"/usr/{relative}"
 
-    owners = {}
+    owners, rebuilt = {}, {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
         if not path.is_file() or relative.startswith(OWN) or relative in OWN_FILES:
+            continue
+        origin = origins.get(relative, "")
+        if own and origin.startswith(str(own) + "/") and path.name in built:
+            rebuilt.setdefault(path.name, built[path.name])
             continue
         if "/hicolor/" in relative and APP_ID in relative:
             continue
@@ -330,6 +355,12 @@ def licenses(root, triple):
         binary, version, source_name, source_version = result.stdout.split("\t")
         inventory.append(dict(binary_package=binary, binary_version=version, source_package=source_name,
                               source_version=source_version, files=files))
+    for name, record in sorted(rebuilt.items()):
+        shutil.copy2(Path(own).parent / "share/contrail" / record["copyright"], target / record["copyright"])
+        inventory.append(dict(binary_package=f"{name} (built by Contrail)", binary_version=record["source_version"],
+                              source_package=record["source_package"], source_version=record["source_version"],
+                              files=[f"lib/{name}"], built_by=record["built_by"],
+                              configuration=record["configuration"]))
     copy_tree(Path("/usr/share/common-licenses"), target / "common-licenses")
     (target / "bundled-packages.json").write_text(json.dumps(inventory, indent=2) + "\n")
     print(f"Bundled files come from {len(inventory)} Debian packages")
@@ -347,16 +378,21 @@ def main():
     parser.add_argument("--host", type=Path, help="sonames left to the host or the Flatpak runtime")
     parser.add_argument("--gtk", action="store_true")
     parser.add_argument("--pactl", action="store_true")
+    parser.add_argument("--own", type=Path, help="lib/ of build-deps.sh's prefix, its libraries come first")
     args = parser.parse_args()
     root = args.root.resolve()
+    own = args.own.resolve() if args.own and args.own.is_dir() else None
     if args.action == "resources":
         resources(root, args.triple, args.gtk, args.pactl)
     elif args.action == "licenses":
-        licenses(root, args.triple)
+        licenses(root, args.triple, own)
     else:
         if not args.host:
             parser.error("--host is required")
-        {"deploy": deploy, "check": check}[args.action](root, args.triple, read_host(args.host))
+        if args.action == "deploy":
+            deploy(root, args.triple, read_host(args.host), own)
+        else:
+            check(root, args.triple, read_host(args.host) - set(own_libraries(own)))
 
 
 if __name__ == "__main__":

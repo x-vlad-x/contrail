@@ -46,3 +46,8 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc QEMU_LD_
 # PulseAudio's pactl (the call audio routes): the Flatpak carries it, its runtime has none.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pulseaudio-utils:arm64 \
     && rm -rf /var/lib/apt/lists/*
+# The small FFmpeg of the packages (build-deps.sh, CONTRAIL_FFMPEG): the libraries it builds on.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libdav1d-dev:arm64 libva-dev:arm64 libvdpau-dev:arm64 \
+    && rm -rf /var/lib/apt/lists/*
+ENV CONTRAIL_FFMPEG=1

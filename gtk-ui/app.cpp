@@ -16,9 +16,25 @@
 #include <QtWidgets/QApplication>
 
 #include <glib-unix.h>
+#include <malloc.h>
 
 
 namespace Contrail {
+namespace {
+
+// Decoded pictures (a photo is up to 2560 px, 26 MB) come and go all the time. glibc's malloc raises
+// its mmap threshold as large blocks are freed, after which they come from the heap and stay with the
+// process when freed. A fixed threshold keeps every large block in its own mapping, given back to the
+// system as soon as it is freed; fewer arenas keep the threads' freed memory from piling up. Set before
+// main(), so the core's threads get these too.
+[[maybe_unused]] const auto kMallocTuning = [] {
+  mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+  mallopt(M_TRIM_THRESHOLD, 4 * 1024 * 1024);
+  mallopt(M_ARENA_MAX, 4);
+  return 0;
+}();
+
+}  // namespace
 
 App &GetApp() {
   static App app;

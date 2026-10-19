@@ -1,10 +1,13 @@
 #include "chat_view.hpp"
 
+#include "attach.hpp"
 #include "main_window.hpp"
 #include "message.hpp"
 #include "scroll_helpers.hpp"
+#include "send_queue.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
+#include "voice_recorder.hpp"
 
 #include "api/api_common.h"
 #include "api/api_editing.h"
@@ -13,6 +16,7 @@
 #include "base/unixtime.h"
 #include "chat_helpers/message_field.h"
 #include "core/application.h"
+#include "core/core_settings.h"
 #include "core/mime_type.h"
 #include "window/notifications_manager.h"
 #include "data/data_changes.h"
@@ -25,11 +29,13 @@
 #include "data/data_file_origin.h"
 #include "data/data_forum.h"
 #include "data/data_forum_topic.h"
+#include "data/data_groups.h"
 #include "data/data_histories.h"
 #include "data/data_replies_list.h"
 #include "data/data_peer_values.h"
 #include "data/data_photo.h"
 #include "data/data_photo_media.h"
+#include "data/data_premium_limits.h"
 #include "data/data_send_action.h"
 #include "history/view/history_view_send_action.h"
 #include "data/data_session.h"
@@ -45,9 +51,11 @@
 #include "media/audio/media_audio_capture_common.h"
 #include "media/player/media_player_instance.h"
 #include "ui/text/format_values.h"
+#include "storage/file_upload.h"
 #include "storage/localimageloader.h"
 #include "storage/storage_media_prepare.h"
 #include "ui/chat/attach/attach_prepare.h"
+#include "ui/chat/attach/attach_send_files_way.h"
 #include "ui/image/image.h"
 #include "ui/text/text_utilities.h"
 
@@ -70,6 +78,46 @@ constexpr auto kRecordCancelDistance = 120.;  // Slide left to cancel.
 constexpr auto kRecordLockDistance = 90.;     // Slide up to keep recording without holding.
 constexpr auto kRecordMinHold = crl::time(400);
 constexpr auto kRecordHintMargin = 16;  // "Slide to cancel" right of the timer, left of the microphone.
+
+// Telegram doesn't take Ogg Opus files (what voice messages are made of) in an album of music: the whole
+// album would fail on the server (MEDIA_EMPTY) and its messages stay "sending". They go on their own, the rest
+// of the music stays together, in the order chosen.
+bool IsOggAudio(const Ui::PreparedFile &file) {
+  const auto mime = file.information ? file.information->filemime : QString();
+  const auto suffix = QFileInfo(file.path).suffix().toLower();
+  return mime == u"audio/ogg"_q || mime == u"audio/opus"_q || mime == u"audio/x-opus+ogg"_q || suffix == u"ogg"_q
+         || suffix == u"opus"_q || suffix == u"oga"_q;
+}
+
+std::vector<Ui::PreparedGroup> SeparateOggFromMusic(std::vector<Ui::PreparedGroup> &&groups) {
+  auto result = std::vector<Ui::PreparedGroup>();
+  for (auto &group : groups) {
+    if (group.type != Ui::AlbumType::Music
+        || std::none_of(group.list.files.begin(), group.list.files.end(), IsOggAudio)) {
+      result.push_back(std::move(group));
+      continue;
+    }
+    auto run = Ui::PreparedList();
+    const auto flush = [&] {
+      if (run.files.empty()) return;
+      const auto type = (run.files.size() > 1) ? Ui::AlbumType::Music : Ui::AlbumType::None;
+      result.push_back(Ui::PreparedGroup{.list = std::move(run), .type = type});
+      run = Ui::PreparedList();
+    };
+    for (auto &file : group.list.files) {
+      if (IsOggAudio(file)) {
+        flush();
+        auto single = Ui::PreparedList();
+        single.files.push_back(std::move(file));
+        result.push_back(Ui::PreparedGroup{.list = std::move(single), .type = Ui::AlbumType::None});
+      } else {
+        run.files.push_back(std::move(file));
+      }
+    }
+    flush();
+  }
+  return result;
+}
 
 QString UniqueDownloadPath(const QString &name) {
   auto dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
@@ -97,9 +145,10 @@ void LaunchFile(const QString &path) {
 
 }  // namespace
 
-ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt)
+ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt,
+                   std::optional<double> showAtY)
     : _thread(thread), _history(thread->owningHistory()), _topic(thread->asTopic()), _window(window),
-      _pendingShowAt(showAt), _readTimer([=] { markAsRead(); }),
+      _scrollTargetY(showAt ? showAtY : std::nullopt), _pendingShowAt(showAt), _readTimer([=] { markAsRead(); }),
       _statusTimer([=] { refreshHeader(); }), _reserveTimer([=] { maintainTopReserve(); }) {
   _root = adw_toolbar_view_new();
   g_object_ref_sink(_root);
@@ -198,6 +247,10 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
       }
     }
   }, _lifetime);
+  // Each message of an album shows its own upload.
+  auto &uploader = session->uploader();
+  rpl::merge(uploader.photoProgress(), uploader.documentProgress(), uploader.photoFailed(), uploader.documentFailed())
+      | rpl::on_next([=](const FullMsgId &id) { refreshTransfer(id); }, _lifetime);
   Media::Player::instance()->updatedNotifier() | rpl::on_next([=](const Media::Player::TrackState &state) {
     for (const auto &[item, row] : _rows) {
       row->updatePlayback(state);
@@ -226,11 +279,22 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
   }
   g_object_set_data(G_OBJECT(_list), "contrail-unread-after", GINT_TO_POINTER(int(_unreadAfter.bare)));
 
+  // Recording went on while the window was closed: ready to be sent or deleted.
+  if (Recorder().active() && Recorder().thread() == _thread.get()) {
+    _recording = true;
+    _recordLocked = true;
+    _recordStarted = Recorder().started();
+    attachRecording();
+  }
+
   loadInitial();
 }
 
 ChatView::~ChatView() {
   invalidate_weak_ptrs(this);
+  // Files prepared for this chat never go to another one.
+  _pasteReader = nullptr;
+  if (const auto attach = _attach.get()) attach->close();
   // Like HistoryWidget: the sponsored messages shown here leave the history with the chat.
   _history->session().sponsoredMessages().clearItems(_history);
   if (_viewportSource) g_source_remove(_viewportSource);
@@ -241,10 +305,8 @@ ChatView::~ChatView() {
   // Removing rows must not query messages that are being destroyed.
   gtk_list_box_set_header_func(GTK_LIST_BOX(_list), nullptr, nullptr, nullptr);
   gtk_list_box_set_sort_func(GTK_LIST_BOX(_list), nullptr, nullptr, nullptr);
-  if (_recording) {
-    _recordLifetime.destroy();
-    ::Media::Capture::instance()->stop();
-  }
+  // A voice message being recorded goes on without the chat (the window was closed): see VoiceRecorder.
+  _recordLifetime.destroy();
   _topicViewer.destroy();
   _lifetime.destroy();
   if (_olderRequest) {
@@ -269,6 +331,7 @@ ChatView::~ChatView() {
     _history->session().api().saveDraftToCloudDelayed(_thread);
   }
   _waitingMedia.clear();
+  _itemRows.clear();
   _rows.clear();
   g_object_unref(_root);
 }
@@ -385,8 +448,9 @@ void ChatView::buildList() {
         const auto newDay = !p || base::unixtime::parse(p->item()->date()).date() != day;
         const auto unreadAfter = MsgId(GPOINTER_TO_INT(
             g_object_get_data(G_OBJECT(gtk_widget_get_parent(GTK_WIDGET(row))), "contrail-unread-after")));
-        const auto unreadBar = unreadAfter && !item->out() && item->id > unreadAfter && item->isRegular()
-                               && (!p || p->item()->id <= unreadAfter);
+        // Before the row with the first unread message (an album's last message may be it).
+        const auto unreadBar = unreadAfter && !item->out() && m->lastItem()->id > unreadAfter && item->isRegular()
+                               && (!p || p->lastItem()->id <= unreadAfter);
         // Headers are recomputed for all the rows on every change of the list: keep the ones that
         // stay the same instead of creating new widgets (and a new layout) each time.
         const auto key = (newDay || unreadBar) ? gsize(day.toJulianDay() * 2 + (unreadBar ? 1 : 0)) : gsize(0);
@@ -412,7 +476,7 @@ void ChatView::buildList() {
           gtk_list_box_row_set_header(row, nullptr);
         }
         const auto sameSender = !newDay && p && !p->item()->isService() && !item->isService()
-                                && p->item()->from() == item->from() && item->date() - p->item()->date() < 15 * 60;
+                                && p->item()->from() == item->from() && item->date() - p->lastItem()->date() < 15 * 60;
         m->setFirstInGroup(!sameSender);
       },
       nullptr, nullptr);
@@ -478,6 +542,7 @@ void ChatView::buildList() {
             || (type == GDK_MOTION_NOTIFY && (gdk_event_get_modifier_state(event) & GDK_BUTTON1_MASK))) {
           // A real drag takes precedence over the initial unread/reply positioning.
           _scrollTarget = FullMsgId();
+          _scrollTargetY = std::nullopt;
           _stickToBottom = false;
         }
         if (g_getenv("CONTRAIL_DEBUG") && (type == GDK_TOUCH_BEGIN || type == GDK_TOUCH_END)) {
@@ -580,7 +645,7 @@ void ChatView::loadInitial() {
     setTopReserve(_history->loadedAtTop() ? 0 : kTopReserve, 0);
     scrollToBottom();
     _readTimer.callOnce(500);
-    if (_rows.size() < 20) {
+    if (_itemRows.size() < 20) {
       loadOlder();
     }
     return;
@@ -694,8 +759,8 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
               gtk_widget_set_visible(self->_loading, FALSE);
               if (g_getenv("CONTRAIL_DEBUG")) g_message("History page: %s offset=%d received=%d rows=%zu top=%d bottom=%d",
                   initial ? "initial" : older ? "older" : "newer", int(offsetId.bare), list ? int(list->size()) : -1,
-                  self->_rows.size(), int(history->loadedAtTop()), int(history->loadedAtBottom()));
-              if (!list || (first && self->_rows.empty() && total > 0)) {
+                  self->_itemRows.size(), int(history->loadedAtTop()), int(history->loadedAtBottom()));
+              if (!list || (first && self->_itemRows.empty() && total > 0)) {
                 if (list && !self->_emptyReloadTried) {
                   // The core may have cached messages in another view without attaching them to
                   // this history. Retry once after unloading those views, as HistoryWidget does.
@@ -803,25 +868,49 @@ std::vector<not_null<HistoryItem *>> ChatView::items() const {
   return result;
 }
 
+// The rows follow the messages: one per message, one per album. A row keeps its widgets when its album
+// grows (the rest of it comes with the next page) or shrinks (a message deleted), and when the messages
+// of an album being sent get their ids from the server.
 void ChatView::sync() {
-  std::set<const HistoryItem *> present;
+  auto units = std::vector<std::vector<not_null<HistoryItem *>>>();
+  auto unitOfGroup = std::unordered_map<uint64, size_t>();
   auto lastRegular = MsgId();
   _sponsoredAfter.clear();
+  const auto &groups = _history->owner().groups();
   for (const auto &item : items()) {
     if (item->isSponsored()) {
       _sponsoredAfter.emplace(item, lastRegular);
     } else if (item->isRegular()) {
       lastRegular = item->id;
     }
-    present.insert(item);
-    if (!_rows.contains(item)) {
-      addRow(item);
+    if (const auto groupId = groups.find(item) ? item->groupId().raw() : uint64()) {
+      const auto [i, added] = unitOfGroup.emplace(groupId, units.size());
+      if (!added) {
+        units[i->second].push_back(item);
+        continue;
+      }
     }
+    units.push_back({item});
+  }
+  auto used = std::set<MessageWidget *>();
+  for (auto &unit : units) {
+    MessageWidget *row = nullptr;
+    for (const auto &item : unit) {
+      if (const auto i = _itemRows.find(item); i != _itemRows.end() && !used.contains(i->second)) {
+        row = i->second;
+        break;
+      }
+    }
+    if (row) {
+      setRowItems(row, std::move(unit));
+    } else {
+      row = addRow(std::move(unit));
+    }
+    used.insert(row);
   }
   for (auto i = _rows.begin(); i != _rows.end();) {
-    if (!present.contains(i->first)) {
-      _sponsoredViewed.erase(i->first);
-      _waitingMedia.erase(i->second.get());
+    if (!used.contains(i->first)) {
+      forgetRow(i->first);
       i = _rows.erase(i);
     } else {
       ++i;
@@ -835,28 +924,69 @@ void ChatView::sync() {
   }
 }
 
-void ChatView::addRow(not_null<HistoryItem *> item) {
-  auto row = std::make_unique<MessageWidget>(item, this);
+MessageWidget *ChatView::addRow(std::vector<not_null<HistoryItem *>> items) {
+  auto row = std::make_unique<MessageWidget>(std::move(items), this);
+  const auto raw = row.get();
   gtk_list_box_append(GTK_LIST_BOX(_list), row->row());
-  if (!row->refreshMedia()) {
-    _waitingMedia.insert(row.get());
+  for (const auto &item : raw->items()) {
+    _itemRows[item] = raw;
   }
-  _rows.emplace(item, std::move(row));
+  if (!raw->refreshMedia()) {
+    _waitingMedia.insert(raw);
+  }
+  _rows.emplace(raw, std::move(row));
+  return raw;
 }
 
+void ChatView::setRowItems(MessageWidget *row, std::vector<not_null<HistoryItem *>> items) {
+  if (row->items() == items) return;
+  for (const auto &item : row->items()) {
+    if (const auto i = _itemRows.find(item); i != _itemRows.end() && i->second == row) {
+      _itemRows.erase(i);
+    }
+  }
+  row->setItems(std::move(items));
+  for (const auto &item : row->items()) {
+    _itemRows[item] = row;
+  }
+  if (!row->refreshMedia()) {
+    _waitingMedia.insert(row);
+  }
+  gtk_list_box_row_changed(GTK_LIST_BOX_ROW(row->row()));
+}
+
+void ChatView::forgetRow(MessageWidget *row) {
+  for (const auto &item : row->items()) {
+    _sponsoredViewed.erase(item);
+    if (const auto i = _itemRows.find(item); i != _itemRows.end() && i->second == row) {
+      _itemRows.erase(i);
+    }
+  }
+  _waitingMedia.erase(row);
+}
+
+// The message is about to be destroyed: no row may hold it any longer.
 void ChatView::removeRow(const HistoryItem *item) {
   _sponsoredAfter.erase(item);
   _sponsoredViewed.erase(item);
-  if (const auto i = _rows.find(item); i != _rows.end()) {
-    _waitingMedia.erase(i->second.get());
-    _rows.erase(i);
-    gtk_list_box_invalidate_headers(GTK_LIST_BOX(_list));
+  const auto i = _itemRows.find(item);
+  if (i == _itemRows.end()) return;
+  const auto row = i->second;
+  _itemRows.erase(i);
+  auto rest = row->items();
+  rest.erase(std::remove(rest.begin(), rest.end(), item), rest.end());
+  if (!rest.empty()) {
+    setRowItems(row, std::move(rest));
+  } else {
+    forgetRow(row);
+    _rows.erase(row);
   }
+  gtk_list_box_invalidate_headers(GTK_LIST_BOX(_list));
 }
 
 MessageWidget *ChatView::rowFor(const HistoryItem *item) const {
-  const auto i = _rows.find(item);
-  return (i != _rows.end()) ? i->second.get() : nullptr;
+  const auto i = _itemRows.find(item);
+  return (i != _itemRows.end()) ? i->second : nullptr;
 }
 
 void ChatView::refreshItem(const HistoryItem *item) {
@@ -869,17 +999,47 @@ void ChatView::refreshItem(const HistoryItem *item) {
   }
 }
 
+void ChatView::refreshTransfer(FullMsgId id) {
+  if (const auto item = _history->owner().message(id)) {
+    if (auto *row = rowFor(item); row && !row->refreshMedia()) {
+      _waitingMedia.insert(row);
+    }
+  }
+}
+
 void ChatView::scrollToBottom() {
   _stickToBottom = true;
   _scrollTarget = FullMsgId();
   scheduleViewportUpdate();
 }
 
-void ChatView::scrollToRow(MessageWidget *row, bool highlight) {
+void ChatView::scrollToItem(not_null<const HistoryItem *> item, bool highlight) {
   _stickToBottom = false;
-  _scrollTarget = row->item()->fullId();
-  _scrollTargetHighlight = highlight;
+  _scrollTarget = item->fullId();
+  // Coming back to where the chat was: the same place on the screen, nothing lit up.
+  _scrollTargetHighlight = highlight && !_scrollTargetY;
   scheduleViewportUpdate();
+}
+
+std::pair<MsgId, double> ChatView::scrollState() const {
+  if (!_initialLoaded || _stickToBottom) return {};
+  const auto value = gtk_adjustment_get_value(_adjustment);
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  if (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && loadedAtBottom()) return {};
+  // The topmost message seen, by its id: it is loaded again when the chat is built again.
+  auto result = std::pair<MsgId, double>{MsgId(), 0.};
+  auto best = std::numeric_limits<double>::max();
+  for (const auto &[item, row] : _itemRows) {
+    if (!item->isRegular()) continue;
+    auto *widget = row->widgetFor(item);
+    double y = 0;
+    const auto height = gtk_widget_get_height(widget);
+    if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page && y < best) {
+      best = y;
+      result = {item->id, y};
+    }
+  }
+  return result;
 }
 
 int ChatView::listHeight() const {
@@ -955,9 +1115,12 @@ void ChatView::updateViewport() {
   if (_scrollTarget) {
     const auto item = _history->owner().message(_scrollTarget);
     if (const auto row = item ? rowFor(item) : nullptr) {
-      if (ScrollWidgetToY(row->row(), _scroll, _adjustment, gtk_adjustment_get_page_size(_adjustment) / 3)) {
-        if (_scrollTargetHighlight) row->highlight();
+      // A message of an album: its cell, not the album's top.
+      const auto y = _scrollTargetY.value_or(gtk_adjustment_get_page_size(_adjustment) / 3);
+      if (ScrollWidgetToY(row->widgetFor(item), _scroll, _adjustment, y)) {
+        if (_scrollTargetHighlight) row->highlight(item);
         _scrollTarget = FullMsgId();
+        _scrollTargetY = std::nullopt;
       }
     } else {
       _scrollTarget = FullMsgId();
@@ -1044,6 +1207,7 @@ void ChatView::preloadVisibleEdges() {
 }
 
 void ChatView::showAt(MsgId id) {
+  _scrollTargetY = std::nullopt;
   if (scrollToLoaded(id)) {
     return;
   }
@@ -1065,6 +1229,7 @@ void ChatView::reload(MsgId showAt) {
   _topicSkippedBefore = _topicSkippedAfter = std::nullopt;
   _topicOlderWaiting = _topicNewerWaiting = false;
   _waitingMedia.clear();
+  _itemRows.clear();
   _rows.clear();
   _pendingShowAt = showAt;
   _stickToBottom = !showAt;
@@ -1073,21 +1238,21 @@ void ChatView::reload(MsgId showAt) {
 
 bool ChatView::scrollToLoaded(MsgId id) {
   if (const auto item = _history->owner().message(_history->peer, id)) {
-    if (auto *row = rowFor(item)) {
-      scrollToRow(row, id != _unreadAfter + 1);
+    if (rowFor(item)) {
+      scrollToItem(item, id != _unreadAfter + 1);
       return true;
     }
   }
   // The first unread message: ids have gaps, take the first loaded one after the read ones.
   if (_unreadAfter && id == _unreadAfter + 1) {
-    MessageWidget *first = nullptr;
-    for (const auto &[item, row] : _rows) {
-      if (item->id > _unreadAfter && item->isRegular() && (!first || item->id < first->item()->id)) {
-        first = row.get();
+    const HistoryItem *first = nullptr;
+    for (const auto &[item, row] : _itemRows) {
+      if (item->id > _unreadAfter && item->isRegular() && (!first || item->id < first->id)) {
+        first = item;
       }
     }
     if (first) {
-      scrollToRow(first, false);
+      scrollToItem(first, false);
       return true;
     }
   }
@@ -1109,13 +1274,14 @@ void ChatView::debugScroll(bool top) {
 
 void ChatView::debugCheckDraft() {
   if (_editing || _recording) return;
-  for (const auto &[item, row] : _rows) {
+  for (const auto &[raw, row] : _rows) {
+    const auto item = row->item();
     if (!item->allowsEdit(base::unixtime::now())) continue;
     const auto original = composerText();
     const auto reply = _replyTo;
     const auto sample = u"Contrail draft regression"_q;
     setComposerText(sample);
-    edit(row->item());
+    edit(item);
     cancelReplyOrEdit();
     const auto restored = composerText() == sample && _replyTo == reply;
     setComposerText(original);
@@ -1145,11 +1311,43 @@ void ChatView::debugHistory(const QString &action) {
   if (action == u"older"_q) loadOlder();
   else if (action == u"newer"_q) loadNewer();
   else if (action == u"end"_q) reload(0);
+  else if (action.startsWith(u"id:"_q)) showAt(MsgId(action.mid(3).toLongLong()));
+  else if (action.startsWith(u"delete:"_q) && _history->peer->isSelf()) {
+    // Test messages are sent to Saved Messages only, and deleted there.
+    _history->owner().histories().deleteMessages({FullMsgId(_history->peer->id, MsgId(action.mid(7).toLongLong()))}, true);
+    _history->owner().sendHistoryChangeNotifications();
+  } else if (action.startsWith(u"play:"_q)) {
+    const auto item = _history->owner().message(_history->peer, MsgId(action.mid(5).toLongLong()));
+    if (const auto document = (item && item->media()) ? item->media()->document() : nullptr) {
+      Media::Player::instance()->playPause(AudioMsgId(document, item->fullId()));
+    }
+  } else if (action.startsWith(u"speed:"_q)) {
+    Core::App().settings().setVoicePlaybackSpeed(action.mid(6).toDouble());
+  } else if (action.startsWith(u"info:"_q)) {
+    if (const auto item = _history->owner().message(_history->peer, MsgId(action.mid(5).toLongLong()))) {
+      const auto document = item->media() ? item->media()->document() : nullptr;
+      g_message("Message %lld: date=%s group=%llu photo=%d document=%s voice=%d text=%d", (long long)item->id.bare,
+                U8(base::unixtime::parse(item->date()).toString(u"yyyy-MM-dd HH:mm:ss"_q)).c_str(),
+                (unsigned long long)item->groupId().raw(), int(item->media() && item->media()->photo()),
+                document ? U8(document->filename()).c_str() : "-", int(document && document->isVoiceMessage()),
+                int(item->originalText().text.size()));
+    } else {
+      g_message("Message %s: not loaded", U8(action.mid(5)).c_str());
+    }
+  } else if (action == u"player"_q) {
+    const auto state = Media::Player::instance()->getState(AudioMsgId::Type::Voice);
+    g_message("Player state: state=%d position=%lld length=%lld frequency=%d", int(state.state),
+              (long long)state.position, (long long)state.length, state.frequency);
+  }
+  else if (action.startsWith(u"photo:"_q)) {
+    const auto item = _history->owner().message(_history->peer, MsgId(action.mid(6).toLongLong()));
+    if (const auto photo = (item && item->media()) ? item->media()->photo() : nullptr) openPhoto(photo, item);
+  }
   else if (action.startsWith(u"find:"_q)) {
     // "history-state find:TEXT": the loaded message with this text at the top third of the screen.
-    for (const auto &[item, row] : _rows) {
+    for (const auto &[item, row] : _itemRows) {
       if (item->originalText().text.contains(action.mid(5))) {
-        scrollToRow(row.get(), false);
+        scrollToItem(item, false);
         g_message("Found message %d: %d characters, %d entities", int(item->id.bare),
                   int(item->originalText().text.size()), int(item->originalText().entities.size()));
         break;
@@ -1157,9 +1355,25 @@ void ChatView::debugHistory(const QString &action) {
     }
   }
   g_message("History state: rows=%zu min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
-      _rows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
+      _itemRows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
       int(loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
       gtk_adjustment_get_value(_adjustment), gtk_adjustment_get_upper(_adjustment), gtk_adjustment_get_page_size(_adjustment));
+  for (const auto &[raw, row] : _rows) {
+    if (row->items().size() > 1) {
+      auto ids = QStringList();
+      for (const auto &item : row->items()) {
+        auto *cell = row->widgetFor(item);
+        graphene_rect_t bounds;
+        if (cell != row->row() && gtk_widget_compute_bounds(cell, row->row(), &bounds)) {
+          ids.push_back(QString::number(item->id.bare) + u"@%1,%2 %3x%4"_q.arg(int(bounds.origin.x)).arg(int(bounds.origin.y))
+                            .arg(int(bounds.size.width)).arg(int(bounds.size.height)));
+        } else {
+          ids.push_back(QString::number(item->id.bare));
+        }
+      }
+      g_message("History album: %s", U8(ids.join(',')).c_str());
+    }
+  }
   const auto zero = std::count_if(_rows.begin(), _rows.end(), [](const auto &pair) {
     return gtk_widget_get_height(pair.second->row()) <= 0;
   });
@@ -1168,6 +1382,29 @@ void ChatView::debugHistory(const QString &action) {
       int(gtk_widget_get_mapped(_root)), int(_stickToBottom), gtk_widget_get_height(_list),
       _topic ? "topic" : _history->peer->isUser() ? "user" : _history->peer->isBroadcast() ? "channel" : "group",
       gtk_stack_get_visible_child_name(GTK_STACK(_composerStack)));
+}
+
+// "paste" (as Ctrl+V does), "files PATH|PATH" (as the file chooser), anything else goes to the
+// attach dialog (AttachDialog::debugAction).
+void ChatView::debugAttach(const QString &action) {
+  if (action == u"paste"_q) {
+    g_signal_emit_by_name(_input, "paste-clipboard");
+  } else if (action.startsWith(u"files "_q)) {
+    openAttach(action.mid(6).split('|'));
+  } else if (action == u"record-start"_q) {
+    // As the keyboard does on the microphone button: recording without holding it.
+    startRecording();
+    lockRecording();
+  } else if (action == u"record-send"_q || action == u"record-cancel"_q) {
+    finishRecording(action == u"record-send"_q);
+  } else if (action == u"clear-field"_q) {
+    setComposerText(QString());
+    cancelReplyOrEdit();
+  } else if (const auto attach = _attach.get()) {
+    attach->debugAction(action);
+  } else {
+    g_message("Attach state: no dialog");
+  }
 }
 
 void ChatView::markAsRead() {
@@ -1196,12 +1433,15 @@ void ChatView::markAsRead() {
   // Higher up, read till the lowest unread message seen whole, as HistoryInner does. Opening a chat
   // puts its first unread message on the screen, and the list may have nowhere further to scroll.
   HistoryItem *till = nullptr;
-  for (const auto &[item, row] : _rows) {
-    if (item->out() || !item->isRegular() || !item->unread(_thread) || (till && item->id < till->id)) continue;
-    double y = 0;
-    const auto height = gtk_widget_get_height(row->row());
-    if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height >= 0 && y + height <= page) {
-      till = row->item();
+  for (const auto &[raw, row] : _rows) {
+    for (const auto &item : row->items()) {
+      if (item->out() || !item->isRegular() || !item->unread(_thread) || (till && item->id < till->id)) continue;
+      double y = 0;
+      auto *widget = row->widgetFor(item);
+      const auto height = gtk_widget_get_height(widget);
+      if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height >= 0 && y + height <= page) {
+        till = item;
+      }
     }
   }
   if (!till) {
@@ -1332,6 +1572,14 @@ void ChatView::buildComposer() {
         return FALSE;
       });
   gtk_widget_add_controller(_input, keys);
+  // Ctrl+V, Shift+Insert and "Paste" in the field's menu: files and pictures go to the attach dialog,
+  // text stays with the field.
+  _signals.connect<void(GtkTextView *)>(_input, "paste-clipboard", [this](GtkTextView *view) {
+    if (ClassifyPaste(gdk_clipboard_get_formats(gtk_widget_get_clipboard(_input))) != PasteKind::Text) {
+      g_signal_stop_emission_by_name(view, "paste-clipboard");
+      paste();
+    }
+  });
 
   _composerStack = gtk_stack_new();
   gtk_stack_set_hhomogeneous(GTK_STACK(_composerStack), FALSE);
@@ -1412,6 +1660,14 @@ void ChatView::buildComposer() {
 void ChatView::refreshComposerState() {
   const auto peer = _history->peer;
   const auto channel = peer->asChannel();
+  if (_recording) {
+    // A voice message being recorded keeps its bar until it is sent or deleted.
+    if (Data::CanSendTexts(_thread)) {
+      gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "record");
+      return;
+    }
+    finishRecording(false);
+  }
   if (channel && !channel->amIn()) {
     gtk_button_set_label(GTK_BUTTON(_joinButton), U8(channel->isBroadcast() ? tr::lng_profile_join_channel(tr::now)
                                                                             : tr::lng_profile_join_group(tr::now))
@@ -1580,21 +1836,18 @@ void ChatView::chooseFiles() {
       dialog, GTK_WINDOW(_window->widget()), nullptr,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
         auto *weak = static_cast<base::weak_ptr<ChatView> *>(data);
-        auto *files = gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, nullptr);
-        if (files) {
-          QStringList paths;
+        if (auto *files = gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, nullptr)) {
+          GSList *list = nullptr;
           const auto count = g_list_model_get_n_items(files);
-          for (guint i = 0; i != count; ++i) {
-            auto *file = G_FILE(g_list_model_get_item(files, i));
-            if (auto *path = g_file_get_path(file)) {
-              paths.push_back(Q(path));
-              g_free(path);
-            }
-            g_object_unref(file);
+          for (guint i = count; i != 0; --i) {
+            list = g_slist_prepend(list, g_list_model_get_item(files, i - 1));
           }
+          const auto split = SplitPastedFiles(list);
+          g_slist_free_full(list, g_object_unref);
           g_object_unref(files);
-          if (const auto strong = weak->get(); strong && !paths.isEmpty()) {
-            strong->sendFiles(paths);
+          // The chat may have been closed while the dialog was open: then nothing is sent.
+          if (const auto strong = weak->get(); strong && !split.local.isEmpty()) {
+            RunCoreEvent([&] { strong->openAttach(split.local); });
           }
         }
         delete weak;
@@ -1603,27 +1856,119 @@ void ChatView::chooseFiles() {
   g_object_unref(dialog);
 }
 
-void ChatView::sendFiles(const QStringList &paths) {
-  if (paths.isEmpty() || !Data::CanSendTexts(_thread)) return;
-  const auto session = &_history->session();
-  auto list = Storage::PrepareMediaList(paths, 400, session->premium());
-  if (list.error != Ui::PreparedList::Error::None) {
-    ShowToast(list.errorData.isEmpty() ? tr::lng_send_image_empty(tr::now, lt_name, paths.front()) : list.errorData);
+void ChatView::paste() {
+  auto *clipboard = gtk_widget_get_clipboard(_input);
+  const auto kind = ClassifyPaste(gdk_clipboard_get_formats(clipboard));
+  // A new paste replaces one still being read; the reader dies with this chat, and its answer with it.
+  _pasteReader = std::make_unique<ClipboardReader>(clipboard, kind, [this](ClipboardReader::Result &&result) {
+    _pasteReader = nullptr;
+    if (!result.files.remote.isEmpty()) {
+      // Links to remote files are text.
+      pasteText(result.files.remote.join('\n'));
+    }
+    if (!result.files.local.isEmpty()) {
+      openAttach(result.files.local);
+    } else if (!result.image.isNull()) {
+      openAttach({}, std::move(result.image), result.text);
+    } else if (result.files.remote.isEmpty() && !result.text.isEmpty()) {
+      pasteText(result.text);
+    }
+  });
+}
+
+void ChatView::pasteText(const QString &text) {
+  if (text.isEmpty() || !gtk_text_view_get_editable(GTK_TEXT_VIEW(_input))) return;
+  auto *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(_input));
+  const auto utf8 = text.toUtf8();
+  gtk_text_buffer_delete_selection(buffer, TRUE, TRUE);
+  gtk_text_buffer_insert_interactive_at_cursor(buffer, utf8.constData(), utf8.size(), TRUE);
+  gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(_input), gtk_text_buffer_get_insert(buffer));
+}
+
+void ChatView::openAttach(const QStringList &paths, QImage image, const QString &textOnCancel) {
+  if (_editing || _recording) return;
+  if (!Data::CanSendAnyOf(_thread, Data::FilesSendRestrictions())) {
+    const auto error = Data::AnyFileRestrictionError(_history->peer);
+    ShowToast(error ? error.text : tr::lng_forward_send_files_cant(tr::now));
+    pasteText(textOnCancel);
     return;
   }
-  // Pictures go as photos, everything else as files, each one separately.
+  if (const auto open = _attach.get()) open->close();
+  // Where the files go is fixed now: the chat, the topic and the reply.
   auto action = Api::SendAction(_thread);
   if (_replyTo) {
     action.replyTo.messageId = _replyTo;
   }
-  for (auto &file : list.files) {
-    auto single = Ui::PreparedList();
-    const auto isPhoto = (file.type == Ui::PreparedFile::Type::Photo);
-    single.files.push_back(std::move(file));
-    session->api().sendFiles(std::move(single), isPhoto ? SendMediaType::Photo : SendMediaType::File, nullptr, action);
+  const auto weak = base::make_weak(this);
+  _attach = AttachDialog::Show({
+      .parent = _window->widget(),
+      .paths = paths,
+      .image = std::move(image),
+      .caption = composerText().trimmed(),
+      .premium = _history->session().premium(),
+      .send = [=](Ui::PreparedList &list, const Ui::SendFilesWay &way, const QString &caption) {
+        const auto strong = weak.get();
+        return strong && strong->sendAttachments(list, way, caption, action);
+      },
+      .cancelled = [=] {
+        // As in Telegram Desktop: the text pasted with a picture goes to the field instead.
+        if (const auto strong = weak.get(); strong && Ui::InsertTextOnImageCancel(textOnCancel)) {
+          strong->pasteText(textOnCancel);
+        }
+      },
+  });
+}
+
+// SendFilesBox::send() and HistoryWidget::sendingFilesConfirmed(): the files go in albums of up to ten
+// (Ui::DivideByGroups), the caption with the last album, each album through ApiWrap::sendFiles.
+bool ChatView::sendAttachments(Ui::PreparedList &list, const Ui::SendFilesWay &way, const QString &caption,
+                               const Api::SendAction &action) {
+  const auto peer = _history->peer;
+  const auto session = &_history->session();
+  const auto compress = way.sendImagesAsPhotos();
+  if (const auto error = Data::FileRestrictionError(peer, list, compress)) {
+    ShowToast(error.text);
+    return false;
+  } else if (const auto left = peer->slowmodeSecondsLeft()) {
+    ShowToast(tr::lng_slowmode_enabled(tr::now, lt_left, Ui::FormatDurationWordsSlowmode(left)));
+    return false;
   }
-  cancelReplyOrEdit();
+  const auto limit = Data::PremiumLimits(session).captionLengthCurrent();
+  if (const auto over = int(caption.size()) - limit; over > 0) {
+    ShowToast(tr::lng_caption_limit_reached(tr::now, lt_count, over));
+    return false;
+  }
+  const auto slowmode = peer->slowmodeApplied();
+  auto groups = SeparateOggFromMusic(Ui::DivideByGroups(std::move(list), way, slowmode));
+  if (slowmode && groups.size() > 1) {
+    // Back as it was, for the dialog.
+    for (auto &group : groups) {
+      for (auto &file : group.list.files) list.files.push_back(std::move(file));
+    }
+    ShowToast(tr::lng_slowmode_no_many(tr::now));
+    return false;
+  }
+  if (!caption.isEmpty() && !groups.empty()) {
+    auto &group = groups.back();
+    auto &files = group.list.files;
+    auto &captioned = (group.type == Ui::AlbumType::PhotoVideo) ? files.front() : files.back();
+    if (!captioned.isSticker() || compress) {
+      captioned.caption = TextWithTags{caption, {}};
+    }
+  }
+  // The caption is the message field's text: the server clears the chat's draft with it (clearDraft).
+  SendFileGroups(session, std::move(groups), compress ? SendMediaType::Photo : SendMediaType::File, action);
+  // The caption came from the message field.
+  if (!_editing) {
+    setComposerText(QString());
+    cancelReplyOrEdit();
+    _history->clearLocalDraft(_thread->topicRootId(), _thread->monoforumPeerId());
+    _history->clearCloudDraft(_thread->topicRootId(), _thread->monoforumPeerId());
+    _loadedDraft.clear();
+    _loadedReplyTo = FullMsgId();
+  }
   scrollToBottom();
+  return true;
 }
 
 // The gesture is on the whole composer, which stays on the screen when the microphone button is
@@ -1666,35 +2011,37 @@ void ChatView::setupRecordGesture() {
 }
 
 void ChatView::startRecording() {
-  if (_editing || !Data::CanSendTexts(_thread)) return;
-  const auto capture = ::Media::Capture::instance();
-  if (_recording || !capture->available()) {
-    if (!capture->available()) {
+  if (_editing || _recording || !Data::CanSendTexts(_thread)) return;
+  if (!Recorder().start(_thread, _replyTo)) {
+    if (!::Media::Capture::instance()->available()) {
       ShowToast(tr::lng_record_audio_problem(tr::now));
     }
     return;
   }
   _recording = true;
   _recordLocked = false;
-  _recordStarted = crl::now();
-  Media::Player::instance()->pause(AudioMsgId::Type::Voice);
-  gtk_label_set_text(GTK_LABEL(_recordTime), U8(Ui::FormatDurationText(0) + QLocale().decimalPoint() + '0').c_str());
+  _recordStarted = Recorder().started();
+  TriggerFeedback("button-pressed");
+  attachRecording();
+}
+
+// The recording bar follows the recorder, which may have been started before this chat was built
+// (the window was closed while recording).
+void ChatView::attachRecording() {
+  _recordLifetime.destroy();
   gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "record");
   showRecordState();
-  TriggerFeedback("button-pressed");
-  // start() ends the previous stream of updates: subscribe after it.
-  capture->start();
-  capture->updated() | rpl::on_next_error([=](const ::Media::Capture::Update &update) {
-    const auto ms = update.samples * crl::time(1000) / ::Media::Player::kDefaultFrequency;
+  Recorder().state() | rpl::on_next([=](const VoiceRecorder::State &state) {
+    const auto ms = state.duration;
     gtk_label_set_text(GTK_LABEL(_recordTime),
                        U8(Ui::FormatDurationText(ms / 1000) + QLocale().decimalPoint() + QString::number(ms % 1000 / 100)).c_str());
     // The dot breathes with the voice.
-    gtk_widget_set_opacity(_recordDot, 0.35 + 0.65 * std::min(1., update.level / 6000.));
-  }, [=](::Media::Capture::Error) {
+    gtk_widget_set_opacity(_recordDot, 0.35 + 0.65 * std::min(1., state.level / 6000.));
+  }, _recordLifetime);
+  Recorder().failed() | rpl::on_next([=] {
     finishRecording(false);
     ShowToast(tr::lng_record_audio_problem(tr::now));
   }, _recordLifetime);
-  _history->session().sendProgressManager().update(_history, _thread->topicRootId(), Api::SendProgressType::RecordVoice);
 }
 
 void ChatView::lockRecording() {
@@ -1747,24 +2094,11 @@ void ChatView::finishRecording(bool send) {
   showRecordState();
   refreshComposerState();
   scheduleViewportUpdate();
-  const auto history = _history;
-  auto action = Api::SendAction(_thread);
-  if (_replyTo) {
-    action.replyTo.messageId = _replyTo;
-  }
-  if (!send) {
-    ::Media::Capture::instance()->stop();
-    history->session().sendProgressManager().cancel(history, _thread->topicRootId(), Api::SendProgressType::RecordVoice);
-    return;
-  }
-  cancelReplyOrEdit();
-  ::Media::Capture::instance()->stop(crl::guard(this, [=](::Media::Capture::Result &&result) {
-    if (result.bytes.isEmpty() || result.duration < 1000) {
-      return;
-    }
-    history->session().api().sendVoiceMessage(result.bytes, result.waveform, result.duration, false, action);
+  if (send) {
+    cancelReplyOrEdit();
     scrollToBottom();
-  }));
+  }
+  Recorder().finish(send);
 }
 
 // --- message actions ---------------------------------------------------------
