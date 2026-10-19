@@ -60,7 +60,7 @@
     <content_attribute id="social-info">mild</content_attribute>
   </content_rating>
   <releases>
-    <release version="0.1.1" date="2026-10-18" type="stable">
+    <release version="0.1.1" date="2026-10-19" type="stable">
       <description>
         <p>Groups with topics: a group opens its list of topics, and messages can be read and written in each
           topic. Notifications and links to a message in a topic open that topic.</p>
