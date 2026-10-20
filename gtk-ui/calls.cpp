@@ -286,6 +286,10 @@ void CallView::present() {
   if (_call) gtk_window_present(GTK_WINDOW(_window));
 }
 
+void CallView::setParentWindow(GtkWindow *parent) {
+  gtk_window_set_transient_for(GTK_WINDOW(_window), parent);
+}
+
 void CallView::stopVideo() {
   _videoLifetime.destroy();
   _remoteHasFrame = false;

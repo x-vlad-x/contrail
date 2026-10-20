@@ -10,12 +10,16 @@
 #include "scroll_helpers.hpp"
 #include "settings.hpp"
 #include "tray.hpp"
+#include "userpics.hpp"
+#include "voice_recorder.hpp"
 
+#include "api/api_updates.h"
 #include "core/application.h"
 #include "core/core_settings.h"
 #include "data/data_folder.h"
 #include "data/data_forum.h"
 #include "data/data_forum_topic.h"
+#include "data/data_histories.h"
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
@@ -30,9 +34,46 @@
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
-namespace Contrail {
+#include <QtWidgets/QApplication>
 
-MainWindow::MainWindow() {
+#include <malloc.h>
+
+namespace Contrail {
+namespace {
+
+// Freed memory goes back to the system a moment after the window is closed, when GTK has finalized
+// what it releases from idle callbacks.
+constexpr auto kTrimDelay = crl::time(3000);
+
+}  // namespace
+
+// Whether the user is in front of a window of the app (the main one, a call's): the core shows the
+// account as online then, and only then (Core::Application::hasActiveWindow, see patches/).
+bool WindowActive() {
+  auto result = false;
+  auto *list = gtk_window_list_toplevels();
+  for (auto *i = list; i && !result; i = i->next) {
+    auto *window = GTK_WINDOW(i->data);
+    result = gtk_widget_get_visible(GTK_WIDGET(window)) && gtk_window_is_active(window);
+  }
+  g_list_free(list);
+  return result;
+}
+
+MainWindow::MainWindow() : _trimTimer([] { malloc_trim(0); }) {
+  buildWindow();
+  Core::App().domain().activeValue() | rpl::on_next([=](Main::Account *account) {
+    showAccount(account);
+  }, _lifetime);
+  followCoreWindow();
+  _calls = std::make_unique<CallView>(this);
+  updateBackgroundMode();
+  Core::App().unreadBadgeChanges() | rpl::on_next([=] {
+    if (_tray) _tray->setUnread(Core::App().unreadBadgeMuted() ? 0 : Core::App().unreadBadge());
+  }, _lifetime);
+}
+
+void MainWindow::buildWindow() {
   _window = adw_window_new();
   gtk_window_set_title(GTK_WINDOW(_window), "Contrail");
   gtk_window_set_default_size(GTK_WINDOW(_window), 900, 700);
@@ -43,6 +84,14 @@ MainWindow::MainWindow() {
   gtk_event_controller_set_propagation_phase(taps, GTK_PHASE_CAPTURE);
   g_signal_connect(taps, "event", G_CALLBACK(+[](GtkEventControllerLegacy *, GdkEvent *event, gpointer) -> gboolean {
     TrackTap(event);
+    // The core counts the user as there (online, not idle) from their input, as from Qt's.
+    switch (gdk_event_get_event_type(event)) {
+      case GDK_BUTTON_PRESS:
+      case GDK_TOUCH_BEGIN:
+      case GDK_KEY_PRESS:
+      case GDK_SCROLL: Core::App().updateNonIdle(); break;
+      default: break;
+    }
     return FALSE;
   }), nullptr);
   gtk_widget_add_controller(_window, taps);
@@ -57,6 +106,8 @@ MainWindow::MainWindow() {
   Connect<void(AdwBanner *)>(_callBanner, "button-clicked", [=](AdwBanner *) {
     if (_calls) _calls->present();
   });
+  adw_banner_set_title(ADW_BANNER(_callBanner), U8(_callStatus).c_str());
+  adw_banner_set_revealed(ADW_BANNER(_callBanner), _callActive);
   gtk_box_append(GTK_BOX(body), _callBanner);
   gtk_widget_set_vexpand(GTK_WIDGET(_stack), TRUE);
   gtk_box_append(GTK_BOX(body), GTK_WIDGET(_stack));
@@ -108,7 +159,7 @@ MainWindow::MainWindow() {
   Connect<void(GObject *, GParamSpec *)>(_split, "notify::show-content", [this](GObject *, GParamSpec *) {
     if (adw_navigation_split_view_get_collapsed(_split) && !adw_navigation_split_view_get_show_content(_split)) {
       crl::on_main(this, [=] {
-        if (adw_navigation_split_view_get_collapsed(_split)
+        if (_split && adw_navigation_split_view_get_collapsed(_split)
             && !adw_navigation_split_view_get_show_content(_split)) {
           closeChat();
         }
@@ -117,14 +168,20 @@ MainWindow::MainWindow() {
   });
 
   // Closing the window quits, the core saves everything and exits the process; or, when the app runs
-  // in the background, only hides the window: messages, notifications and calls keep coming.
+  // in the background, releases the interface: messages, notifications and calls keep coming.
   Connect<gboolean(GtkWindow *)>(_window, "close-request", [this](GtkWindow *) -> gboolean {
     if (Core::App().settings().closeBehavior() == Core::Settings::CloseBehavior::RunInBackground) {
-      gtk_widget_set_visible(_window, FALSE);
+      // Not while GTK is handling the window's own signal.
+      crl::on_main(this, [=] { closeToBackground(); });
     } else {
       Core::Quit();
     }
     return TRUE;
+  });
+  // The core counts the account as online while the window is in front.
+  Connect<void(GObject *, GParamSpec *)>(_window, "notify::is-active", [this](GObject *, GParamSpec *) {
+    Core::App().updateNonIdle();
+    if (_session) _session->updates().updateOnline();
   });
 
   // The Wayland app ID matches the desktop entry, so the shell shows the right name and icon.
@@ -136,16 +193,93 @@ MainWindow::MainWindow() {
   });
 
   setupShortcuts();
+}
 
-  Core::App().domain().activeValue() | rpl::on_next([=](Main::Account *account) {
-    showAccount(account);
-  }, _lifetime);
-  followCoreWindow();
-  _calls = std::make_unique<CallView>(this);
-  updateBackgroundMode();
-  Core::App().unreadBadgeChanges() | rpl::on_next([=] {
-    if (_tray) _tray->setUnread(Core::App().unreadBadgeMuted() ? 0 : Core::App().unreadBadge());
-  }, _lifetime);
+// Everything of the interface goes: the views (each chat keeps its draft and reply in the core, as on
+// switching chats), the dialogs, the window with its textures and its renderer, the userpics' cache.
+// The core's own views of the loaded messages go too; a chat opened again loads its pages again.
+void MainWindow::releaseWindow() {
+  if (!_window) return;
+  // Close the dialogs (the photo viewer, a profile, files to send) so their own lifetimes end too.
+  while (auto *dialog = adw_window_get_visible_dialog(ADW_WINDOW(_window))) {
+    adw_dialog_force_close(dialog);
+  }
+  _login = nullptr;
+  _chat = nullptr;
+  _settings = nullptr;
+  _archive = nullptr;
+  _forum = nullptr;
+  _chatList = nullptr;
+  auto *window = std::exchange(_window, nullptr);
+  _toasts = nullptr;
+  _stack = nullptr;
+  _split = nullptr;
+  _sidebarNav = nullptr;
+  _contentPage = nullptr;
+  _callBanner = nullptr;
+  gtk_window_destroy(GTK_WINDOW(window));
+  g_object_unref(std::exchange(_placeholder, nullptr));
+  ReleaseAvatars();
+  if (_session) {
+    _session->data().histories().unloadAll();
+    _session->updates().updateOnline();
+  }
+  _trimTimer.callOnce(kTrimDelay);
+}
+
+void MainWindow::closeToBackground() {
+  if (!_window) return;
+  // Signing in keeps its window: what was typed there would be lost.
+  if (!_session) {
+    gtk_widget_set_visible(_window, FALSE);
+    return;
+  }
+  auto state = UiState();
+  if (_chat) {
+    const auto thread = _chat->thread();
+    state.peer = thread->peer()->id;
+    state.topicRootId = thread->topicRootId();
+    const auto [anchor, y] = _chat->scrollState();
+    state.anchor = anchor;
+    state.anchorY = y;
+  }
+  _saved = state;
+  releaseWindow();
+}
+
+void MainWindow::present() {
+  if (!_window) {
+    buildWindow();
+    if (_calls) _calls->setParentWindow(GTK_WINDOW(_window));
+    showAccount(_account);
+    if (_saved && _session) {
+      restore(*base::take(_saved));
+    }
+    _saved = std::nullopt;
+  }
+  gtk_window_present(GTK_WINDOW(_window));
+  HideCoreWindow();
+}
+
+void MainWindow::restore(UiState state) {
+  if (!state.peer) return;
+  const auto peer = _session->data().peerLoaded(state.peer);
+  if (!peer) return;
+  const auto history = _session->data().history(peer);
+  Data::Thread *thread = history;
+  if (state.topicRootId) {
+    const auto topic = peer->forumTopicFor(state.topicRootId);
+    if (!topic) {
+      openForum(history);
+      return;
+    }
+    thread = topic;
+  }
+  if (state.showAt > 0) {
+    openThread(thread, state.showAt);
+  } else {
+    openThreadAt(thread, 0, state.anchor, state.anchorY);
+  }
 }
 
 void MainWindow::updateBackgroundMode() {
@@ -153,14 +287,14 @@ void MainWindow::updateBackgroundMode() {
   if (!background) {
     _tray = nullptr;
     // Nothing would bring a hidden window back.
-    if (!gtk_widget_get_visible(_window)) present();
+    if (!_window || !gtk_widget_get_visible(_window)) present();
     return;
   }
   if (_tray) return;
   // Not within the D-Bus call that asks for it: quitting destroys the icon.
   _tray = std::make_unique<TrayIcon>(TrayIcon::Callbacks{
       .toggle = [=] { crl::on_main(this, [=] {
-        if (isActive()) gtk_widget_set_visible(_window, FALSE);
+        if (isActive()) closeToBackground();
         else present();
       }); },
       .open = [=] { crl::on_main(this, [=] { present(); }); },
@@ -170,7 +304,7 @@ void MainWindow::updateBackgroundMode() {
 }
 
 // Telegram Desktop opens chats in its own (hidden) window: from a notification, a t.me link, a mention.
-// Open the same chat here and bring this window to the front.
+// Open the same chat here and bring this window to the front. It wins over the chat the window had.
 void MainWindow::followCoreWindow() {
   const auto window = Core::App().activePrimaryWindow();
   if (!window) {
@@ -184,12 +318,22 @@ void MainWindow::followCoreWindow() {
     if (!history || !_session || &history->session() != _session) {
       return;
     }
-    if (const auto topic = row.key.topic()) {
-      openThread(topic, row.fullId.msg);
+    if (!_window) {
+      // Built again around this chat instead of the one it had.
+      _saved = UiState{
+          .peer = history->peer->id,
+          .topicRootId = row.key.topic() ? row.key.topic()->rootId() : MsgId(),
+          .showAt = row.fullId.msg,
+      };
+      present();
     } else {
-      openHistory(history, row.fullId.msg);
+      if (const auto topic = row.key.topic()) {
+        openThread(topic, row.fullId.msg);
+      } else {
+        openHistory(history, row.fullId.msg);
+      }
+      present();
     }
-    present();
     // Close it there, so it isn't read in the background and opens again next time.
     crl::on_main(this, [peer = history->peer] {
       Core::App().closeChatFromWindows(peer);
@@ -203,34 +347,45 @@ MainWindow::~MainWindow() {
   _sessionLifetime.destroy();
   _tray = nullptr;
   _calls = nullptr;
-  clearSessionUi();
-  g_object_unref(_placeholder);
+  if (_window) {
+    clearSessionUi();
+    gtk_window_destroy(GTK_WINDOW(std::exchange(_window, nullptr)));
+    g_object_unref(std::exchange(_placeholder, nullptr));
+  }
 }
 
 bool MainWindow::isActive() const {
-  return gtk_window_is_active(GTK_WINDOW(_window)) && gtk_widget_get_visible(_window);
-}
-
-void MainWindow::present() {
-  gtk_window_present(GTK_WINDOW(_window));
+  return _window && gtk_window_is_active(GTK_WINDOW(_window)) && gtk_widget_get_visible(_window);
 }
 
 void MainWindow::showToast(const QString &text) {
+  if (!_toasts) return;
   auto *toast = adw_toast_new(Escape(text).c_str());
   adw_toast_set_timeout(toast, 3);
   adw_toast_overlay_add_toast(_toasts, toast);
 }
 
+// The account and its session are followed with the window closed too: the interface is built for
+// them when it opens.
 void MainWindow::showAccount(Main::Account *account) {
+  _account = account;
   _sessionLifetime.destroy();
-  clearSessionUi();
+  if (_window) clearSessionUi();
   if (!account) {
-    gtk_stack_set_visible_child_name(_stack, "loading");
+    _session = nullptr;
+    if (_window) gtk_stack_set_visible_child_name(_stack, "loading");
     return;
   }
   account->sessionValue() | rpl::on_next([=](Main::Session *session) {
-    clearSessionUi();
-    if (session) {
+    if (_window) clearSessionUi();
+    _session = session;
+    if (!session) {
+      // Signed out: a recording of that account has nowhere to go.
+      Recorder().finish(false);
+    }
+    if (!_window) {
+      return;
+    } else if (session) {
       showSession(session);
     } else {
       showLogin(account);
@@ -239,6 +394,7 @@ void MainWindow::showAccount(Main::Account *account) {
 }
 
 void MainWindow::clearSessionUi() {
+  if (!_window) return;
   // Detach the widgets first: a view is destroyed only after its widgets are out of the window.
   adw_navigation_page_set_child(_contentPage, _placeholder);
   _chat = nullptr;
@@ -257,7 +413,6 @@ void MainWindow::clearSessionUi() {
     gtk_stack_remove(_stack, _login->widget());
     _login = nullptr;
   }
-  _session = nullptr;
 }
 
 void MainWindow::showLogin(not_null<Main::Account *> account) {
@@ -289,7 +444,7 @@ void MainWindow::showLogin(not_null<Main::Account *> account) {
     Lang::CurrentCloudManager().firstLanguageSuggestion() | rpl::take(1) | rpl::on_next(apply, _sessionLifetime);
   }
   Lang::Updated() | rpl::on_next([=] {
-    if (_login && !_session) {
+    if (_window && _login && !_session) {
       gtk_stack_remove(_stack, _login->widget());
       _login = std::make_unique<LoginView>(account);
       gtk_stack_add_named(_stack, _login->widget(), "login");
@@ -299,14 +454,13 @@ void MainWindow::showLogin(not_null<Main::Account *> account) {
 }
 
 void MainWindow::showSession(not_null<Main::Session *> session) {
-  _session = session;
   _chatList = std::make_unique<ChatList>(session, nullptr, this);
   adw_navigation_view_add(_sidebarNav, _chatList->page());
   gtk_stack_set_visible_child_name(_stack, "chats");
 }
 
 void MainWindow::openHistory(not_null<History *> history, MsgId showAt) {
-  if (!_session) {
+  if (!_session || !_window) {
     return;
   }
   if (const auto forum = history->peer->forum()) {
@@ -323,7 +477,18 @@ void MainWindow::openHistory(not_null<History *> history, MsgId showAt) {
 }
 
 void MainWindow::openThread(not_null<Data::Thread *> thread, MsgId showAt) {
-  if (!_session) {
+  openThreadAt(thread, showAt, 0, 0.);
+}
+
+// A voice message being recorded belongs to its chat: going to another one deletes it.
+void MainWindow::endRecordingOutside(Data::Thread *thread) {
+  if (Recorder().active() && Recorder().thread() != thread) {
+    Recorder().finish(false);
+  }
+}
+
+void MainWindow::openThreadAt(not_null<Data::Thread *> thread, MsgId showAt, MsgId anchor, double anchorY) {
+  if (!_session || !_window) {
     return;
   }
   if (_chat && _chat->thread() == thread) {
@@ -331,8 +496,10 @@ void MainWindow::openThread(not_null<Data::Thread *> thread, MsgId showAt) {
       _chat->showAt(showAt);
     }
   } else {
+    endRecordingOutside(thread);
     auto old = std::move(_chat);
-    _chat = std::make_unique<ChatView>(thread, this, showAt);
+    _chat = std::make_unique<ChatView>(thread, this, showAt ? showAt : anchor,
+                                       (showAt || !anchor) ? std::nullopt : std::optional<double>(anchorY));
     adw_navigation_page_set_child(_contentPage, _chat->widget());
     const auto topic = thread->asTopic();
     adw_navigation_page_set_title(_contentPage, U8(topic ? topic->title() : thread->peer()->name()).c_str());
@@ -360,7 +527,7 @@ void MainWindow::openPeer(not_null<PeerData *> peer) {
 
 void MainWindow::openForum(not_null<History *> history) {
   const auto forum = history->peer->forum();
-  if (!_session || !forum) {
+  if (!_session || !_window || !forum) {
     return;
   }
   adw_navigation_split_view_set_show_content(_split, FALSE);
@@ -418,6 +585,7 @@ void MainWindow::closeChat() {
   if (!_chat) {
     return;
   }
+  endRecordingOutside(nullptr);
   adw_navigation_page_set_child(_contentPage, _placeholder);
   adw_navigation_page_set_title(_contentPage, "Contrail");
   _chat = nullptr;
@@ -433,7 +601,7 @@ void MainWindow::closeChat() {
 }
 
 void MainWindow::openSettings() {
-  if (!_session) {
+  if (!_session || !_window) {
     return;
   }
   adw_navigation_split_view_set_show_content(_split, FALSE);
@@ -460,7 +628,7 @@ void MainWindow::openSettings() {
 }
 
 void MainWindow::openArchive() {
-  if (!_session) {
+  if (!_session || !_window) {
     return;
   }
   adw_navigation_split_view_set_show_content(_split, FALSE);
@@ -485,29 +653,30 @@ void MainWindow::openArchive() {
 }
 
 void MainWindow::openContacts() {
-  if (_session) {
+  if (_session && _window) {
     adw_navigation_split_view_set_show_content(_split, FALSE);
     adw_navigation_view_push(_sidebarNav, MakeContactsPage(_session, this));
   }
 }
 
 void MainWindow::openProfile(not_null<PeerData *> peer) {
-  ShowProfile(this, peer);
+  if (_window) ShowProfile(this, peer);
 }
 
 void MainWindow::openPhoto(not_null<PhotoData *> photo, FullMsgId origin) {
-  ShowPhoto(this, photo, origin);
+  if (_window) ShowPhoto(this, photo, origin);
 }
 
 void MainWindow::showAbout() {
-  ShowAbout(this);
+  if (_window) ShowAbout(this);
 }
 
 void MainWindow::confirmDeleteChat(not_null<PeerData *> peer) {
-  ConfirmDeleteChat(this, peer);
+  if (_window) ConfirmDeleteChat(this, peer);
 }
 
 void MainWindow::searchChats(const QString &query) {
+  if (!_window) return;
   adw_navigation_split_view_set_show_content(_split, FALSE);
   if (adw_navigation_view_find_page(_sidebarNav, "chats")) {
     adw_navigation_view_pop_to_tag(_sidebarNav, "chats");
@@ -529,7 +698,11 @@ void MainWindow::startCall(not_null<PeerData *> peer, bool video) {
   }
 }
 
+// Kept for the banner of a window built later.
 void MainWindow::setCallStatus(const QString &text, bool active) {
+  _callStatus = text;
+  _callActive = active;
+  if (!_callBanner) return;
   adw_banner_set_title(ADW_BANNER(_callBanner), U8(text).c_str());
   adw_banner_set_revealed(ADW_BANNER(_callBanner), active);
 }
@@ -554,6 +727,22 @@ void MainWindow::debugHistory(const QString &action) {
   if (_chat) _chat->debugHistory(action);
 }
 
+void MainWindow::debugAttach(const QString &action) {
+  if (_chat) _chat->debugAttach(action);
+}
+
+void MainWindow::debugState() {
+  auto qtVisible = 0;
+  for (auto *window : QApplication::topLevelWidgets()) {
+    if (window->isVisible()) ++qtVisible;
+  }
+  g_message("Window state: built=%d visible=%d active=%d chat=%s saved=%s recording=%d qt-visible=%d online=%d",
+            int(_window != nullptr), int(_window && gtk_widget_get_visible(_window)), int(isActive()),
+            _chat ? "open" : "none", _saved ? U8(QString::number(_saved->peer.value) + '/'
+                                                  + QString::number(_saved->anchor.bare)).c_str() : "none",
+            int(Recorder().active()), qtVisible, int(_session && Core::App().hasActiveWindow(_session)));
+}
+
 void MainWindow::debugOpenChat(int index) {
   if (_chatList) {
     _chatList->openRow(index);
@@ -567,6 +756,7 @@ void MainWindow::debugOpenTopic(int index) {
 }
 
 void MainWindow::debugBack() {
+  if (!_window) return;
   if (adw_navigation_split_view_get_show_content(_split) && adw_navigation_split_view_get_collapsed(_split)) {
     adw_navigation_split_view_set_show_content(_split, FALSE);
   } else {

@@ -43,11 +43,18 @@ or dark style and accent color.
   delete or leave from a long press.
 - **Chats**: history loaded page by page while you scroll (in both directions, without jumps), date
   separators and an "Unread messages" bar, grouped senders with avatars, replies (tap to jump),
-  forwards, formatted text with links, mentions and hidden spoilers, photos with a full-screen viewer,
-  stickers, files, videos and GIFs (opened in the system player), voice messages and music (played by
+  forwards, formatted text with links, mentions and hidden spoilers, photos, albums (photos and videos sent
+  together, in Telegram's grid, each with its own taps, menu and progress; files sent together one under the
+  other), stickers, files, videos and GIFs (opened in the system player), voice messages and music (played by
   the core), link previews, polls, shared contacts. Scrolling over text and links never turns into a tap.
+- **Photo viewer**: pinch to zoom (up to 6×) around the point between the fingers, drag a zoomed photo,
+  double tap to zoom in around the tap and back; Ctrl+wheel with a mouse.
 - **Writing**: text, replies (long press or swipe left), editing (also Up in an empty field), deleting
-  (for everyone too), files and pictures, drafts kept per chat.
+  (for everyone too), drafts kept per chat.
+- **Sending files and pictures**: from the file chooser or pasted (Ctrl+V, Shift+Insert, Paste in the field's
+  menu: a screenshot, an image copied in a browser, files copied in a file manager, also through Flatpak's
+  portal), shown first with previews, a caption and "Send as documents" / "Group items"; pictures go as photos
+  and photos and videos as albums of up to ten, larger sets in order. Pasted text stays text.
 - **Voice messages** as in the phone apps: hold the microphone to record and release to send, slide
   left to cancel or up to keep recording hands-free.
 - **Calls**: one-to-one audio and video calls — accept or decline, mute, front/back camera,
@@ -63,7 +70,9 @@ or dark style and accent color.
   tapping one opens the chat.
 - **Running in the background** (Settings): closing the window keeps messages, notifications and calls
   coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
-  launcher does.
+  launcher does. The interface is released meanwhile (its memory, textures and timers): opening the window
+  again comes back to the same chat, draft and place in it, or to the chat a notification or a link points to.
+  A voice message being recorded goes on.
 - `tg://` and `t.me` links, chat info, contacts, Saved Messages, settings.
 - **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
   start the language follows the system.
@@ -118,7 +127,9 @@ tools/smoke-test.sh all-amd64      # install and start each package in clean con
 This needs git, patch, python3 and podman (or docker); everything else happens in containers. Both architectures
 are built against Debian 13 (ARM64 cross-compiled), once each, and packaged four ways by `tools/package.py`: the
 DEB, RPM and AppImage carry every library the program needs except the system's base ones
-(`tools/bundle.py`, `packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. The
+(`tools/bundle.py`, `packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. FFmpeg
+is built by `build-env/build-deps.sh` from Debian's source package with only what Telegram Desktop uses, which
+leaves out some 90 MB of codec libraries Debian's build would bring. The
 Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes. Nothing
 is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages, corresponding
 sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LICENSES.md), and
@@ -162,8 +173,8 @@ uses, so nothing has to be installed on the build machine.
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout), `login`, `chat_list`, `chat_view` (history, scrolling, message field, voice recording), `message` (one message), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `style.css`, `icons/` |
-| `patches/` | The patches for Telegram Desktop |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
+| `patches/` | The patches for Telegram Desktop; `patches/tg_owt/` for WebRTC (built by `build-deps.sh`) |
 | `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
 | `tools/` | Package and release scripts, testing helpers |
@@ -191,9 +202,10 @@ its own log to `~/.local/share/contrail-data/log.txt`.
 ### Tests
 
 Regressions for the parts that don't need a Telegram account — GTK handler lifetimes, layout on a phone
-width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation and audio
-routing — run on any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under
-AddressSanitizer and UBSan:
+width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation, audio
+routing, the photo viewer's zoom geometry, album cells on narrow screens and what a paste brings — run on
+any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under AddressSanitizer and
+UBSan:
 
 ```bash
 tools/test-gtk.sh
@@ -205,6 +217,13 @@ own tests, which need only Python:
 ```bash
 python3 -m unittest discover tests
 ```
+
+### Measuring
+
+`tools/measure.sh` compares releases on the phone: memory (RSS, PSS, private, swap), CPU time, wakeups and
+network after starting, after loading a chat's media and 1, 5 and 15 minutes after closing the window
+(`background`), the charge used over a long run off the charger (`energy`), and which threads wake up
+(`ssh $PHONE python3 .cache/contrail-tools/phone-measure.py threads 120`). Only Saved Messages is opened.
 
 ### Screenshots
 

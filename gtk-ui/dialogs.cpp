@@ -5,6 +5,7 @@
 #include "main_window.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
+#include "zoom_view.hpp"
 
 #include "apiwrap.h"
 #include "base/unixtime.h"
@@ -181,38 +182,18 @@ void ShowPhoto(not_null<MainWindow *> window, not_null<PhotoData *> photo, FullM
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), save);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
 
-  auto *picture = gtk_picture_new();
-  gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_CONTAIN);
-  gtk_widget_set_hexpand(picture, TRUE);
-  gtk_widget_set_vexpand(picture, TRUE);
-  // Pinch or double tap to zoom: the picture grows inside a scrolled window.
-  auto *scroll = gtk_scrolled_window_new();
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), picture);
-  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
+  // Pinch, drag and double tap: the photo is scaled and moved inside the view (zoom_view.hpp).
+  auto *zoom = ZoomViewNew();
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), zoom);
   adw_dialog_set_child(ADW_DIALOG(dialog), view);
-  struct Zoom {
-    double scale = 1.;
-    double start = 1.;
-  };
-  auto *zoom = AttachData(picture, "contrail-zoom", std::make_unique<Zoom>());
-  const auto applyZoom = [=](double scale) {
-    zoom->scale = std::clamp(scale, 1., 6.);
-    const auto w = gtk_widget_get_width(scroll), h = gtk_widget_get_height(scroll);
-    if (zoom->scale <= 1.01) {
-      gtk_widget_set_size_request(picture, -1, -1);
-    } else {
-      gtk_widget_set_size_request(picture, int(w * zoom->scale), int(h * zoom->scale));
-    }
-  };
-  auto *pinch = gtk_gesture_zoom_new();
-  Connect<void(GtkGesture *, GdkEventSequence *)>(pinch, "begin", [=](GtkGesture *, GdkEventSequence *) {
-    zoom->start = zoom->scale;
-  });
-  Connect<void(GtkGestureZoom *, double)>(pinch, "scale-changed", [=](GtkGestureZoom *, double scale) {
-    applyZoom(zoom->start * scale);
-  });
-  gtk_widget_add_controller(scroll, GTK_EVENT_CONTROLLER(pinch));
 
+  // The thumbnail first, then the full photo in its place: the view keeps its scale and position,
+  // which are counted in the photo's own size, not the picture's.
+  struct Shown {
+    Image *image = nullptr;
+    bool first = true;
+  };
+  auto *shown = AttachData(zoom, "contrail-shown", std::make_unique<Shown>());
   const auto show = [=] {
     auto *image = media->image(Data::PhotoSize::Large);
     if (!image) {
@@ -221,9 +202,17 @@ void ShowPhoto(not_null<MainWindow *> window, not_null<PhotoData *> photo, FullM
     if (!image) {
       image = media->thumbnailInline();
     }
-    if (image) {
+    if (image && image != shown->image) {
+      shown->image = image;
       if (auto *texture = ToTexture(image->original())) {
-        gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
+        if (shown->first) {
+          shown->first = false;
+          const auto width = photo->width() > 0 ? photo->width() : image->width();
+          const auto height = photo->height() > 0 ? photo->height() : image->height();
+          ZoomViewSetPhoto(zoom, texture, width, height);
+        } else {
+          ZoomViewSetTexture(zoom, texture);
+        }
         g_object_unref(texture);
       }
     }
@@ -242,14 +231,6 @@ void ShowPhoto(not_null<MainWindow *> window, not_null<PhotoData *> photo, FullM
       ShowToast(path);
     }
   });
-  // A double tap zooms in and out.
-  auto *click = gtk_gesture_click_new();
-  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int count, double, double) {
-    if (count == 2) {
-      applyZoom(zoom->scale > 1.01 ? 1. : 2.5);
-    }
-  });
-  gtk_widget_add_controller(picture, GTK_EVENT_CONTROLLER(click));
   Connect<void(AdwDialog *)>(dialog, "closed", [=](AdwDialog *) { delete lifetime; });
   adw_dialog_present(ADW_DIALOG(dialog), window->widget());
 }

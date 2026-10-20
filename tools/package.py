@@ -272,8 +272,37 @@ def prepare_stage(args):
 
 
 def bundle_step(args, action, root, *options):
+    if action in ("deploy", "check", "licenses"):
+        # build-deps.sh's own libraries (the small FFmpeg) come before the container's.
+        options = (*options, "--own", container_path(ROOT / ARCHES[args.arch]["deps"] / "prefix/lib"))
     execute(args.container, ["python3", container_path(ROOT / "tools/bundle.py"), action, container_path(root),
                              ARCHES[args.arch]["triple"], *options])
+
+
+# Libraries only Debian's full FFmpeg needs (codecs, filters and protocols Contrail doesn't use): with the small
+# FFmpeg none of them may come back into a package through another library.
+FULL_FFMPEG_ONLY = ("libx264.", "libx265.", "libaom.", "libSvtAv1Enc.", "librav1e.", "libcodec2.", "libplacebo.",
+                    "libflite", "libopenmpt.", "librubberband.", "libjxl", "libbluray.", "libzmq.", "libsrt",
+                    "libssh.", "librist.", "libpocketsphinx.", "libzvbi.", "libvidstab.", "libxvidcore.",
+                    "libtheora", "libgme.", "libchromaprint.", "libmysofa.", "libOpenCL.")
+
+
+def check_ffmpeg(args, root):
+    """The bundled FFmpeg is build-deps.sh's, and nothing of Debian's full FFmpeg came in with it."""
+    listing = ROOT / ARCHES[args.arch]["deps"] / "prefix/share/contrail/own-libraries.json"
+    own = json.loads(listing.read_text()) if listing.exists() else {}
+    if "libavcodec.so.61" not in own:
+        return
+    origins = json.loads((root / "share/doc/contrail/bundled/origins.json").read_text())
+    for name in own:
+        origin = origins.get(f"lib/{name}")
+        if origin is not None and "/prefix/lib/" not in origin:
+            raise RuntimeError(f"{name} was taken from {origin}, not from build-deps.sh's FFmpeg")
+    if "lib/libavcodec.so.61" not in origins:
+        raise RuntimeError("The package carries no FFmpeg: the system's would be used")
+    unwanted = sorted(p.name for p in (root / "lib").glob("*.so*") if p.name.startswith(FULL_FFMPEG_ONLY))
+    if unwanted:
+        raise RuntimeError("Libraries of the full FFmpeg are in the package: " + ", ".join(unwanted))
 
 
 def make_bundle(args, stage):
@@ -287,6 +316,7 @@ def make_bundle(args, stage):
     bundle_step(args, "deploy", bundle, "--host", host)
     bundle_step(args, "check", bundle, "--host", host)
     bundle_step(args, "licenses", bundle)
+    check_ffmpeg(args, bundle)
     return bundle
 
 
@@ -611,6 +641,7 @@ def build_flatpak(args, stage, version, info):
     bundle_step(args, "deploy", files, "--host", container_path(listing))
     bundle_step(args, "check", files, "--host", container_path(listing))
     bundle_step(args, "licenses", files)
+    check_ffmpeg(args, files)
     doc = files / "share/doc/contrail"
     (doc / "flatpak-runtime.txt").write_text(f"{ref} {commit}\n{FLATPAK_REMOTE}\n")
     sdk = ref.replace("Platform", "Sdk")

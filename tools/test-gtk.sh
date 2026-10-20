@@ -23,3 +23,12 @@ ASAN_OPTIONS=detect_leaks=0 "$work/audio-route"
 ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/css-split.cpp \
   -o "$work/css-split"
 "$work/css-split" gtk-ui/style.css
+${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/zoom-geometry.cpp \
+  -o "$work/zoom-geometry"
+"$work/zoom-geometry"
+${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/album-layout.cpp \
+  $(pkg-config --cflags --libs Qt6Core) -o "$work/album-layout"
+"$work/album-layout"
+${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/paste.cpp \
+  $(pkg-config --cflags --libs gtk4 Qt6Core Qt6Gui) -o "$work/paste"
+ASAN_OPTIONS=detect_leaks=0 "$work/paste"

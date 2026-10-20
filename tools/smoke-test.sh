@@ -21,9 +21,9 @@ file_of() {
   python3 -c "import sys; sys.path.insert(0, 'tools'); import package; print(package.package_file(*sys.argv[1:]))" \
     "$1" "$2" "$VERSION"
 }
-TOOLS_DEBIAN="xvfb dbus dbus-x11 libglib2.0-bin x11-apps netpbm"
-TOOLS_FEDORA="xorg-x11-server-Xvfb dbus-daemon dbus-tools glib2 xwd netpbm-progs mesa-dri-drivers dejavu-sans-fonts"
-TOOLS_SUSE="xorg-x11-server-Xvfb dbus-1-daemon glib2-tools xwd netpbm Mesa-dri dejavu-fonts"
+TOOLS_DEBIAN="xvfb dbus dbus-x11 libglib2.0-bin x11-apps netpbm xclip"
+TOOLS_FEDORA="xorg-x11-server-Xvfb dbus-daemon dbus-tools glib2 xwd netpbm-progs mesa-dri-drivers dejavu-sans-fonts xclip"
+TOOLS_SUSE="xorg-x11-server-Xvfb dbus-1-daemon glib2-tools xwd netpbm Mesa-dri dejavu-fonts xclip"
 # What a desktop system has and the AppImage takes from it (usr/share/doc/contrail/host-libraries.txt): fonts,
 # graphics, X11/Wayland client libraries, ALSA. Minimal container images lack them.
 HOST_DEBIAN="libfontconfig1 fonts-dejavu-core libharfbuzz0b libegl1 libgl1 libopengl0 libgl1-mesa-dri libx11-xcb1"
@@ -76,7 +76,7 @@ smoke() {
         apt-get install -y -qq --no-install-recommends $TOOLS_DEBIAN $HOST_DEBIAN"
       systems[fedora-44]="registry.fedoraproject.org/fedora:44|dnf install -q -y $TOOLS_FEDORA $HOST_FEDORA"
       [[ $arch == amd64 ]] && systems[archlinux]="docker.io/library/archlinux:latest|pacman -Sy --noconfirm --quiet \
-        xorg-server-xvfb dbus glib2 xorg-xwd netpbm $HOST_ARCH" ;;
+        xorg-server-xvfb dbus glib2 xorg-xwd netpbm xclip $HOST_ARCH" ;;
     flatpak)
       systems[fedora-44]="registry.fedoraproject.org/fedora:44|dnf install -q -y flatpak $TOOLS_FEDORA" ;;
   esac

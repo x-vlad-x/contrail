@@ -8,6 +8,8 @@
 
 #include "apiwrap.h"
 #include "core/application.h"
+#include "core/core_settings.h"
+#include "core/core_settings_proxy.h"
 #include "data/data_changes.h"
 #include "data/data_channel.h"
 #include "data/data_chat.h"
@@ -174,18 +176,16 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
           updateEntry(update.thread);
         }, _lifetime);
 
-  // "Connecting..." in the header while there is no connection.
+  // "Connecting..." in the header while there is no connection. The core reports every change of the
+  // main connection's state (Main::Account's state handler), nothing has to ask it all the time.
   auto *header = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_page), "contrail-title"));
-  const auto refreshConnecting = [=] {
+  Core::App().settings().proxy().connectionTypeValue() | rpl::on_next([=] {
     const auto state = _session->account().mtp().dcstate();
     const auto connecting = !DemoActive() && (state == MTP::ConnectingState || state == MTP::DisconnectedState
                              || (state < 0 && state > -600));
     adw_window_title_set_subtitle(ADW_WINDOW_TITLE(header),
                                   connecting ? U8(tr::lng_status_connecting(tr::now)).c_str() : "");
-  };
-  auto *timer = new base::Timer(refreshConnecting);
-  timer->callEach(1000);
-  _lifetime.add([=] { delete timer; });
+  }, _lifetime);
 
   if (_forum) {
     _forum->requestTopics();

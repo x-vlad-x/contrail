@@ -19,8 +19,8 @@ Compiled into the program from source:
 - **Telegram Desktop** and its submodules and bundled third-party code (lib_base, lib_ui, tgcalls, cld3,
   hunspell, libprisma, MicroTeX and others): their license texts are in `share/doc/contrail/upstream`.
 - **Libraries built by `build-env/build-deps.sh`** at the commits the official Telegram Desktop build uses:
-  tg_owt (WebRTC), TDLib's tde2e, rnnoise (with its neural network model), ada, and the Rust part (tlottie,
-  wallet engine and the Rust crates they use). Their license texts are in `share/doc/contrail/static-libraries`;
+  tg_owt (WebRTC, with Contrail's fix in `patches/tg_owt/`), TDLib's tde2e, rnnoise (with its neural network
+  model), ada, and the Rust part (tlottie, wallet engine and the Rust crates they use). Their license texts are in `share/doc/contrail/static-libraries`;
   `sources.json` there lists the source archives with their SHA-256, and `tdesktop_rust/crates.txt` lists the
   Rust crates that are linked in, with their licenses.
 - **Debian packages** used at build time (Debian 13 for both architectures):
@@ -30,8 +30,15 @@ Compiled into the program from source:
 ## The DEB, RPM and AppImage
 
 These packages carry the shared libraries, plugins, icons and schemas the program needs, from Debian 13 (GTK,
-libadwaita, Qt, FFmpeg, OpenSSL and others). The libraries are Debian's files, unmodified, except that a run-time
-library search path pointing into the system is replaced with the library's own folder. They keep their own
+libadwaita, Qt, OpenSSL and others). The libraries are Debian's files, unmodified, except that a run-time
+library search path pointing into the system is replaced with the library's own folder.
+
+FFmpeg is the exception: `build-env/build-deps.sh` builds its libraries (libavcodec, libavformat, libavfilter,
+libavutil, libswscale, libswresample) from Debian 13's own source package, `ffmpeg` 7:7.1.5-0+deb13u1, with fewer
+components than Debian's build: the decoders, demuxers, filters and hardware decoding Telegram Desktop uses, no
+network protocols and no programs. They are LGPL-2.1-or-later (no GPL parts are enabled), have the same version
+and library ABI as Debian's, and are listed in `bundled-packages.json` as built by Contrail from that source
+package, with the exact `configure` options; their copyright file is `bundled/ffmpeg.copyright`. They keep their own
 licenses — including the LGPL and the GPL — and are not relicensed by Contrail. `share/doc/contrail/bundled` holds
 each package's Debian copyright file, the common license texts, `bundled-packages.json`, which maps every bundled
 file to its Debian binary and source package and version, and `origins.json`, where each bundled library came from.
@@ -51,8 +58,9 @@ modifications.
 
 The Flatpak runs on the GNOME runtime from Flathub (`share/doc/contrail/flatpak-runtime.txt` names the version it
 was made for), which Flatpak installs from there; the runtime is not part of Contrail's files. The Flatpak carries
-the libraries the runtime doesn't have (Qt, FFmpeg 7.1 and others) and PulseAudio's `pactl`, from Debian 13,
-documented the same way in `share/doc/contrail/bundled`. Inside the installed Flatpak they are in
+the libraries the runtime doesn't have (Qt and others) and PulseAudio's `pactl`, from Debian 13, and the same
+FFmpeg 7.1 libraries as the other packages (never the runtime's own FFmpeg), documented the same way in
+`share/doc/contrail/bundled`. Inside the installed Flatpak they are in
 `/app/lib`; `flatpak run --command=sh io.github.x_vlad_x.Contrail` opens a shell in the sandbox.
 
 ## Corresponding sources
@@ -63,8 +71,9 @@ Each release offers, next to the packages:
   `SOURCE-REVISION.json`, a checksum manifest of the files);
 - `Contrail-<version>-corresponding-sources.tar` (in numbered parts, see `SOURCES.md`): the Telegram Desktop
   source tree at the pinned tag with all submodules, the source archives of the libraries built by
-  `build-deps.sh` (including the vendored Rust crates and the Cargo lockfile), the exact Debian source
-  packages of everything the packages carry and of the Debian libraries compiled into the programs (verified
+  `build-deps.sh` (including the vendored Rust crates and the Cargo lockfile; tg_owt with its patch applied),
+  the exact Debian source packages of everything the packages carry (FFmpeg's included, with the build options in
+  `build-env/build-deps.sh`) and of the Debian libraries compiled into the programs (verified
   against the signed APT indexes and each `.dsc`), and the AppImage runtime sources.
 
 To build the packages yourself, follow "Building" in `README.md`: `tools/build-packages.sh` needs podman (or

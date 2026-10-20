@@ -44,3 +44,9 @@ ENV PKG_CONFIG_PATH=/src/deps-x86_64/prefix/lib/pkgconfig \
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libgtk4-layer-shell-dev pulseaudio-utils \
     && rm -rf /var/lib/apt/lists/*
+# The small FFmpeg of the packages (build-deps.sh, CONTRAIL_FFMPEG): the libraries it builds on, and the assembler
+# for its x86 code.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      nasm libdav1d-dev libva-dev libvdpau-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV CONTRAIL_FFMPEG=1

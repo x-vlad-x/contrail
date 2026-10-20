@@ -48,10 +48,10 @@ index a67723f..898a7fb 100644
  	const auto trackFileName = Core::App().settings().getSoundPath(
  		(_type == Type::Outgoing)
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
-index 7a309ac..32d347e 100644
+index 7a309ac..480e2e5 100644
 --- a/Telegram/SourceFiles/core/application.cpp
 +++ b/Telegram/SourceFiles/core/application.cpp
-@@ -109,6 +109,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -109,6 +109,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  
  #include <ksandbox.h>
  
@@ -59,13 +59,14 @@ index 7a309ac..32d347e 100644
 +namespace Contrail {
 +void Start();
 +void Activate();
++bool WindowActive();
 +} // namespace Contrail
 +#endif // CONTRAIL_GTK
 +
  namespace Core {
  namespace {
  
-@@ -480,6 +487,11 @@ void Application::run() {
+@@ -480,6 +488,11 @@ void Application::run() {
  
  	Test::Fire(u"launch_finished"_q);
  	Test::Start();
@@ -77,7 +78,7 @@ index 7a309ac..32d347e 100644
  }
  
  void Application::autoRegisterUrlScheme() {
-@@ -660,6 +672,10 @@ void Application::createTray() {
+@@ -660,6 +673,10 @@ void Application::createTray() {
  }
  
  void Application::activate() {
@@ -88,6 +89,20 @@ index 7a309ac..32d347e 100644
  	for (const auto &window : _windowStack) {
  		if (window == _lastActiveWindow) {
  			break;
+@@ -1478,6 +1495,13 @@ bool Application::savingPositionFor(
+ }
+ 
+ bool Application::hasActiveWindow(not_null<Main::Session*> session) const {
++#ifdef CONTRAIL_GTK
++	// The user is in front of the GTK interface, the core's windows are never
++	// shown: online while it is active, offline once it is closed.
++	return !Quitting()
++		&& Contrail::WindowActive()
++		&& (_domain->active().maybeSession() == session);
++#endif // CONTRAIL_GTK
+ 	if (Quitting() || !_lastActiveWindow) {
+ 		return false;
+ 	} else if (_calls->hasActivePanel(session)) {
 diff --git a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
 index a229510..b4bcd7f 100644
 --- a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp

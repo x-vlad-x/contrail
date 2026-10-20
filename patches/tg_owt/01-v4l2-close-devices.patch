@@ -1,0 +1,14 @@
+Looking for a camera's capabilities: close the devices that can't capture video (a phone's hardware
+codecs are /dev/video nodes too). They were skipped without being closed, so every call left them open;
+on the FuriLabs FLX1s two more descriptors (mtk-vcodec-dec and -enc) per call.
+
+--- a/src/modules/video_capture/linux/device_info_v4l2.cc
++++ b/src/modules/video_capture/linux/device_info_v4l2.cc
+@@ -181,6 +181,7 @@
+     if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0) {
+       // skip devices without video capture capability
+       if (!(cap.device_caps & V4L2_CAP_VIDEO_CAPTURE)) {
++        close(fd);
+         continue;
+       }
+ 
