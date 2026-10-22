@@ -85,6 +85,35 @@ inline GtkWidget *MakeMediaFrame(GtkWidget *picture, int width, int height) {
   return frame;
 }
 
+// A bin whose width doesn't depend on the height offered: the message bubble in its row. A horizontal
+// GtkBox (the row with the avatar) asks its children for their width at the row's height; a vertical
+// box (the bubble) answers that with a binary search over widths, which assumes its children get no
+// taller as it gets wider. Pictures do (MakeMediaFrame): with a picture and text in one bubble the
+// search can stop converging, and GTK spins in it forever (a link preview on a 413 px wide phone
+// screen: 226 px high at 195 px, 235 at 198, 225 at 240).
+inline GtkWidget *MakeHeightForWidthBin(GtkWidget *child) {
+  auto *bin = adw_bin_new();
+  gtk_widget_set_layout_manager(
+      bin, gtk_custom_layout_new(
+               [](GtkWidget *) { return GTK_SIZE_REQUEST_HEIGHT_FOR_WIDTH; },
+               [](GtkWidget *widget, GtkOrientation orientation, int forSize, int *minimum, int *natural,
+                  int *minimumBaseline, int *naturalBaseline) {
+                 auto *child = adw_bin_get_child(ADW_BIN(widget));
+                 if (!child || !gtk_widget_should_layout(child)) {
+                   return;
+                 }
+                 gtk_widget_measure(child, orientation, (orientation == GTK_ORIENTATION_HORIZONTAL) ? -1 : forSize,
+                                    minimum, natural, minimumBaseline, naturalBaseline);
+               },
+               [](GtkWidget *widget, int width, int height, int baseline) {
+                 if (auto *child = adw_bin_get_child(ADW_BIN(widget))) {
+                   gtk_widget_allocate(child, width, height, baseline, nullptr);
+                 }
+               }));
+  adw_bin_set_child(ADW_BIN(bin), child);
+  return bin;
+}
+
 // An album: its cells placed as Ui::LayoutMediaGroup laid them out for `size`, scaled down together on
 // a screen narrower than that. The children are the cells, in the order of `cells`.
 inline GtkWidget *MakeAlbumGrid(const std::vector<GtkWidget *> &children, std::vector<QRect> cells, QSize size) {

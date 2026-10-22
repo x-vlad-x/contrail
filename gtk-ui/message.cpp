@@ -236,7 +236,8 @@ void MessageWidget::build() {
   auto *bubble = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
   gtk_widget_add_css_class(bubble, "bubble");
   gtk_widget_add_css_class(bubble, out ? "outgoing" : "incoming");
-  gtk_box_append(GTK_BOX(line), bubble);
+  // Its width mustn't depend on the row's height: see MakeHeightForWidthBin().
+  gtk_box_append(GTK_BOX(line), MakeHeightForWidthBin(bubble));
 
   if (showSender) {
     _name = gtk_label_new(U8(from->name()).c_str());
