@@ -243,7 +243,7 @@ MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &
       m.replyTo ? MTP_messageReplyHeader(MTP_flags(MTPDmessageReplyHeader::Flag::f_reply_to_msg_id),
                                          MTP_int(m.replyTo.bare), MTPPeer(), MTPMessageFwdHeader(), MTPMessageMedia(),
                                          MTPint(), MTPstring(), MTPVector<MTPMessageEntity>(), MTPint(), MTPint(),
-                                         MTPbytes())
+                                         MTPbytes(), MTPVector<MTPRichText>())
                 : MTPMessageReplyHeader(),
       MTP_int(m.date), MTP_string(entities.text), m.media.value_or(MTP_messageMediaEmpty()), MTPReplyMarkup(),
       Api::EntitiesToMTP(session, entities.entities),
@@ -319,7 +319,7 @@ void Fill(not_null<Main::Session *> session) {
                   MTP_chatPhotoEmpty(), MTP_int(minutes(60 * 24 * 365)), MTPVector<MTPRestrictionReason>(),
                   MTPChatAdminRights(), MTPChatBannedRights(), MTPChatBannedRights(), MTP_int(12840),
                   MTPVector<MTPUsername>(), MTPRecentStory(), MTPPeerColor(), MTPPeerColor(), MTPEmojiStatus(),
-                  MTPint(), MTPint(), MTPlong(), MTPlong(), MTPlong(), MTPlong()),
+                  MTPint(), MTPint(), MTPlong(), MTPlong(), MTPlong(), MTPlong(), MTPint()),
   }));
   const auto self = session->userPeerId();
   const auto maya = peerFromUser(kMaya), sam = peerFromUser(kSam), lena = peerFromUser(kLena);
