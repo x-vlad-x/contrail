@@ -1,11 +1,10 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.2.0
+# Contrail 0.2.1
 
-A feature release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones
-and desktops, built on the Telegram Desktop 7.3.1 core: albums, sending pasted pictures and files, a photo
-viewer that zooms properly, much less memory and fewer wakeups in the background, and packages about a third
-smaller. Contrail is an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by
+A bugfix release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and
+desktops: a chat with a link preview could freeze the app on a phone. It is built on the Telegram Desktop 7.3.3
+core. Contrail is an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by
 Telegram.
 
 <p align="center">
@@ -20,24 +19,32 @@ Telegram.
 
 | Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
 | --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.2.0-1_amd64.deb` | `contrail_0.2.0-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.2.0-1.x86_64.rpm` | `contrail-0.2.0-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.2.0-x86_64.flatpak` | `Contrail-0.2.0-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.2.0-x86_64.AppImage` | `Contrail-0.2.0-aarch64.AppImage` |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.2.1-1_amd64.deb` | `contrail_0.2.1-1_arm64.deb` |
+| Fedora, openSUSE | `contrail-0.2.1-1.x86_64.rpm` | `contrail-0.2.1-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.2.1-x86_64.flatpak` | `Contrail-0.2.1-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.2.1-x86_64.AppImage` | `Contrail-0.2.1-aarch64.AppImage` |
 
 ```sh
-sudo apt install ./contrail_0.2.0-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.2.0-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
-flatpak install --user ./Contrail-0.2.0-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.2.0-x86_64.AppImage && ./Contrail-0.2.0-x86_64.AppImage
+sudo apt install ./contrail_0.2.1-1_arm64.deb              # DEB
+sudo dnf install ./contrail-0.2.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
+flatpak install --user ./Contrail-0.2.1-aarch64.flatpak    # Flatpak
+chmod +x Contrail-0.2.1-x86_64.AppImage && ./Contrail-0.2.1-x86_64.AppImage
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
 needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.1.1 or 0.1.0, install the new DEB, RPM or Flatpak the same way, or
-run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
+keeps your account and chats). To update from 0.2.0, 0.1.1 or 0.1.0, install the new DEB, RPM or Flatpak the same
+way, or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
 
-## What's new since 0.1.1
+## What's new since 0.2.0
+
+- **No more freezes on link previews**: a chat with a link preview that has a picture could freeze Contrail for
+  good as soon as it was opened, on a phone-sized screen. GTK went round in circles laying out the message,
+  because the preview's picture gets taller as the bubble gets wider. The bubble is now laid out without that
+  question.
+- **Telegram Desktop 7.3.3** core instead of 7.3.1.
+
+## Earlier, in 0.2.0
 
 - **Albums**: photos and videos sent together appear as one message in Telegram's own grid, files and music sent
   together one under the other, every caption kept. Each photo or video of an album opens, has its menu (reply,
@@ -140,8 +147,8 @@ Desktop doesn't have them either.
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.2.0-sources.tar.gz` holds Contrail's
-sources; the `Contrail-0.2.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
+contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.2.1-sources.tar.gz` holds Contrail's
+sources; the `Contrail-0.2.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
 packages are built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.
