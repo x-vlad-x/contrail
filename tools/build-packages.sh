@@ -23,8 +23,8 @@ cd "$ROOT"
 TARGET="${1:-all}"
 case "$TARGET" in aarch64|x86_64|all) ;; *) sed -n '2,18p' "$0" >&2; exit 2 ;; esac
 
-CORE_TAG=v7.3.1
-CORE_COMMIT=6fed91ffab9861771a75f29df65031b3c80b6941
+CORE_TAG=v7.3.3
+CORE_COMMIT=5c674f1f6a0f6ace55b67f8bc295138680fe588b
 CORE_URL=https://github.com/telegramdesktop/tdesktop.git
 JOBS="${CONTRAIL_JOBS:-$(nproc)}"
 

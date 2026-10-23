@@ -4,7 +4,7 @@
 #
 #   ./update-contrail.sh                 build the latest Telegram Desktop release, install it if the phone has an older one
 #   ./update-contrail.sh --force         rebuild and reinstall even if the version is the same
-#   ./update-contrail.sh --tag <tag>     build a specific tag (e.g. v7.3.1)
+#   ./update-contrail.sh --tag <tag>     build a specific tag (e.g. v7.3.3)
 #   ./update-contrail.sh --build-only    only build, don't install on the phone
 #   ./update-contrail.sh --ui-only       quickly update only the program on the phone (after changes in gtk-ui/)
 #   ./update-contrail.sh --check         only check what is installed on the phone and what's released

@@ -147,7 +147,7 @@ combine it with the Debian package on the same phone: its user launcher hides th
 ./update-contrail.sh --check        # what is installed on the phone, is there an update
 ./update-contrail.sh --ui-only      # quickly update only the program (after changes in gtk-ui/)
 ./update-contrail.sh --build-only   # build without installing
-./update-contrail.sh --tag v7.3.1   # a specific Telegram Desktop release
+./update-contrail.sh --tag v7.3.3   # a specific Telegram Desktop release
 ./update-contrail.sh --uninstall    # remove from the phone (--uninstall --purge also removes the account)
 ```
 
