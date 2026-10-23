@@ -128,18 +128,16 @@ Desktop doesn't have them either.
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- Each package was installed the way users do and started in a clean container with an offline, made-up demo
-  account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files, outside
-  the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04 (ARM64 also in FuriOS
-  14's userland), the RPM with `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13,
-  Ubuntu 24.04, Fedora 44 and (x86_64) Arch Linux, the x86_64 Flatpak with `flatpak` on Fedora 44. The ARM64
-  containers ran under qemu-user emulation.
-- On the FuriLabs FLX1s (FuriOS 14, Phosh) with a real account, in Saved Messages: albums of 2, 3, 10 and 11
-  photos, photos with a video, captions, files sent as documents, deleting a message of an album, sending while
-  the connection dropped; pasting a screenshot, files and text through the Wayland clipboard; pinch, double tap
-  and drag in the photo viewer with real touches; closing and opening the window (the chat and its place come
-  back, a voice message being recorded goes on). The ARM64 AppImage played MP3, FLAC, M4A and Ogg files with
-  its own FFmpeg, also at double speed, recorded a voice message, and made previews of VP9 and H.264 videos.
+- Each x86_64 package was installed the way users do and started in a clean container with an offline, made-up
+  demo account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files,
+  outside the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
+  `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
+  Arch Linux, the Flatpak with `flatpak` on Fedora 44.
+- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage with a real account: the chat that froze 0.2.0
+  (a link preview with a picture) opens and scrolls, older pages load; in Saved Messages, 19 rounds of sending a
+  picture and deleting it.
+- The ARM64 DEB, RPM and Flatpak weren't installed in containers for this release; they are built the same way
+  as the AppImage, from the same program. 0.2.0's packages were, and nothing in the packaging changed since.
 - Not checked with these files: calls with another person, notifications and calls on a locked phone, writing
   in a group with topics, pasting files through Flatpak's portal, Wayland desktops. Battery use in the
   background wasn't measured.
