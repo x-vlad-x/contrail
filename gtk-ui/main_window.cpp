@@ -6,6 +6,7 @@
 #include "chat_view.hpp"
 #include "calls.hpp"
 #include "dialogs.hpp"
+#include "live_location.hpp"
 #include "login.hpp"
 #include "scroll_helpers.hpp"
 #include "settings.hpp"
@@ -373,12 +374,14 @@ void MainWindow::showAccount(Main::Account *account) {
   if (_window) clearSessionUi();
   if (!account) {
     _session = nullptr;
+    Live().setSession(nullptr);
     if (_window) gtk_stack_set_visible_child_name(_stack, "loading");
     return;
   }
   account->sessionValue() | rpl::on_next([=](Main::Session *session) {
     if (_window) clearSessionUi();
     _session = session;
+    Live().setSession(session);
     if (!session) {
       // Signed out: a recording of that account has nowhere to go.
       Recorder().finish(false);

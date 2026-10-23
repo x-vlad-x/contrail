@@ -25,6 +25,9 @@ ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -
 "$work/css-split" gtk-ui/style.css
 ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/zoom-geometry.cpp \
   -o "$work/zoom-geometry"
+${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/geo.cpp \
+  $(pkg-config --cflags --libs glib-2.0) -o "$work/geo"
+"$work/geo"
 "$work/zoom-geometry"
 ${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/album-layout.cpp \
   $(pkg-config --cflags --libs Qt6Core) -o "$work/album-layout"

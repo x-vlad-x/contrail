@@ -27,6 +27,13 @@ if (CONTRAIL_LAYER_SHELL_FOUND)
   target_compile_definitions(Telegram PRIVATE CONTRAIL_LAYER_SHELL)
   target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_LAYER_SHELL)
 endif()
+# Optional: maps for locations (picking a place, following a live location). Without it a location opens in
+# the system's map application.
+pkg_check_modules(CONTRAIL_SHUMATE IMPORTED_TARGET GLOBAL shumate-1.0)
+if (CONTRAIL_SHUMATE_FOUND)
+  target_compile_definitions(Telegram PRIVATE CONTRAIL_SHUMATE)
+  target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_SHUMATE)
+endif()
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. Telegram Desktop limits GLib to 2.56
 # for its own code, the interface needs newer.
 set_source_files_properties(${CONTRAIL_SRC} PROPERTIES

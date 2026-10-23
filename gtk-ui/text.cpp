@@ -261,4 +261,9 @@ QString FormatDay(TimeId date) {
   return langDayOfMonthFull(base::unixtime::parse(date).date());
 }
 
+QString Translated(const char *english, const char *russian, const char *ukrainian) {
+  const auto language = Lang::LanguageIdOrDefault(Lang::Id());
+  return QString::fromUtf8(language.startsWith(u"ru"_q) ? russian : language.startsWith(u"uk"_q) ? ukrainian : english);
+}
+
 }  // namespace Contrail

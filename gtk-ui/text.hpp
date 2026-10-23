@@ -23,4 +23,8 @@ QString FormatTime(TimeId date);       // 12:34
 QString FormatListDate(TimeId date);   // chat list: time today, weekday this week, date otherwise
 QString FormatDay(TimeId date);        // date separator in a chat: "October 13"
 
+// For the few texts Telegram Desktop has no strings for (features of the phone apps): English, or Russian or
+// Ukrainian when that is the interface's language.
+QString Translated(const char *english, const char *russian, const char *ukrainian);
+
 }  // namespace Contrail

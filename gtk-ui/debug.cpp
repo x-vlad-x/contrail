@@ -6,7 +6,9 @@
 //           close | present | state | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
 //             record-cancel|state |
-//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT] |
+//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
+//             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
+//             live-start:SECONDS (Saved Messages)] |
 //           screenshot [call] PATH
 
 #include "debug.hpp"
@@ -50,6 +52,30 @@ GtkWidget *FindWindow(const char *cssClass) {
   return result;
 }
 
+// Open popovers (menus) are surfaces of their own: drawn over the window where the compositor shows them.
+void SnapshotPopovers(GtkWidget *root, GtkWidget *window, GtkSnapshot *snapshot) {
+  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
+    if (GTK_IS_POPOVER(child) && gtk_widget_get_mapped(child)) {
+      auto *surface = gtk_native_get_surface(GTK_NATIVE(child));
+      if (surface && GDK_IS_POPUP(surface)) {
+        double windowX = 0, windowY = 0, popoverX = 0, popoverY = 0;
+        gtk_native_get_surface_transform(GTK_NATIVE(window), &windowX, &windowY);
+        gtk_native_get_surface_transform(GTK_NATIVE(child), &popoverX, &popoverY);
+        const auto x = gdk_popup_get_position_x(GDK_POPUP(surface)) + popoverX - windowX;
+        const auto y = gdk_popup_get_position_y(GDK_POPUP(surface)) + popoverY - windowY;
+        auto *paintable = gtk_widget_paintable_new(child);
+        gtk_snapshot_save(snapshot);
+        const auto origin = GRAPHENE_POINT_INIT(float(x), float(y));
+        gtk_snapshot_translate(snapshot, &origin);
+        gdk_paintable_snapshot(paintable, snapshot, gtk_widget_get_width(child), gtk_widget_get_height(child));
+        gtk_snapshot_restore(snapshot);
+        g_object_unref(paintable);
+      }
+    }
+    SnapshotPopovers(child, window, snapshot);
+  }
+}
+
 void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   if (!window || !gtk_widget_get_realized(window)) {
     g_warning("Screenshot: no window");
@@ -62,6 +88,7 @@ void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   auto *snapshot = gtk_snapshot_new();
   gtk_snapshot_scale(snapshot, float(scale), float(scale));
   gdk_paintable_snapshot(paintable, snapshot, width, height);
+  SnapshotPopovers(window, window, snapshot);
   auto *node = gtk_snapshot_free_to_node(snapshot);
   const auto bounds = GRAPHENE_RECT_INIT(0, 0, float(width * scale), float(height * scale));
   auto *texture = gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(window)), node, &bounds);

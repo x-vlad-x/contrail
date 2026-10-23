@@ -2,6 +2,7 @@
 
 #include "app.hpp"
 
+#include "data/data_cloud_file.h"
 #include "media/audio/media_audio.h"
 
 #include <memory>
@@ -14,6 +15,7 @@ class PhotoData;
 namespace Data {
 class PhotoMedia;
 class DocumentMedia;
+class MediaLocation;
 } // namespace Data
 
 namespace Contrail {
@@ -46,6 +48,8 @@ public:
   void refresh();
   // Updates the time and the read ticks only.
   void refreshFooter();
+  // The reactions changed (and maybe nothing else): only their bar is rebuilt. False when they didn't change.
+  bool refreshReactions();
   // A download or an upload went on: shows the pictures that arrived and the progress. True when
   // nothing is pending anymore.
   bool refreshMedia();
@@ -55,7 +59,7 @@ public:
   void highlight(const HistoryItem *item = nullptr);
 
 private:
-  enum class PictureKind { None, Photo, Sticker, Thumbnail };
+  enum class PictureKind { None, Photo, Sticker, Thumbnail, Map };
   // The media of one message.
   struct Cell {
     not_null<HistoryItem *> item;
@@ -72,6 +76,11 @@ private:
     GtkWidget *documentStatus = nullptr;
     GtkWidget *voiceProgress = nullptr;
     GtkWidget *status = nullptr;  // Upload or download progress over a picture.
+    // A location: the map from Telegram's servers, and a live location's state.
+    std::unique_ptr<Data::CloudImage> map;
+    std::shared_ptr<QImage> mapView;
+    GtkWidget *liveStatus = nullptr;
+    GtkWidget *liveRemaining = nullptr;
   };
 
   void build();
@@ -88,6 +97,9 @@ private:
   GtkWidget *buildVoice(Cell &cell, not_null<DocumentData *> document);
   GtkWidget *buildVideoThumb(Cell &cell, not_null<DocumentData *> document, int maxWidth);
   GtkWidget *buildWebPage(not_null<HistoryItem *> item);
+  GtkWidget *buildLocation(Cell &cell, not_null<Data::MediaLocation *> location);
+  void refreshLive();
+  void setupDoubleTap(GtkWidget *bubble);
   GtkWidget *buildFooter();
   GtkWidget *makeStatus();
   bool refreshPicture(Cell &cell);
@@ -105,6 +117,9 @@ private:
   GtkWidget *_footer = nullptr;
   GtkWidget *_footerTime = nullptr;
   GtkWidget *_footerStatus = nullptr;
+  GtkWidget *_reactions = nullptr;
+  QString _reactionsKey;
+  guint _liveTimer = 0;
   std::vector<std::unique_ptr<Cell>> _cells;
   GtkWidget *_highlighted = nullptr;
   guint _highlightTimeout = 0;

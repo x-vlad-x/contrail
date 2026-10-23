@@ -1,8 +1,11 @@
 #include "chat_view.hpp"
 
 #include "attach.hpp"
+#include "live_location.hpp"
+#include "location_ui.hpp"
 #include "main_window.hpp"
 #include "message.hpp"
+#include "reactions.hpp"
 #include "scroll_helpers.hpp"
 #include "send_queue.hpp"
 #include "text.hpp"
@@ -31,6 +34,7 @@
 #include "data/data_forum_topic.h"
 #include "data/data_groups.h"
 #include "data/data_histories.h"
+#include "data/data_message_reactions.h"
 #include "data/data_replies_list.h"
 #include "data/data_peer_values.h"
 #include "data/data_photo.h"
@@ -186,7 +190,12 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
           }
         }, _lifetime);
   data.itemRemoved() | rpl::on_next([=](not_null<const HistoryItem *> item) { removeRow(item); }, _lifetime);
-  data.itemDataChanges() | rpl::on_next([=](not_null<HistoryItem *> item) { refreshItem(item); }, _lifetime);
+  data.itemDataChanges() | rpl::on_next([=](not_null<HistoryItem *> item) { refreshItemData(item); }, _lifetime);
+  // The core asks to repaint a message when its reactions are due to be asked for again (Reactions::poll).
+  data.itemRepaintRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) {
+    if (rowFor(item)) pollReactions();
+  }, _lifetime);
+  Live().changes() | rpl::on_next([=] { refreshLiveBanner(); }, _lifetime);
   data.itemViewRefreshRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) { refreshItem(item); }, _lifetime);
   session->changes().messageUpdates(Data::MessageUpdate::Flag::Edited | Data::MessageUpdate::Flag::NewAdded)
       | rpl::on_next([=](const Data::MessageUpdate &update) { refreshItem(update.item); }, _lifetime);
@@ -360,6 +369,20 @@ void ChatView::buildHeader() {
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), call);
   }
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), header);
+
+  // A live location being shared to this chat, as the phone apps show it above the messages.
+  _liveBanner = adw_banner_new(U8(Translated("You are sharing your live location", "Вы транслируете геопозицию",
+                                            "Ви транслюєте геопозицію")).c_str());
+  adw_banner_set_button_label(ADW_BANNER(_liveBanner), U8(tr::lng_group_call_screen_share_stop(tr::now)).c_str());
+  _signals.connect<void(AdwBanner *)>(_liveBanner, "button-clicked", [this](AdwBanner *) {
+    if (const auto id = Live().sharingIn(_history->peer)) Live().stop(id);
+  });
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBanner);
+  refreshLiveBanner();
+}
+
+void ChatView::refreshLiveBanner() {
+  adw_banner_set_revealed(ADW_BANNER(_liveBanner), bool(Live().sharingIn(_history->peer)));
 }
 
 void ChatView::refreshHeader() {
@@ -999,6 +1022,18 @@ void ChatView::refreshItem(const HistoryItem *item) {
   }
 }
 
+void ChatView::refreshItemData(const HistoryItem *item) {
+  if (auto *row = rowFor(item); row && row->refreshReactions()) {
+    gtk_list_box_row_changed(GTK_LIST_BOX_ROW(row->row()));
+    return;
+  }
+  refreshItem(item);
+}
+
+void ChatView::refreshMessage(FullMsgId id) {
+  if (const auto item = _history->owner().message(id)) refreshItem(item);
+}
+
 void ChatView::refreshTransfer(FullMsgId id) {
   if (const auto item = _history->owner().message(id)) {
     if (auto *row = rowFor(item); row && !row->refreshMedia()) {
@@ -1140,7 +1175,42 @@ void ChatView::updateViewport() {
     showSponsored();
   }
   reportSponsoredViews();
+  pollReactions();
   if (_window->isActive() && !_readTimer.isActive()) _readTimer.callOnce(300);
+}
+
+// The reactions of the messages on the screen are asked for again from time to time, as Telegram Desktop does
+// for the ones it paints (in groups and channels: in chats with a user the server sends them).
+void ChatView::pollReactions() {
+  if (!_window->isActive() || !gtk_widget_get_mapped(_root) || _history->peer->isUser()) return;
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const auto now = crl::now();
+  auto &reactions = _history->owner().reactions();
+  for (const auto &[raw, row] : _rows) {
+    double y = 0;
+    const auto height = gtk_widget_get_height(row->row());
+    if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height > 0 && y < page) {
+      for (const auto &item : row->items()) {
+        if (item->isRegular()) reactions.poll(item, now);
+      }
+    }
+  }
+}
+
+// New reactions to the user's messages are read when the messages are on the screen.
+void ChatView::readReactions() {
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  auto read = base::flat_set<not_null<HistoryItem *>>();
+  for (const auto &[raw, row] : _rows) {
+    for (const auto &item : row->items()) {
+      if (!item->hasUnreadReaction()) continue;
+      double y = 0;
+      auto *widget = row->widgetFor(item);
+      const auto height = gtk_widget_get_height(widget);
+      if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page) read.emplace(item);
+    }
+  }
+  if (!read.empty()) _history->session().api().markContentsRead(read);
 }
 
 void ChatView::showSponsored() {
@@ -1354,6 +1424,46 @@ void ChatView::debugHistory(const QString &action) {
       }
     }
   }
+  else if (action.startsWith(u"react:"_q)) {
+    // "react:ID:EMOJI" toggles a reaction: only in Saved Messages and in the offline demo.
+    const auto parts = action.mid(6).split(':');
+    const auto demo = QString::fromUtf8(g_getenv("CONTRAIL_APP_ID") ? g_getenv("CONTRAIL_APP_ID") : "").endsWith(u"Demo"_q);
+    const auto item = _history->owner().message(_history->peer, MsgId(parts.value(0).toLongLong()));
+    if (item && parts.size() > 1 && (_history->peer->isSelf() || demo)) {
+      ToggleReaction(item, Data::ReactionId{parts[1]});
+    }
+  } else if (action.startsWith(u"reactions:"_q)) {
+    if (const auto item = _history->owner().message(_history->peer, MsgId(action.mid(10).toLongLong()))) {
+      auto list = QStringList();
+      for (const auto &reaction : item->reactionsWithLocal()) {
+        list.push_back(Data::ReactionEntityData(reaction.id) + u"="_q + QString::number(reaction.count) + (reaction.my ? u"*"_q : QString()));
+      }
+      g_message("Reactions of %lld: [%s] can=%d tags=%d unread=%d", (long long)item->id.bare, U8(list.join(' ')).c_str(),
+                int(item->canReact()), int(item->reactionsAreTags()), int(item->hasUnreadReaction()));
+    }
+  } else if (action.startsWith(u"menu:"_q)) {
+    const auto item = _history->owner().message(_history->peer, MsgId(action.mid(5).toLongLong()));
+    if (const auto row = item ? rowFor(item) : nullptr) showMessageMenu(item, row->widgetFor(item), 40, 20);
+  } else if (action == u"location"_q) {
+    chooseLocation();
+  } else if (action.startsWith(u"map:"_q)) {
+    if (const auto item = _history->owner().message(_history->peer, MsgId(action.mid(4).toLongLong()))) openLocation(item);
+  } else if (action.startsWith(u"fix:"_q)) {
+    // "fix:LAT,LON,ACCURACY": a position as if from the location service (while something watches it).
+    const auto parts = action.mid(4).split(',');
+    Location().debugFix(parts.value(0).toDouble(), parts.value(1).toDouble(), parts.value(2, u"10"_q).toDouble());
+  } else if (action == u"live"_q) {
+    g_message("Live locations: %s; location: %s", U8(Live().debugState()).c_str(), U8(Location().debugState()).c_str());
+  } else if (action == u"live-update"_q) {
+    Live().debugUpdate();
+  } else if (action.startsWith(u"live-start:"_q) && _history->peer->isSelf()) {
+    // A live location in Saved Messages (the phone apps don't offer it there), from the last position.
+    if (const auto fix = Location().recent(600)) {
+      Live().start(_thread, TimeId(action.mid(11).toInt()), *fix, FullMsgId());
+    } else {
+      g_message("Live locations: no recent position");
+    }
+  }
   g_message("History state: rows=%zu min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
       _itemRows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
       int(loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
@@ -1414,6 +1524,7 @@ void ChatView::markAsRead() {
   }
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   if (page <= 0) return;
+  readReactions();
   const auto atBottom = gtk_adjustment_get_value(_adjustment) + page >= gtk_adjustment_get_upper(_adjustment) - 40
       && loadedAtBottom();
   if (_stickToBottom || atBottom) {
@@ -1487,10 +1598,29 @@ void ChatView::buildComposer() {
   // The message field.
   auto *field = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_add_css_class(field, "composer");
-  auto *attach = MakeIconButton("mail-attachment-symbolic", U8(tr::lng_attach(tr::now)).c_str(), "flat");
+  // A file or a location, as the phone apps' attach menu.
+  auto *attachMenu = g_menu_new();
+  g_menu_append(attachMenu, U8(tr::lng_attach_file(tr::now)).c_str(), "attach.file");
+  g_menu_append(attachMenu, U8(tr::lng_maps_point(tr::now)).c_str(), "attach.location");
+  auto *attach = gtk_menu_button_new();
+  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(attach), "mail-attachment-symbolic");
+  gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(attach), G_MENU_MODEL(attachMenu));
+  g_object_unref(attachMenu);
+  gtk_widget_set_tooltip_text(attach, U8(tr::lng_attach(tr::now)).c_str());
+  gtk_widget_add_css_class(attach, "flat");
   gtk_widget_add_css_class(attach, "circular");
   gtk_widget_set_valign(attach, GTK_ALIGN_END);
-  _signals.clicked(attach, [this] { chooseFiles(); });
+  auto *attachActions = g_simple_action_group_new();
+  const auto addAttachAction = [&](const char *name, Fn<void()> callback) {
+    auto *action = g_simple_action_new(name, nullptr);
+    _signals.connect<void(GSimpleAction *, GVariant *)>(action, "activate", [callback](GSimpleAction *, GVariant *) { callback(); });
+    g_action_map_add_action(G_ACTION_MAP(attachActions), G_ACTION(action));
+    g_object_unref(action);
+  };
+  addAttachAction("file", [this] { chooseFiles(); });
+  addAttachAction("location", [this] { chooseLocation(); });
+  gtk_widget_insert_action_group(field, "attach", G_ACTION_GROUP(attachActions));
+  g_object_unref(attachActions);
   gtk_box_append(GTK_BOX(field), attach);
 
   _input = gtk_text_view_new();
@@ -1856,6 +1986,17 @@ void ChatView::chooseFiles() {
   g_object_unref(dialog);
 }
 
+void ChatView::chooseLocation() {
+  if (_editing || _recording || !Data::CanSendTexts(_thread)) return;
+  const auto weak = base::make_weak(this);
+  ShowLocationPicker(_window, _thread, _replyTo, [=] {
+    if (const auto strong = weak.get()) {
+      strong->cancelReplyOrEdit();
+      strong->scrollToBottom();
+    }
+  });
+}
+
 void ChatView::paste() {
   auto *clipboard = gtk_widget_get_clipboard(_input);
   const auto kind = ClassifyPaste(gdk_clipboard_get_formats(clipboard));
@@ -2107,6 +2248,17 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
   if (item->isSponsored()) return;
   auto *menu = g_menu_new();
   const auto now = base::unixtime::now();
+  // The reactions on top, as in the phone apps.
+  auto *strip = item->isService() ? nullptr : MakeReactionsStrip(item, _window, nullptr);
+  if (strip) {
+    auto *section = g_menu_new();
+    auto *custom = g_menu_item_new(nullptr, nullptr);
+    g_menu_item_set_attribute(custom, "custom", "s", "reactions");
+    g_menu_append_item(section, custom);
+    g_object_unref(custom);
+    g_menu_append_section(menu, nullptr, G_MENU_MODEL(section));
+    g_object_unref(section);
+  }
   if (!item->isService() && Data::CanSendTexts(_thread)) {
     g_menu_append(menu, U8(tr::lng_context_reply_msg(tr::now)).c_str(), "msg.reply");
   }
@@ -2121,12 +2273,29 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
   if ((document && !document->sticker()) || photo) {
     g_menu_append(menu, U8(tr::lng_context_save_file(tr::now)).c_str(), "msg.save");
   }
+  if (Live().sharing(item->fullId())) {
+    g_menu_append(menu, U8(tr::lng_group_call_screen_share_stop(tr::now)).c_str(), "msg.stop-live");
+  }
+  if (CanShowWhoReacted(item)) {
+    g_menu_append(menu, U8(tr::lng_context_seen_reacted(tr::now, lt_count, ReactionsCount(item))).c_str(), "msg.reacted");
+  }
   if (item->canDelete()) {
     g_menu_append(menu, U8(tr::lng_context_delete_msg(tr::now)).c_str(), "msg.delete");
   }
 
   auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
   g_object_unref(menu);
+  if (strip) {
+    // Choosing a reaction closes the menu (the popover is destroyed after it is closed).
+    auto *frame = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_box_append(GTK_BOX(frame), strip);
+    gtk_popover_menu_add_child(GTK_POPOVER_MENU(popover), frame, "reactions");
+    for (auto *child = gtk_widget_get_first_child(strip); child; child = gtk_widget_get_next_sibling(child)) {
+      if (GTK_IS_BUTTON(child)) {
+        Connect<void(GtkButton *)>(child, "clicked", [popover](GtkButton *) { gtk_popover_popdown(GTK_POPOVER(popover)); });
+      }
+    }
+  }
   gtk_widget_set_parent(popover, widget);
   GdkRectangle rect = {int(x), int(y), 1, 1};
   gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
@@ -2184,6 +2353,8 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
     }
   }));
   add("delete", withItem([](ChatView *self, not_null<HistoryItem *> item) { self->confirmDelete(item); }));
+  add("stop-live", withItem([](ChatView *, not_null<HistoryItem *> item) { Live().stop(item->fullId()); }));
+  add("reacted", withItem([](ChatView *self, not_null<HistoryItem *> item) { ShowWhoReacted(self->_window, item); }));
   gtk_widget_insert_action_group(popover, "msg", G_ACTION_GROUP(group));
   g_object_unref(group);
   gtk_popover_popup(GTK_POPOVER(popover));
@@ -2222,6 +2393,10 @@ void ChatView::openPeer(not_null<PeerData *> peer) {
 
 void ChatView::openPhoto(not_null<PhotoData *> photo, not_null<HistoryItem *> item) {
   _window->openPhoto(photo, item->fullId());
+}
+
+void ChatView::openLocation(not_null<HistoryItem *> item) {
+  ShowLocation(_window, item);
 }
 
 void ChatView::openDocument(not_null<DocumentData *> document, not_null<HistoryItem *> item) {

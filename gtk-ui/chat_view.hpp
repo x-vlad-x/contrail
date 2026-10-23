@@ -52,6 +52,7 @@ public:
   [[nodiscard]] GtkWidget *widget() const { return _root; }
   [[nodiscard]] not_null<History *> history() const { return _history; }
   [[nodiscard]] not_null<Data::Thread *> thread() const { return _thread; }
+  [[nodiscard]] not_null<MainWindow *> window() const { return _window; }
 
   void showAt(MsgId id);
   // The message at the top of the screen and its place there; none at the bottom of the chat.
@@ -62,6 +63,8 @@ public:
   void openPeer(not_null<PeerData *> peer);
   void openPhoto(not_null<PhotoData *> photo, not_null<HistoryItem *> item);
   void openDocument(not_null<DocumentData *> document, not_null<HistoryItem *> item);
+  void openLocation(not_null<HistoryItem *> item);
+  void refreshMessage(FullMsgId id);
   void showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y);
   void replyTo(not_null<HistoryItem *> item);
   void sendText(const QString &text);  // Bot commands from links.
@@ -94,6 +97,11 @@ private:
   void removeRow(const HistoryItem *item);
   MessageWidget *rowFor(const HistoryItem *item) const;
   void refreshItem(const HistoryItem *item);
+  // The core says a message's data changed: only the reactions, if it was them.
+  void refreshItemData(const HistoryItem *item);
+  void refreshLiveBanner();
+  void readReactions();
+  void pollReactions();
   void refreshTransfer(FullMsgId id);
 
   void scrollToBottom();
@@ -118,6 +126,7 @@ private:
   void cancelReplyOrEdit();
   void showReplyBar(const QString &title, const QString &text, const char *icon);
   void chooseFiles();
+  void chooseLocation();
   // The files from the chooser or a pasted picture, shown before sending (AttachDialog).
   void openAttach(const QStringList &paths, QImage image = QImage(), const QString &textOnCancel = QString());
   bool sendAttachments(Ui::PreparedList &list, const Ui::SendFilesWay &way, const QString &caption,
@@ -142,6 +151,7 @@ private:
 
   GtkWidget *_root = nullptr;
   GtkWidget *_title = nullptr;
+  GtkWidget *_liveBanner = nullptr;
   GtkWidget *_list = nullptr;
   GtkWidget *_scroll = nullptr;
   GtkAdjustment *_adjustment = nullptr;

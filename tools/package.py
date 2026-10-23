@@ -459,8 +459,9 @@ def build_deb(args, bundle, version, info):
         f"Package: contrail\nVersion: {package_version}\nArchitecture: {deb_arch}\n"
         f"Maintainer: {MAINTAINER}\nSection: net\nPriority: optional\n"
         f"Installed-Size: {installed_size}\nDepends: {depends}\n"
-        # pactl switches the call audio between the earpiece, the loudspeaker and headphones.
-        "Recommends: pulseaudio-utils, xdg-desktop-portal, xdg-utils, fonts-noto-color-emoji\n"
+        # pactl switches the call audio between the earpiece, the loudspeaker and headphones; GeoClue knows where
+        # the device is (sending a location).
+        "Recommends: pulseaudio-utils, xdg-desktop-portal, xdg-utils, fonts-noto-color-emoji, geoclue-2.0\n"
         f"Homepage: {HOMEPAGE}\n"
         "Description: unofficial Telegram client with a GTK interface for Linux phones\n"
         + "".join(f" {line}\n" if line else " .\n" for line in DESCRIPTION.splitlines()))
@@ -499,6 +500,8 @@ URL:            @HOMEPAGE@
 Recommends:     pulseaudio-utils
 Recommends:     xdg-desktop-portal
 Recommends:     xdg-utils
+# GeoClue knows where the device is (sending a location).
+Recommends:     geoclue2
 
 %description
 @DESCRIPTION@

@@ -118,7 +118,8 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
     _forum->chatsListLoadedEvents() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
     using TopicFlag = Data::TopicUpdate::Flag;
     _session->changes().topicUpdates(TopicFlag::Title | TopicFlag::Notifications | TopicFlag::Closed
-                                     | TopicFlag::UnreadView | TopicFlag::UnreadMentions | TopicFlag::CloudDraft)
+                                     | TopicFlag::UnreadView | TopicFlag::UnreadMentions | TopicFlag::UnreadReactions
+                                     | TopicFlag::CloudDraft)
         | rpl::on_next([=](const Data::TopicUpdate &update) { updateEntry(update.topic); }, _lifetime);
   } else {
     data.chatsListChanges() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
@@ -137,7 +138,8 @@ ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_
   }, _lifetime);
   using HistoryFlag = Data::HistoryUpdate::Flag;
   _session->changes().historyUpdates(HistoryFlag::IsPinned | HistoryFlag::UnreadView | HistoryFlag::Folder
-                                     | HistoryFlag::UnreadMentions | HistoryFlag::OutboxRead | HistoryFlag::CloudDraft)
+                                     | HistoryFlag::UnreadMentions | HistoryFlag::UnreadReactions
+                                     | HistoryFlag::OutboxRead | HistoryFlag::CloudDraft)
       | rpl::on_next([=](const Data::HistoryUpdate &update) {
           updateEntry(update.history);
           if (update.flags & (HistoryFlag::IsPinned | HistoryFlag::Folder)) {
@@ -569,15 +571,16 @@ void ChatList::updateRow(Row &row) {
 
   const auto badges = entry->chatListBadgesState();
   const auto pinned = entry->isPinnedDialog(FilterId());
-  if (badges.unread || badges.mention) {
-    auto text = badges.mention ? u"@"_q : QString();
+  if (badges.unread || badges.mention || badges.reaction) {
+    // A new reaction to the user's message: a heart, as in the phone apps.
+    auto text = badges.mention ? u"@"_q : badges.reaction ? QString::fromUtf8("\xE2\x9D\xA4") : QString();
     if (badges.unreadCounter > 0) {
       text = (text.isEmpty() ? QString() : text + ' ') + QString::number(badges.unreadCounter);
     } else if (text.isEmpty()) {
       text = u" "_q;
     }
     gtk_label_set_text(GTK_LABEL(row.badge), U8(text).c_str());
-    if (badges.unreadMuted && !badges.mention) {
+    if (badges.unreadMuted && !badges.mention && !(badges.reaction && !badges.reactionMuted)) {
       gtk_widget_add_css_class(row.badge, "muted");
     } else {
       gtk_widget_remove_css_class(row.badge, "muted");
