@@ -49,11 +49,17 @@ flatpak run io.github.x_vlad_x.Contrail
 
 Flatpak asks to add Flathub for the runtime if your system doesn't have it yet. The app then appears in the app
 list. `flatpak uninstall --user io.github.x_vlad_x.Contrail` removes it, `flatpak update` doesn't update it:
-install a newer file the same way.
+install a newer file the same way. With updates, install it from Contrail's Flatpak repository instead (the account
+stays):
+
+```sh
+flatpak remote-add --user --if-not-exists xvlad https://flatpak.xvlad.com/xvlad.flatpakrepo
+flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail
+```
 
 The sandbox allows what Contrail uses: the network, sound, the camera and microphone (all devices), the Downloads
 and Pictures folders, notifications, the tray icon, and on phones feedbackd (the ringtone), the session's lock
-state and the proximity sensor. Files you attach are picked through the system's file chooser.
+state and the proximity sensor. Your location goes through the desktop portal, which asks you first. Files you attach are picked through the system's file chooser.
 
 ## AppImage
 
