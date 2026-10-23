@@ -1,11 +1,10 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.2.0
+# Contrail 0.2.1
 
-A feature release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones
-and desktops, built on the Telegram Desktop 7.3.1 core: albums, sending pasted pictures and files, a photo
-viewer that zooms properly, much less memory and fewer wakeups in the background, and packages about a third
-smaller. Contrail is an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by
+A bugfix release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and
+desktops: a chat with a link preview could freeze the app on a phone. It is built on the Telegram Desktop 7.3.3
+core. Contrail is an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by
 Telegram.
 
 <p align="center">
@@ -20,24 +19,32 @@ Telegram.
 
 | Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
 | --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.2.0-1_amd64.deb` | `contrail_0.2.0-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.2.0-1.x86_64.rpm` | `contrail-0.2.0-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.2.0-x86_64.flatpak` | `Contrail-0.2.0-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.2.0-x86_64.AppImage` | `Contrail-0.2.0-aarch64.AppImage` |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.2.1-1_amd64.deb` | `contrail_0.2.1-1_arm64.deb` |
+| Fedora, openSUSE | `contrail-0.2.1-1.x86_64.rpm` | `contrail-0.2.1-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.2.1-x86_64.flatpak` | `Contrail-0.2.1-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.2.1-x86_64.AppImage` | `Contrail-0.2.1-aarch64.AppImage` |
 
 ```sh
-sudo apt install ./contrail_0.2.0-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.2.0-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
-flatpak install --user ./Contrail-0.2.0-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.2.0-x86_64.AppImage && ./Contrail-0.2.0-x86_64.AppImage
+sudo apt install ./contrail_0.2.1-1_arm64.deb              # DEB
+sudo dnf install ./contrail-0.2.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
+flatpak install --user ./Contrail-0.2.1-aarch64.flatpak    # Flatpak
+chmod +x Contrail-0.2.1-x86_64.AppImage && ./Contrail-0.2.1-x86_64.AppImage
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
 needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.1.1 or 0.1.0, install the new DEB, RPM or Flatpak the same way, or
-run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
+keeps your account and chats). To update from 0.2.0, 0.1.1 or 0.1.0, install the new DEB, RPM or Flatpak the same
+way, or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
 
-## What's new since 0.1.1
+## What's new since 0.2.0
+
+- **No more freezes on link previews**: a chat with a link preview that has a picture could freeze Contrail for
+  good as soon as it was opened, on a phone-sized screen. GTK went round in circles laying out the message,
+  because the preview's picture gets taller as the bubble gets wider. The bubble is now laid out without that
+  question.
+- **Telegram Desktop 7.3.3** core instead of 7.3.1.
+
+## Earlier, in 0.2.0
 
 - **Albums**: photos and videos sent together appear as one message in Telegram's own grid, files and music sent
   together one under the other, every caption kept. Each photo or video of an album opens, has its menu (reply,
@@ -121,18 +128,16 @@ Desktop doesn't have them either.
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- Each package was installed the way users do and started in a clean container with an offline, made-up demo
-  account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files, outside
-  the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04 (ARM64 also in FuriOS
-  14's userland), the RPM with `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13,
-  Ubuntu 24.04, Fedora 44 and (x86_64) Arch Linux, the x86_64 Flatpak with `flatpak` on Fedora 44. The ARM64
-  containers ran under qemu-user emulation.
-- On the FuriLabs FLX1s (FuriOS 14, Phosh) with a real account, in Saved Messages: albums of 2, 3, 10 and 11
-  photos, photos with a video, captions, files sent as documents, deleting a message of an album, sending while
-  the connection dropped; pasting a screenshot, files and text through the Wayland clipboard; pinch, double tap
-  and drag in the photo viewer with real touches; closing and opening the window (the chat and its place come
-  back, a voice message being recorded goes on). The ARM64 AppImage played MP3, FLAC, M4A and Ogg files with
-  its own FFmpeg, also at double speed, recorded a voice message, and made previews of VP9 and H.264 videos.
+- Each x86_64 package was installed the way users do and started in a clean container with an offline, made-up
+  demo account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files,
+  outside the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
+  `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
+  Arch Linux, the Flatpak with `flatpak` on Fedora 44.
+- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage with a real account: the chat that froze 0.2.0
+  (a link preview with a picture) opens and scrolls, older pages load; in Saved Messages, 19 rounds of sending a
+  picture and deleting it.
+- The ARM64 DEB, RPM and Flatpak weren't installed in containers for this release; they are built the same way
+  as the AppImage, from the same program. 0.2.0's packages were, and nothing in the packaging changed since.
 - Not checked with these files: calls with another person, notifications and calls on a locked phone, writing
   in a group with topics, pasting files through Flatpak's portal, Wayland desktops. Battery use in the
   background wasn't measured.
@@ -140,8 +145,8 @@ Desktop doesn't have them either.
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.2.0-sources.tar.gz` holds Contrail's
-sources; the `Contrail-0.2.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
+contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.2.1-sources.tar.gz` holds Contrail's
+sources; the `Contrail-0.2.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
 packages are built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.

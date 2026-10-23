@@ -1,8 +1,8 @@
 diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
-index 811707d..7e94351 100644
+index 11d2fc6..e6aaad8 100644
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
-@@ -2782,7 +2782,12 @@ elseif (build_winstore)
+@@ -2930,7 +2930,12 @@ elseif (build_winstore)
      )
  endif()
  
@@ -48,10 +48,10 @@ index a67723f..898a7fb 100644
  	const auto trackFileName = Core::App().settings().getSoundPath(
  		(_type == Type::Outgoing)
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
-index 7a309ac..480e2e5 100644
+index 7172206..0254d7d 100644
 --- a/Telegram/SourceFiles/core/application.cpp
 +++ b/Telegram/SourceFiles/core/application.cpp
-@@ -109,6 +109,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -112,6 +112,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  
  #include <ksandbox.h>
  
@@ -66,7 +66,7 @@ index 7a309ac..480e2e5 100644
  namespace Core {
  namespace {
  
-@@ -480,6 +488,11 @@ void Application::run() {
+@@ -484,6 +492,11 @@ void Application::run() {
  
  	Test::Fire(u"launch_finished"_q);
  	Test::Start();
@@ -78,7 +78,7 @@ index 7a309ac..480e2e5 100644
  }
  
  void Application::autoRegisterUrlScheme() {
-@@ -660,6 +673,10 @@ void Application::createTray() {
+@@ -664,6 +677,10 @@ void Application::createTray() {
  }
  
  void Application::activate() {
@@ -89,7 +89,7 @@ index 7a309ac..480e2e5 100644
  	for (const auto &window : _windowStack) {
  		if (window == _lastActiveWindow) {
  			break;
-@@ -1478,6 +1495,13 @@ bool Application::savingPositionFor(
+@@ -1507,6 +1524,13 @@ bool Application::savingPositionFor(
  }
  
  bool Application::hasActiveWindow(not_null<Main::Session*> session) const {
@@ -155,7 +155,7 @@ index 8faa6d9..f0ec0d5 100644
  			return qEnvironmentVariable("FLATPAK_ID");
  		}
 diff --git a/Telegram/SourceFiles/window/window_controller.cpp b/Telegram/SourceFiles/window/window_controller.cpp
-index 8f64912..fde8834 100644
+index c286914..cb6c287 100644
 --- a/Telegram/SourceFiles/window/window_controller.cpp
 +++ b/Telegram/SourceFiles/window/window_controller.cpp
 @@ -41,6 +41,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -171,7 +171,7 @@ index 8f64912..fde8834 100644
  namespace Window {
  namespace {
  
-@@ -495,6 +501,10 @@ void Controller::sideBarChanged() {
+@@ -490,6 +496,10 @@ void Controller::sideBarChanged() {
  }
  
  void Controller::activate() {
@@ -180,5 +180,5 @@ index 8f64912..fde8834 100644
 +	return;
 +#endif // CONTRAIL_GTK
  	_widget.activate();
+ 	Core::App().registerWindowActivation(&_widget);
  }
- 
