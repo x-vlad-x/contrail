@@ -138,7 +138,7 @@ git -C "$SRC_DIR" checkout -q -- .
 git -C "$SRC_DIR" submodule foreach --quiet --recursive 'git checkout -q -- .'
 for p in "$SCRIPT_DIR"/patches/*.patch; do
   echo "  $(basename "$p")"
-  patch -p1 -s -N -d "$SRC_DIR" < "$p" || die "patch $(basename "$p") does not apply, regenerate it for the new version"
+  patch -p1 -s -N --no-backup-if-mismatch -d "$SRC_DIR" < "$p" || die "patch $(basename "$p") does not apply, regenerate it for the new version"
 done
 
 # --- build container ---------------------------------------------------------
