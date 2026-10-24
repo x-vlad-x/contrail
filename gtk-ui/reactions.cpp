@@ -17,8 +17,13 @@
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "ui/text/format_values.h"
+#include "ui/text/text_custom_emoji.h"
+
+#include <QtGui/QPainter>
 
 #include <rpl/lifetime.h>
+
+#include <cstring>
 
 namespace Contrail {
 namespace {
@@ -31,7 +36,62 @@ using Data::ReactionId;
 
 const char kStar[] = "\xE2\xAD\x90";  // A paid reaction: Telegram Stars.
 
-GtkWidget *ReactionLabel(not_null<Main::Session *> session, const ReactionId &id, const char *cssClass) {
+// A custom emoji drawn once into a picture, its first frame: dozens of animated ones in the messages on the screen
+// would cost the battery (as Telegram's power saving, which stops them).
+struct CustomReaction {
+  std::unique_ptr<Ui::Text::CustomEmoji> emoji;
+  GtkWidget *picture = nullptr;
+  int pixels = 0;
+  bool drawn = false;
+
+  void draw() {
+    if (drawn || !emoji) return;
+    auto image = QImage(QSize(pixels, pixels), QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    GdkRGBA rgba;
+    gtk_widget_get_color(picture, &rgba);
+    {
+      auto painter = QPainter(&image);
+      emoji->paint(painter, {
+          .textColor = QColor::fromRgbF(rgba.red, rgba.green, rgba.blue, rgba.alpha),
+          .now = crl::now(),
+          .paused = true,
+      });
+    }
+    if (!emoji->ready()) return;  // Drawn again when it is loaded (`update`).
+    drawn = true;
+    if (auto *texture = ToTexture(image)) {
+      gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
+      g_object_unref(texture);
+    }
+  }
+};
+
+// The size of a reaction's emoji, as large as the emoji text next to it.
+int ReactionSize(const char *cssClass) {
+  const auto is = [&](const char *name) { return !strcmp(cssClass, name); };
+  return is("reaction-strip-emoji") ? 26 : is("reaction-grid-emoji") ? 32 : is("reaction-row-emoji") ? 22 : 18;
+}
+
+// The emoji of a reaction: a label, or a picture of a custom emoji (Telegram Premium).
+GtkWidget *ReactionView(not_null<Main::Session *> session, const ReactionId &id, const char *cssClass) {
+  if (const auto custom = id.custom()) {
+    constexpr auto kScale = 3;  // Sharp on phones' scaled screens.
+    const auto size = ReactionSize(cssClass);
+    auto *picture = gtk_picture_new();
+    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_CONTAIN);
+    gtk_widget_set_size_request(picture, size, size);
+    gtk_widget_set_valign(picture, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(picture, "reaction-custom");
+    auto *state = AttachData(picture, "contrail-custom-reaction", std::make_unique<CustomReaction>());
+    state->picture = picture;
+    state->pixels = size * kScale;
+    // The core loads the document (and the sticker set it is in) and calls back when there is something new.
+    state->emoji = session->data().customEmojiManager().create(
+        custom, [state] { state->draw(); }, Data::CustomEmojiManager::SizeTag::Normal, state->pixels);
+    state->draw();
+    return picture;
+  }
   auto *label = gtk_label_new(nullptr);
   gtk_widget_add_css_class(label, cssClass);
   SetReactionLabel(label, session, id);
@@ -62,7 +122,7 @@ GtkWidget *ChooserButton(not_null<HistoryItem *> item, const ReactionId &id, con
                          Fn<void()> chosen) {
   const auto session = &item->history()->session();
   auto *button = gtk_button_new();
-  gtk_button_set_child(GTK_BUTTON(button), ReactionLabel(session, id, labelClass));
+  gtk_button_set_child(GTK_BUTTON(button), ReactionView(session, id, labelClass));
   gtk_widget_add_css_class(button, "flat");
   gtk_widget_add_css_class(button, "reaction-choice");
   const auto chosenIds = item->chosenReactions();
@@ -86,12 +146,13 @@ void SetReactionLabel(GtkWidget *label, not_null<Main::Session *> session, const
     gtk_label_set_text(GTK_LABEL(label), kStar);
     return;
   } else if (auto emoji = id.emoji(); !emoji.isEmpty()) {
-    // Telegram's heart is "❤" alone, which fonts draw as a plain text heart: the emoji one asks for U+FE0F.
-    if (emoji.size() == 1) emoji += QChar(0xFE0F);
+    // Telegram's heart is "❤" alone, the dove "🕊" too: fonts draw such characters as plain text in the label's
+    // color unless U+FE0F asks for the emoji.
+    if (emoji.toUcs4().size() == 1) emoji += QChar(0xFE0F);
     gtk_label_set_text(GTK_LABEL(label), U8(emoji).c_str());
     return;
   }
-  // A custom emoji: the emoji it stands for, once its document is known.
+  // A custom emoji where only text goes: the emoji it stands for, once its document is known.
   const auto alt = [](not_null<DocumentData *> document) {
     const auto sticker = document->sticker();
     return (sticker && !sticker->alt.isEmpty()) ? sticker->alt : QString::fromUtf8("\xE2\x9D\x94");
@@ -159,7 +220,7 @@ GtkWidget *MakeReactionsBar(not_null<HistoryItem *> item, not_null<MainWindow *>
     if (id.paid()) gtk_widget_add_css_class(chip, "paid");
     if (item->reactionsAreTags()) gtk_widget_add_css_class(chip, "tag");
     auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_box_append(GTK_BOX(box), ReactionLabel(session, id, "reaction-emoji"));
+    gtk_box_append(GTK_BOX(box), ReactionView(session, id, "reaction-emoji"));
     const auto i = recent.find(id);
     const auto who = (showUserpics && i != recent.end() && int(i->second.size()) == reaction.count)
                          ? &i->second
@@ -314,7 +375,7 @@ void ShowWhoReacted(not_null<MainWindow *> window, not_null<HistoryItem *> item,
               adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
                                             Escape(peer->isSelf() ? tr::lng_saved_messages(tr::now) : peer->name()).c_str());
               adw_action_row_add_prefix(ADW_ACTION_ROW(row), MakeAvatar(peer, 36));
-              auto *emoji = ReactionLabel(session, Data::ReactionFromMTP(fields.vreaction()), "reaction-row-emoji");
+              auto *emoji = ReactionView(session, Data::ReactionFromMTP(fields.vreaction()), "reaction-row-emoji");
               adw_action_row_add_suffix(ADW_ACTION_ROW(row), emoji);
               gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
               Connect<void(AdwActionRow *)>(row, "activated", [=](AdwActionRow *) {

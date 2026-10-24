@@ -38,7 +38,8 @@ void ShowWhoReacted(not_null<MainWindow *> window, not_null<HistoryItem *> item,
 void ToggleQuickReaction(not_null<HistoryItem *> item);
 void ToggleReaction(not_null<HistoryItem *> item, const Data::ReactionId &id);
 
-// The emoji of a reaction; a custom emoji shows the emoji it stands for (resolved later: `label` is updated).
+// The emoji of a reaction as text; a custom emoji shows the emoji it stands for (resolved later: `label` is
+// updated). Under messages and in the menus a custom emoji is its picture.
 void SetReactionLabel(GtkWidget *label, not_null<Main::Session *> session, const Data::ReactionId &id);
 [[nodiscard]] int ReactionsCount(not_null<HistoryItem *> item);
 

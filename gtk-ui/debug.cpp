@@ -7,7 +7,7 @@
 //           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
 //             record-cancel|state |
 //           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
-//             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
+//             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|custom-reactions|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
 //             live-start:SECONDS (Saved Messages)] |
 //           map | screenshot [call] PATH
 

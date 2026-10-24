@@ -1449,6 +1449,16 @@ void ChatView::debugHistory(const QString &action) {
       g_message("Reactions of %lld: [%s] can=%d tags=%d unread=%d", (long long)item->id.bare, U8(list.join(' ')).c_str(),
                 int(item->canReact()), int(item->reactionsAreTags()), int(item->hasUnreadReaction()));
     }
+  } else if (action == u"custom-reactions"_q) {
+    // The loaded messages with custom emoji (Telegram Premium) among their reactions.
+    for (const auto &[item, row] : _itemRows) {
+      for (const auto &reaction : item->reactionsWithLocal()) {
+        if (reaction.id.custom()) {
+          g_message("Custom reaction on %lld: %llu x%d", (long long)item->id.bare,
+                    (unsigned long long)reaction.id.custom(), reaction.count);
+        }
+      }
+    }
   } else if (action.startsWith(u"menu:"_q)) {
     const auto item = _history->owner().message(_history->peer, MsgId(action.mid(5).toLongLong()));
     if (const auto row = item ? rowFor(item) : nullptr) showMessageMenu(item, row->widgetFor(item), 40, 20);
