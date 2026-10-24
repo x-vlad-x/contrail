@@ -55,3 +55,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libgtk4-layer-shell-dev:arm64 \
     && rm -rf /var/lib/apt/lists/*
+# The map of locations (libshumate, as GNOME Maps).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libshumate-dev:arm64 \
+    && rm -rf /var/lib/apt/lists/*

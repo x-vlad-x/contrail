@@ -230,6 +230,105 @@ avatar.archive-avatar {
 .reply-quote.peer-color-5 .reply-name { color: #3b82d1; }
 .reply-quote.peer-color-6 .reply-name { color: #d4609e; }
 
+/* --- reactions --- */
+.reactions {
+  margin-top: 2px;
+}
+.reactions > flowboxchild {
+  padding: 0;
+}
+.reaction-chip {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background-color: alpha(var(--accent-color), 0.12);
+  color: var(--accent-color);
+  font-weight: bold;
+  font-size: 0.85em;
+}
+.reaction-chip.chosen {
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
+.bubble.outgoing .reaction-chip {
+  background-color: alpha(currentColor, 0.1);
+  color: inherit;
+}
+.bubble.outgoing .reaction-chip.chosen {
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
+.reaction-chip.paid {
+  background-color: alpha(#e8a600, 0.2);
+  color: #9a6c00;
+}
+.reaction-emoji {
+  font-size: 1.15em;
+}
+.reaction-userpics avatar {
+  margin-left: -4px;
+}
+.reaction-userpics avatar:first-child {
+  margin-left: 0;
+}
+.reactions-strip {
+  padding: 2px 4px 6px 4px;
+}
+.reaction-choice {
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 999px;
+}
+.reaction-choice.chosen {
+  background-color: alpha(var(--accent-bg-color), 0.3);
+}
+.reaction-strip-emoji {
+  font-size: 1.45em;
+}
+.reaction-grid-emoji {
+  font-size: 1.8em;
+}
+.reaction-row-emoji {
+  font-size: 1.3em;
+}
+
+/* --- locations --- */
+.map-pin {
+  color: #e53945;
+  -gtk-icon-shadow: 0 1px 2px alpha(black, 0.45);
+}
+.map-position {
+  background-color: #3584e4;
+  border: 3px solid white;
+  border-radius: 999px;
+  box-shadow: 0 0 0 6px alpha(#3584e4, 0.25), 0 1px 3px alpha(black, 0.4);
+}
+.map-button {
+  min-width: 42px;
+  min-height: 42px;
+}
+.map-button.active {
+  color: var(--accent-color);
+}
+.location-row-icon {
+  padding: 9px;
+  border-radius: 999px;
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+}
+.location-row-icon.live-location {
+  background-color: #e53945;
+  color: white;
+}
+.location-row-icon.venue {
+  background-color: alpha(currentColor, 0.1);
+  color: inherit;
+}
+.location-details {
+  padding: 12px;
+}
+
 /* --- message field --- */
 .composer {
   padding: 6px;

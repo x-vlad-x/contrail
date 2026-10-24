@@ -6,14 +6,17 @@
 //           close | present | state | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
 //             record-cancel|state |
-//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT] |
-//           screenshot [call] PATH
+//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
+//             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|custom-reactions|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
+//             live-start:SECONDS (Saved Messages)] |
+//           map | screenshot [call] PATH
 
 #include "debug.hpp"
 
 #include "demo.hpp"
 
 #include "main_window.hpp"
+#include "map_view.hpp"
 #include "zoom_view.hpp"
 #include "core/sandbox.h"
 
@@ -50,6 +53,30 @@ GtkWidget *FindWindow(const char *cssClass) {
   return result;
 }
 
+// Open popovers (menus) are surfaces of their own: drawn over the window where the compositor shows them.
+void SnapshotPopovers(GtkWidget *root, GtkWidget *window, GtkSnapshot *snapshot) {
+  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
+    if (GTK_IS_POPOVER(child) && gtk_widget_get_mapped(child)) {
+      auto *surface = gtk_native_get_surface(GTK_NATIVE(child));
+      if (surface && GDK_IS_POPUP(surface)) {
+        double windowX = 0, windowY = 0, popoverX = 0, popoverY = 0;
+        gtk_native_get_surface_transform(GTK_NATIVE(window), &windowX, &windowY);
+        gtk_native_get_surface_transform(GTK_NATIVE(child), &popoverX, &popoverY);
+        const auto x = gdk_popup_get_position_x(GDK_POPUP(surface)) + popoverX - windowX;
+        const auto y = gdk_popup_get_position_y(GDK_POPUP(surface)) + popoverY - windowY;
+        auto *paintable = gtk_widget_paintable_new(child);
+        gtk_snapshot_save(snapshot);
+        const auto origin = GRAPHENE_POINT_INIT(float(x), float(y));
+        gtk_snapshot_translate(snapshot, &origin);
+        gdk_paintable_snapshot(paintable, snapshot, gtk_widget_get_width(child), gtk_widget_get_height(child));
+        gtk_snapshot_restore(snapshot);
+        g_object_unref(paintable);
+      }
+    }
+    SnapshotPopovers(child, window, snapshot);
+  }
+}
+
 void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   if (!window || !gtk_widget_get_realized(window)) {
     g_warning("Screenshot: no window");
@@ -62,6 +89,7 @@ void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   auto *snapshot = gtk_snapshot_new();
   gtk_snapshot_scale(snapshot, float(scale), float(scale));
   gdk_paintable_snapshot(paintable, snapshot, width, height);
+  SnapshotPopovers(window, window, snapshot);
   auto *node = gtk_snapshot_free_to_node(snapshot);
   const auto bounds = GRAPHENE_RECT_INIT(0, 0, float(width * scale), float(height * scale));
   auto *texture = gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(window)), node, &bounds);
@@ -70,6 +98,14 @@ void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   g_object_unref(texture);
   gsk_render_node_unref(node);
   g_object_unref(paintable);
+}
+
+GtkWidget *FindByClass(GtkWidget *root, const char *cssClass) {
+  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
+    if (gtk_widget_get_mapped(child) && gtk_widget_has_css_class(child, cssClass)) return child;
+    if (auto *found = FindByClass(child, cssClass)) return found;
+  }
+  return nullptr;
 }
 
 // Activates the first visible row (AdwPreferencesRow or a list row with a label) containing |text|.
@@ -160,6 +196,17 @@ void Run(MainWindow &w, const std::string &cmdline) {
     StartDemo();
   } else if (cmd == "demo-sponsored") {
     AddDemoSponsored();
+  } else if (cmd == "map") {
+    // The open map (a location's, the location picker's): where it is, its zoom and rotation.
+#ifdef CONTRAIL_SHUMATE
+    if (auto *map = w.widget() ? FindByClass(w.widget(), "contrail-map") : nullptr) {
+      auto lat = 0., lon = 0.;
+      MapCenter(map, &lat, &lon);
+      g_message("Map: center=%.6f,%.6f zoom=%.3f rotation=%.3f", lat, lon, MapZoom(map), MapRotation(map));
+    } else {
+      g_message("Map: none");
+    }
+#endif  // CONTRAIL_SHUMATE
   } else if (cmd == "screenshot") {
     // screenshot [call] PATH: the window drawn by GTK itself, 3x, nothing of the phone around it.
     const auto value = Q(arg.c_str());

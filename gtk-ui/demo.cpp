@@ -209,6 +209,34 @@ MTPMessageMedia VoiceMedia(DocumentId id, int seconds, TimeId date) {
                                   MTPVector<MTPDocument>(), MTPPhoto(), MTPint(), MTPint());
 }
 
+// The reactions to a message: emoji, how many, whether one of them is the user's; and who, in small chats.
+struct Reaction {
+  QString emoji;
+  int count = 0;
+  bool mine = false;
+};
+MTPMessageReactions Reactions(const std::vector<Reaction> &list, const std::vector<std::pair<PeerId, QString>> &recent = {}) {
+  auto results = QVector<MTPReactionCount>();
+  auto order = 0;
+  for (const auto &reaction : list) {
+    using Flag = MTPDreactionCount::Flag;
+    results.push_back(MTP_reactionCount(MTP_flags(reaction.mine ? Flag::f_chosen_order : Flag(0)), MTP_int(++order),
+                                        MTP_reactionEmoji(MTP_string(reaction.emoji)), MTP_int(reaction.count)));
+  }
+  auto peers = QVector<MTPMessagePeerReaction>();
+  for (const auto &[peer, emoji] : recent) {
+    peers.push_back(MTP_messagePeerReaction(MTP_flags(0), peerToMTP(peer), MTP_int(0), MTP_reactionEmoji(MTP_string(emoji))));
+  }
+  using Flag = MTPDmessageReactions::Flag;
+  return MTP_messageReactions(MTP_flags(recent.empty() ? Flag(0) : (Flag::f_recent_reactions | Flag::f_can_see_list)),
+                              MTP_vector<MTPReactionCount>(results), MTP_vector<MTPMessagePeerReaction>(peers),
+                              MTPVector<MTPMessageReactor>());
+}
+
+MTPGeoPoint Geo(double lat, double lon) {
+  return MTP_geoPoint(MTP_flags(0), MTP_double(lon), MTP_double(lat), MTP_long(1), MTPint());
+}
+
 struct Message {
   MsgId id;
   PeerId from;  // Empty for channel posts.
@@ -217,6 +245,8 @@ struct Message {
   std::optional<MTPMessageMedia> media;
   MsgId replyTo = 0;
   int views = 0;
+  std::optional<MTPMessageReactions> reactions;
+  TimeId edited = 0;
 };
 
 MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &m) {
@@ -230,6 +260,8 @@ MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &
   if (m.replyTo) flags |= Flag::f_reply_to;
   if (!entities.entities.empty()) flags |= Flag::f_entities;
   if (m.views) flags |= Flag::f_views | Flag::f_post;
+  if (m.reactions) flags |= Flag::f_reactions;
+  if (m.edited) flags |= Flag::f_edit_date | Flag::f_edit_hide;
   return MTP_message(
       MTP_flags(flags), MTP_int(m.id.bare), m.from ? peerToMTP(m.from) : MTPPeer(),
       MTPint(),     // from_boosts_applied
@@ -250,8 +282,8 @@ MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &
       m.views ? MTP_int(m.views) : MTPint(),  // views
       MTPint(),                               // forwards
       MTPMessageReplies(),
-      MTPint(),  // edit_date
-      MTPstring(), MTPlong(), MTPMessageReactions(), MTPVector<MTPRestrictionReason>(),
+      m.edited ? MTP_int(m.edited) : MTPint(),  // edit_date
+      MTPstring(), MTPlong(), m.reactions.value_or(MTPMessageReactions()), MTPVector<MTPRestrictionReason>(),
       MTPint(),   // ttl_period
       MTPint(),   // quick_reply_shortcut_id
       MTPlong(),  // effect
@@ -329,26 +361,38 @@ void Fill(not_null<Main::Session *> session) {
   AddChat(session, maya, {
       {1, maya, minutes(60 * 15 + 20), u"Are we still on for the hike on Saturday? 🥾"_q},
       {2, self, minutes(60 * 15 + 18), u"Absolutely! The forecast says sunny all weekend ☀️"_q},
-      {3, maya, minutes(95), u"This is the lake I was telling you about"_q, PhotoMedia(session, 8100001, lake, minutes(95))},
+      {3, maya, minutes(95), u"This is the lake I was telling you about"_q, PhotoMedia(session, 8100001, lake, minutes(95)),
+       0, 0, Reactions({{u"❤️"_q, 1, true}}, {{self, u"❤️"_q}})},
       {4, self, minutes(93), u"Wow, that looks amazing! How long is the trail?"_q, std::nullopt, 3},
       {5, maya, minutes(90), u"About 12 km there and back. Mostly easy, a bit steep near the top."_q},
       {6, self, minutes(61), QString(), VoiceMedia(8200001, 7, minutes(61))},
-      {7, maya, minutes(40), u"Haha, deal. I'll bring the snacks 🍫"_q},
-      {8, self, minutes(12), u"Perfect. Let's meet at the parking lot at 8:00. Here's the route: openstreetmap.org"_q},
+      {7, maya, minutes(40), u"Haha, deal. I'll bring the snacks 🍫"_q, std::nullopt, 0, 0,
+       Reactions({{u"😁"_q, 1, true}}, {{self, u"😁"_q}})},
+      {8, self, minutes(12), u"Perfect. Let's meet at the parking lot at 8:00. Here's the route: openstreetmap.org"_q,
+       std::nullopt, 0, 0, Reactions({{u"👍"_q, 1, false}}, {{maya, u"👍"_q}})},
       {9, maya, minutes(2), u"See you there! 👋"_q},
   }, 1, true);
   AddChat(session, peerFromChat(kGroup), {
-      {1, sam, minutes(52), u"Morning everyone! Who's in for the Sunday run? 🏃"_q},
+      {1, sam, minutes(52), u"Morning everyone! Who's in for the Sunday run? 🏃"_q, std::nullopt, 0, 0,
+       Reactions({{u"👍"_q, 3, true}, {u"🔥"_q, 1, false}}, {{lena, u"👍"_q}, {priya, u"👍"_q}, {self, u"👍"_q}, {jordan, u"🔥"_q}})},
       {2, lena, minutes(50), u"Count me in!"_q},
       {3, priya, minutes(49), u"Me too, but I might be ten minutes late"_q},
       {4, sam, minutes(46), u"No worries. River loop or forest trail?"_q},
       {5, self, minutes(31), u"Forest trail, it's so much prettier this time of year 🍂"_q},
       {6, jordan, minutes(29), u"+1 for the forest"_q, std::nullopt, 5},
-      {7, lena, minutes(8), u"Here's the view from last week"_q, PhotoMedia(session, 8100002, forest, minutes(8))},
+      {7, lena, minutes(8), u"Here's the view from last week"_q, PhotoMedia(session, 8100002, forest, minutes(8)), 0, 0,
+       Reactions({{u"❤️"_q, 4, false}, {u"😍"_q, 2, false}})},
+      {8, sam, minutes(6), QString(), MTP_messageMediaVenue(Geo(46.5191, 6.6323), MTP_string("Riverside Park"),
+                                                             MTP_string("Quai d'Ouchy 1, Lausanne"), MTP_string("foursquare"),
+                                                             MTP_string("demo"), MTP_string("parks_outdoors/park"))},
+      {9, priya, minutes(4), QString(), MTP_messageMediaGeoLive(MTP_flags(0), Geo(46.5160, 6.6290), MTPint(), MTP_int(3600),
+                                                                MTPint()),
+       0, 0, std::nullopt, minutes(1)},
   }, 2);
   AddChat(session, peerFromChannel(kChannel), {
       {1, PeerId(), minutes(60 * 20), u"Sunrise over the bay. Shot this morning, just before six ☀️"_q,
-       PhotoMedia(session, 8100003, sunrise, minutes(60 * 20)), 0, 8412},
+       PhotoMedia(session, 8100003, sunrise, minutes(60 * 20)), 0, 8412,
+       Reactions({{u"❤️"_q, 312, false}, {u"🔥"_q, 128, true}, {u"👏"_q, 45, false}})},
       {2, PeerId(), minutes(33), u"A calm evening at the mountain lake. Where would you go next?"_q,
        PhotoMedia(session, 8100004, lake, minutes(33)), 0, 2147},
   }, 1, false, true);

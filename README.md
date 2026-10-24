@@ -55,6 +55,17 @@ or dark style and accent color.
   menu: a screenshot, an image copied in a browser, files copied in a file manager, also through Flatpak's
   portal), shown first with previews, a caption and "Send as documents" / "Group items"; pictures go as photos
   and photos and videos as albums of up to ten, larger sets in order. Pasted text stays text.
+- **Reactions** as in the phone apps: under the messages with their counts, or with the avatars of the few who
+  reacted; a tap on one adds yours or takes it back, a long press shows who reacted (in groups). Reactions on top
+  of a message's menu, all of them a tap further, and a double tap sends your quick reaction. New reactions to your
+  messages show a heart in the chat list and are read when you see them.
+- **Locations** as in the phone apps: a map of the place in the chat, a tap opens it on an interactive map
+  (OpenStreetMap) with "Open in Maps" for the system's map application. Sending: your current location, any place
+  on the map, places nearby or found by name (Foursquare, as in the phone apps), or a **live location** for
+  15 minutes, an hour, 8 hours or until you stop it; it goes on in the background and after a restart, with a bar
+  in the chat to stop it. Live locations of others move on the map as they are updated. The GPS is used only while
+  the location screen is open, and for a live location only to take a fix now and then (more often while you
+  move, every two minutes while you stay): nothing keeps it on.
 - **Voice messages** as in the phone apps: hold the microphone to record and release to send, slide
   left to cancel or up to keep recording hands-free.
 - **Calls**: one-to-one audio and video calls — accept or decline, mute, front/back camera,
@@ -77,11 +88,30 @@ or dark style and accent color.
 - **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
   start the language follows the system.
 
-Not there yet: group calls, screen sharing, stories, reactions, forwarding and selecting messages,
+Not there yet: group calls, screen sharing, stories, forwarding and selecting messages,
 sticker and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't
 planned: Telegram Desktop doesn't have them either.
 
 ## Installing
+
+### From the Flatpak repository
+
+The easiest way, with updates through your app store or `flatpak update`: Contrail's own signed Flatpak repository,
+[flatpak.xvlad.com](https://flatpak.xvlad.com), for x86_64 and ARM64 (Linux phones). Open
+[Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in GNOME Software, Discover
+or another app store, or:
+
+```bash
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists xvlad https://flatpak.xvlad.com/xvlad.flatpakrepo
+flatpak install --user xvlad io.github.x_vlad_x.Contrail
+```
+
+The GNOME runtime comes from Flathub (the first command adds it if it isn't there yet), Contrail itself from the
+repository, which takes every release from this project's releases page. Coming from a downloaded `.flatpak`:
+`flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail` keeps the account and the chats.
+
+### Packages
 
 Download the package for your system from the [releases page](https://github.com/x-vlad-x/contrail/releases).
 Every package comes for x86_64 (`amd64`) and ARM64 (`aarch64`, Linux phones):
@@ -105,6 +135,9 @@ needs `pactl` (PulseAudio, or PipeWire's PulseAudio server; the Flatpak carries 
 loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs a proximity sensor
 behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from feedbackd, and a call
 over the lock screen needs a shell with the layer shell, as Phosh (gtk4-layer-shell comes with the packages).
+Your location comes from GeoClue, through the desktop portal in the Flatpak (the system asks once whether
+Contrail may use it); the maps come from OpenStreetMap's tile servers and are drawn by libshumate, as in GNOME
+Maps (it comes with the packages).
 
 ## Building
 
@@ -173,7 +206,7 @@ uses, so nothing has to be installed on the build machine.
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `reactions`, `location` (the device's position from GeoClue or the portal), `live_location` (live locations being shared; `geo.hpp`), `location_ui` (sending a location, a location on the map), `map_view` (libshumate maps), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
 | `patches/` | The patches for Telegram Desktop; `patches/tg_owt/` for WebRTC (built by `build-deps.sh`) |
 | `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
@@ -203,7 +236,8 @@ its own log to `~/.local/share/contrail-data/log.txt`.
 
 Regressions for the parts that don't need a Telegram account — GTK handler lifetimes, layout on a phone
 width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation, audio
-routing, the photo viewer's zoom geometry, album cells on narrow screens and what a paste brings — run on
+routing, the photo viewer's zoom geometry, album cells on narrow screens, what a paste brings and when a live
+location is updated — run on
 any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under AddressSanitizer and
 UBSan:
 

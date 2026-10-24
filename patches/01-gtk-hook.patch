@@ -103,6 +103,24 @@ index 7172206..0254d7d 100644
  	if (Quitting() || !_lastActiveWindow) {
  		return false;
  	} else if (_calls->hasActivePanel(session)) {
+diff --git a/Telegram/SourceFiles/data/data_media_types.h b/Telegram/SourceFiles/data/data_media_types.h
+index 8f1890c..21f35c6 100644
+--- a/Telegram/SourceFiles/data/data_media_types.h
++++ b/Telegram/SourceFiles/data/data_media_types.h
+@@ -471,6 +471,13 @@ public:
+ 	std::unique_ptr<Media> clone(not_null<HistoryItem*> parent) override;
+ 
+ 	CloudImage *location() const override;
++#ifdef CONTRAIL_GTK
++	// What the GTK interface shows of a location.
++	[[nodiscard]] const LocationPoint &point() const { return _point; }
++	[[nodiscard]] TimeId livePeriod() const { return _livePeriod; }
++	[[nodiscard]] const QString &title() const { return _title; }
++	[[nodiscard]] const QString &description() const { return _description; }
++#endif // CONTRAIL_GTK
+ 	ItemPreview toPreview(ToPreviewOptions options) const override;
+ 	TextWithEntities notificationText() const override;
+ 	QString pinnedTextSubstring() const override;
 diff --git a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp b/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp
 index a229510..b4bcd7f 100644
 --- a/Telegram/SourceFiles/platform/linux/notifications_manager_linux.cpp

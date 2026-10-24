@@ -2,6 +2,9 @@
 
 #include "chat_view.hpp"
 #include "layout.hpp"
+#include "location_ui.hpp"
+#include "map_view.hpp"
+#include "reactions.hpp"
 #include "scroll_helpers.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
@@ -12,6 +15,8 @@
 #include "data/data_document.h"
 #include "data/data_document_media.h"
 #include "data/data_file_origin.h"
+#include "data/data_location.h"
+#include "data/data_message_reactions.h"
 #include "data/data_media_types.h"
 #include "data/data_peer.h"
 #include "data/data_photo.h"
@@ -44,6 +49,11 @@ constexpr auto kMinPhotoSize = 100;
 constexpr auto kStickerSize = 160;
 constexpr auto kAlbumMinWidth = 100;  // The narrowest cell, before the album is scaled to the screen.
 constexpr auto kAlbumSpacing = 2;
+// A location's map, as Telegram's servers draw it (at twice the size for sharp screens).
+constexpr auto kMapWidth = 280;
+constexpr auto kMapHeight = 150;
+constexpr auto kMapZoom = 15;
+constexpr auto kMapScale = 2;
 
 QSize FitPhoto(int w, int h, int maxWidth) {
   if (w <= 0 || h <= 0) {
@@ -58,13 +68,9 @@ QSize FitPhoto(int w, int h, int maxWidth) {
   return {std::max(width, kMinPhotoSize), std::max(height, 48)};
 }
 
-void SetPictureImage(GtkWidget *picture, Image *image) {
-  if (!image || image->isNull()) {
-    return;
-  }
+void SetPictureQImage(GtkWidget *picture, QImage original) {
   // A texture as large as the picture on the screen: drawing a downscaled full-size photo costs
   // time on every frame while scrolling, and the memory of all the loaded photos.
-  auto original = image->original();
   const auto scale = std::max(gtk_widget_get_scale_factor(picture), 1);
   const auto target = QSize(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-width")),
                             GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-height")))
@@ -76,6 +82,33 @@ void SetPictureImage(GtkWidget *picture, Image *image) {
     gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
     g_object_unref(texture);
   }
+}
+
+void SetPictureImage(GtkWidget *picture, Image *image) {
+  if (!image || image->isNull()) {
+    return;
+  }
+  SetPictureQImage(picture, image->original());
+}
+
+// What the bar of reactions shows: rebuilt only when this changes.
+QString ReactionsKey(not_null<HistoryItem *> item) {
+  auto result = QString();
+  for (const auto &reaction : item->reactionsWithLocal()) {
+    result += Data::ReactionEntityData(reaction.id) + ':' + QString::number(reaction.count) + (reaction.my ? u"+"_q : u";"_q);
+  }
+  for (const auto &[id, list] : item->recentReactions()) {
+    for (const auto &one : list) result += QString::number(one.peer->id.value) + ',';
+  }
+  return result;
+}
+
+// Double taps on these are theirs (a photo opens, a button acts), not a reaction.
+bool InteractiveTarget(GtkWidget *target, GtkWidget *bubble) {
+  for (auto *widget = target; widget && widget != bubble; widget = gtk_widget_get_parent(widget)) {
+    if (GTK_IS_BUTTON(widget) || GTK_IS_PICTURE(widget) || GTK_IS_FLOW_BOX(widget)) return true;
+  }
+  return false;
 }
 
 const char *DocumentIcon(not_null<DocumentData *> document) {
@@ -147,6 +180,9 @@ MessageWidget::~MessageWidget() {
   if (_highlightTimeout) {
     g_source_remove(_highlightTimeout);
   }
+  if (_liveTimer) {
+    g_source_remove(_liveTimer);
+  }
   g_object_set_data(G_OBJECT(_row), "contrail-message", nullptr);
   if (auto *parent = gtk_widget_get_parent(_row)) {
     gtk_list_box_remove(GTK_LIST_BOX(parent), _row);
@@ -176,8 +212,12 @@ void MessageWidget::refresh() {
     g_source_remove(base::take(_highlightTimeout));
   }
   _highlighted = nullptr;
+  if (_liveTimer) {
+    g_source_remove(base::take(_liveTimer));
+  }
   _cells.clear();
-  _name = _avatar = _footer = _footerTime = _footerStatus = nullptr;
+  _replyPending = false;
+  _name = _avatar = _footer = _footerTime = _footerStatus = _reactions = nullptr;
   build();
 }
 
@@ -314,9 +354,15 @@ void MessageWidget::build() {
   }
   (void)hasMedia;
   if (!first->isSponsored()) {
+    _reactions = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_append(GTK_BOX(bubble), _reactions);
+    _reactionsKey = QString(u"-"_q);  // Never a real key: the bar is built.
+    refreshReactions();
     _footer = buildFooter();
     gtk_box_append(GTK_BOX(bubble), _footer);
+    setupDoubleTap(bubble);
   }
+  refreshLive();
 
   setupGestures(bubble, mainItem(), true);
   gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(_row), line);
@@ -371,8 +417,19 @@ GtkWidget *MessageWidget::buildReply(not_null<HistoryItem *> item) {
                : reply->fields().quote;
   } else {
     name = reply->fields().externalSenderName;
-    text = reply->fields().quote.text.isEmpty() ? TextWithEntities{tr::lng_deleted_message(tr::now)}
-                                                : reply->fields().quote;
+    if (name.isEmpty() && reply->externalPeerId()) {
+      if (const auto peer = item->history()->owner().peerLoaded(reply->externalPeerId())) name = peer->name();
+    }
+    // A message that isn't loaded yet isn't deleted: the core asks the server for it (as Telegram Desktop does
+    // when it paints the reply) and says when it is there (Data::Session::itemResizeRequest), or that it is gone.
+    const auto deleted = reply->unavailable();
+    if (!deleted && reply->messageId()) {
+      _replyPending = true;
+      item->resolveDependent();
+    }
+    text = !reply->fields().quote.text.isEmpty() ? reply->fields().quote
+           : deleted ? TextWithEntities{tr::lng_deleted_message(tr::now)}
+                     : TextWithEntities{tr::lng_profile_loading(tr::now)};
   }
   for (auto &ch : text.text) {
     if (ch == '\n') {
@@ -408,6 +465,9 @@ GtkWidget *MessageWidget::buildMedia(Cell &cell, int maxWidth) {
   }
   if (media->webpage()) {
     return nullptr;  // Shown after the text.
+  }
+  if (const auto location = LocationMedia(cell.item)) {
+    return buildLocation(cell, location);
   }
   if (const auto photo = media->photo()) {
     return buildPhoto(cell, photo, maxWidth);
@@ -801,6 +861,128 @@ GtkWidget *MessageWidget::buildWebPage(not_null<HistoryItem *> item) {
   return box;
 }
 
+// A location: the map with the pin (a live location: with the avatar of whoever shares it, and the time left),
+// the venue's name and address, or "Live Location" and when it was updated. A tap opens it on a map.
+GtkWidget *MessageWidget::buildLocation(Cell &cell, not_null<Data::MediaLocation *> location) {
+  const auto item = cell.item;
+  const auto session = &item->history()->session();
+  const auto &point = location->point();
+  const auto live = LiveLocationActive(item);
+  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(box, "location");
+
+  auto *overlay = gtk_overlay_new();
+  cell.picture = MakeMediaPicture(kMapWidth, kMapHeight);
+  gtk_widget_add_css_class(cell.picture, "message-photo");
+  gtk_widget_add_css_class(cell.picture, "location-map");
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, kMapWidth, kMapHeight));
+  cell.kind = PictureKind::Map;
+  auto geo = GeoPointLocation();
+  geo.lat = point.lat();
+  geo.lon = point.lon();
+  geo.access = point.accessHash();
+  geo.width = kMapWidth;
+  geo.height = kMapHeight;
+  geo.zoom = kMapZoom;
+  geo.scale = kMapScale;
+  cell.map = std::make_unique<Data::CloudImage>(
+      session, ImageWithLocation{.location = ImageLocation({geo}, kMapWidth * kMapScale, kMapHeight * kMapScale)});
+  cell.mapView = cell.map->createView();
+  cell.map->load(session, item->fullId());
+  const auto from = item->displayFrom() ? item->displayFrom() : item->from().get();
+  auto *pin = MakeMapPin(live ? MakeAvatar(from, 30) : nullptr);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), pin);
+  if (live) {
+    cell.liveRemaining = gtk_label_new(nullptr);
+    gtk_widget_add_css_class(cell.liveRemaining, "osd");
+    gtk_widget_add_css_class(cell.liveRemaining, "media-status");
+    gtk_widget_add_css_class(cell.liveRemaining, "numeric");
+    gtk_widget_set_halign(cell.liveRemaining, GTK_ALIGN_END);
+    gtk_widget_set_valign(cell.liveRemaining, GTK_ALIGN_START);
+    gtk_widget_set_can_target(cell.liveRemaining, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.liveRemaining);
+  }
+  auto *click = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
+    if (TapAllowed()) _chat->openLocation(item);
+  });
+  gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
+  gtk_box_append(GTK_BOX(box), overlay);
+
+  const auto addLabel = [&](const QString &text, const char *cssClass) {
+    auto *label = gtk_label_new(U8(text).c_str());
+    gtk_widget_add_css_class(label, cssClass);
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 36);
+    gtk_box_append(GTK_BOX(box), label);
+    return label;
+  };
+  if (live) {
+    addLabel(tr::lng_live_location(tr::now), "heading");
+    cell.liveStatus = addLabel(QString(), "dim-label");
+    gtk_widget_add_css_class(cell.liveStatus, "caption");
+  } else if (!location->title().isEmpty()) {
+    addLabel(location->title(), "heading");
+    if (!location->description().isEmpty()) {
+      gtk_widget_add_css_class(addLabel(location->description(), "dim-label"), "caption");
+    }
+  }
+  return box;
+}
+
+// A live location's "updated N minutes ago" and the time left go on by themselves; when its time is over it
+// becomes a plain location.
+void MessageWidget::refreshLive() {
+  auto any = false;
+  for (const auto &cell : _cells) {
+    if (!cell->liveStatus) continue;
+    if (!LiveLocationActive(cell->item)) {
+      crl::on_main(_chat.get(), [chat = _chat, id = cell->item->fullId()] { chat->refreshMessage(id); });
+      return;
+    }
+    any = true;
+    gtk_label_set_text(GTK_LABEL(cell->liveStatus), U8(LiveLocationUpdated(cell->item)).c_str());
+    if (cell->liveRemaining) {
+      gtk_label_set_text(GTK_LABEL(cell->liveRemaining), U8(LiveLocationRemaining(cell->item)).c_str());
+    }
+  }
+  if (any && !_liveTimer) {
+    _liveTimer = g_timeout_add_seconds(30, +[](gpointer data) -> gboolean {
+      RunCoreEvent([&] { static_cast<MessageWidget *>(data)->refreshLive(); });
+      return G_SOURCE_CONTINUE;
+    }, this);
+  } else if (!any && _liveTimer) {
+    g_source_remove(base::take(_liveTimer));
+  }
+}
+
+bool MessageWidget::refreshReactions() {
+  if (!_reactions) return false;
+  const auto item = mainItem();
+  auto key = ReactionsKey(item);
+  if (key == _reactionsKey) return false;
+  _reactionsKey = std::move(key);
+  ClearBox(_reactions);
+  auto *bar = MakeReactionsBar(item, _chat->window());
+  if (bar) gtk_box_append(GTK_BOX(_reactions), bar);
+  gtk_widget_set_visible(_reactions, bar != nullptr);
+  return true;
+}
+
+// A double tap on a message sends the quick reaction, as in the phone apps.
+void MessageWidget::setupDoubleTap(GtkWidget *bubble) {
+  auto *click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "pressed", [=](GtkGestureClick *, int count, double x, double y) {
+    if (count != 2 || !TapAllowed()) return;
+    if (InteractiveTarget(gtk_widget_pick(bubble, x, y, GTK_PICK_DEFAULT), bubble)) return;
+    ToggleQuickReaction(mainItem());
+  });
+  gtk_widget_add_controller(bubble, GTK_EVENT_CONTROLLER(click));
+}
+
 GtkWidget *MessageWidget::buildFooter() {
   auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
   gtk_widget_set_halign(box, GTK_ALIGN_END);
@@ -894,6 +1076,13 @@ bool MessageWidget::refreshPicture(Cell &cell) {
       }
       break;
     case PictureKind::Thumbnail: image = cell.documentMedia ? cell.documentMedia->thumbnail() : nullptr; break;
+    case PictureKind::Map:
+      if (!cell.mapView || cell.mapView->isNull()) return false;
+      SetPictureQImage(cell.picture, *cell.mapView);
+      cell.pictureFinal = true;
+      cell.mapView = nullptr;
+      cell.map = nullptr;
+      return true;
     case PictureKind::None: break;
   }
   if (!image) {
