@@ -8,6 +8,7 @@
 
 #include <rpl/lifetime.h>
 
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -31,12 +32,17 @@ namespace Api {
 struct SendAction;
 } // namespace Api
 
+namespace HistoryView {
+class PinnedTracker;
+} // namespace HistoryView
+
 namespace Contrail {
 
 class MainWindow;
 class MessageWidget;
 class AttachDialog;
 class ClipboardReader;
+class ChatLiveLocations;
 
 // An open chat: the messages (loaded page by page through the core, like Telegram Desktop's
 // HistoryWidget does) and the message field. A topic of a group with topics is a chat of its own:
@@ -67,6 +73,7 @@ public:
   void refreshMessage(FullMsgId id);
   void showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y);
   void replyTo(not_null<HistoryItem *> item);
+  void forward(not_null<HistoryItem *> item);
   void sendText(const QString &text);  // Bot commands from links.
   void debugScroll(bool top);
   void debugCheckDraft();
@@ -99,7 +106,20 @@ private:
   void refreshItem(const HistoryItem *item);
   // The core says a message's data changed: only the reactions, if it was them.
   void refreshItemData(const HistoryItem *item);
-  void refreshLiveBanner();
+  void buildTopBars();
+  void refreshLiveBar();
+  // The pinned message bar (HistoryWidget's PinnedTracker): the pinned message above the bottom of the screen;
+  // a tap shows it, and then the one pinned before it.
+  void setupPinned();
+  void refreshPinnedBar();
+  void updatePinnedViewer();
+  void pinnedBarClicked();
+  [[nodiscard]] bool pinnedHiddenByUser() const;
+  void showPinnedList();
+  void confirmPin(not_null<HistoryItem *> item);
+  void confirmUnpin(not_null<HistoryItem *> item);
+  void confirmUnpinAll();
+  void confirmHidePinned();
   void readReactions();
   void pollReactions();
   void refreshTransfer(FullMsgId id);
@@ -125,6 +145,12 @@ private:
   void edit(not_null<HistoryItem *> item);
   void cancelReplyOrEdit();
   void showReplyBar(const QString &title, const QString &text, const char *icon);
+  // The messages waiting to be forwarded here (the chat's forward draft) are shown in the reply bar.
+  [[nodiscard]] bool forwarding() const;
+  void refreshForwardBar();
+  void cancelForward();
+  void showForwardMenu();
+  void refreshSendButton();
   void chooseFiles();
   void chooseLocation();
   // The files from the chooser or a pasted picture, shown before sending (AttachDialog).
@@ -151,7 +177,24 @@ private:
 
   GtkWidget *_root = nullptr;
   GtkWidget *_title = nullptr;
-  GtkWidget *_liveBanner = nullptr;
+  GtkWidget *_liveBar = nullptr;
+  GtkWidget *_liveText = nullptr;
+  GtkWidget *_liveStop = nullptr;
+  std::unique_ptr<ChatLiveLocations> _liveLocations;
+  GtkWidget *_pinnedBar = nullptr;
+  GtkWidget *_pinnedTitle = nullptr;
+  GtkWidget *_pinnedText = nullptr;
+  GtkWidget *_pinnedPreview = nullptr;
+  GtkWidget *_pinnedList = nullptr;
+  GtkWidget *_pinnedClose = nullptr;
+  std::unique_ptr<HistoryView::PinnedTracker> _pinnedTracker;
+  QString _pinnedTitleText;
+  QString _pinnedTextText;
+  QImage _pinnedImage;
+  int _pinnedCount = 0;
+  FullMsgId _pinnedClicked;              // Shown with a tap on the bar: the bar goes on to the one before it.
+  std::optional<FullMsgId> _minPinned;   // The oldest pinned message, once asked while going through them.
+  double _lastScrollValue = 0.;
   GtkWidget *_list = nullptr;
   GtkWidget *_scroll = nullptr;
   GtkAdjustment *_adjustment = nullptr;
@@ -230,6 +273,7 @@ private:
   QString _loadedDraft;
   QString _beforeEditText;
   bool _editPending = false;
+  bool _forwardShown = false;
   bool _settingComposerText = false;
   int _editGeneration = 0;
   bool _syncScheduled = false;

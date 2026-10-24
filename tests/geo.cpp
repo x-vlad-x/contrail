@@ -60,6 +60,20 @@ int main() {
   assert(Policy::NextInterval(Fix(0, 0, 10, now), false, 1) == Policy::kInterval);
   assert(Policy::NextInterval(Fix(0, 0, 10, now), false, Policy::kStillCycles) == Policy::kIntervalStill);
 
+  // The shared map: everyone fits, the middle is between them, one person gets the closest zoom.
+  const auto one = FitPoints({{55.75, 37.62}}, 400, 600, 48, 16);
+  assert(std::abs(one.lat - 55.75) < 1e-9 && std::abs(one.lon - 37.62) < 1e-9 && one.zoom == 16);
+  // Two points 0.1° of longitude apart on the equator: 0.1/360 of the world, in 400 - 2 * 50 = 300 pixels.
+  const auto two = FitPoints({{0., 0.}, {0., 0.1}}, 400, 600, 50, 18);
+  assert(std::abs(two.lon - 0.05) < 1e-9 && std::abs(two.lat) < 1e-9);
+  assert(std::abs(two.zoom - std::log2(300. / (0.1 / 360. * 256.))) < 1e-9);
+  // Far north the same degrees are longer on the map: Moscow and Saint Petersburg fit a phone at about zoom 5.
+  const auto cities = FitPoints({{55.75, 37.62}, {59.94, 30.31}}, 413, 500, 48, 16);
+  assert(cities.zoom > 4.5 && cities.zoom < 6.);
+  assert(cities.lat > 55.75 && cities.lat < 59.94 && cities.lon > 30.31 && cities.lon < 37.62);
+  // The whole world doesn't zoom out past level 1.
+  assert(FitPoints({{-80., -170.}, {80., 170.}}, 300, 300, 40, 16).zoom == 1.);
+
   std::puts("geo: ok");
   return 0;
 }

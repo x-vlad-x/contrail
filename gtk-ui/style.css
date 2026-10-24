@@ -329,6 +329,32 @@ avatar.archive-avatar {
   padding: 12px;
 }
 
+/* --- bars under a chat's header: the pinned message, live locations --- */
+.chat-top-bar {
+  padding: 4px 6px 4px 12px;
+  min-height: 44px;
+  background-color: var(--headerbar-bg-color);
+  border-bottom: 1px solid var(--headerbar-shade-color);
+}
+.chat-top-bar .top-bar-title {
+  font-weight: bold;
+  font-size: 0.9em;
+  color: var(--accent-color);
+}
+.chat-top-bar.pinned-bar .top-bar-text {
+  border-left: 2px solid var(--accent-color);
+  padding-left: 8px;
+}
+.chat-top-bar.live-bar .top-bar-title {
+  color: #e53945;
+}
+.chat-top-bar .location-row-icon {
+  padding: 6px;
+}
+.pinned-preview {
+  border-radius: 6px;
+}
+
 /* --- message field --- */
 .composer {
   padding: 6px;
