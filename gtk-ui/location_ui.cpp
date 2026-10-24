@@ -63,6 +63,18 @@ GtkWidget *MapButton(const char *icon, const QString &tooltip) {
   return button;
 }
 
+#ifdef CONTRAIL_SHUMATE
+// + and - in the top right corner, where libshumate has its own.
+GtkWidget *MakeZoomButtons(GtkWidget *map) {
+  auto *buttons = MakeMapZoomButtons(map);
+  gtk_widget_set_halign(buttons, GTK_ALIGN_END);
+  gtk_widget_set_valign(buttons, GTK_ALIGN_START);
+  gtk_widget_set_margin_end(buttons, 12);
+  gtk_widget_set_margin_top(buttons, 12);
+  return buttons;
+}
+#endif  // CONTRAIL_SHUMATE
+
 QString MyLocationText() {
   return Translated("My Location", "Моё местоположение", "Моє місцезнаходження");
 }
@@ -322,6 +334,7 @@ GtkWidget *LocationPicker::buildMap() {
   gtk_widget_set_margin_end(mine, 12);
   gtk_widget_set_margin_bottom(mine, 64);  // Above the attribution (two lines on a phone).
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), mine);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), MakeZoomButtons(_map));
   _signals.clicked(mine, [=] {
     _follow = true;
     if (_fix) MapCenterOn(_map, _fix->lat, _fix->lon, std::max(MapZoom(_map), kPlaceZoom), true);
@@ -378,7 +391,8 @@ void LocationPicker::received(const GeoFix &fix) {
       MapMoveMarker(_positionMarker, fix.lat, fix.lon);
     }
     if (_follow) {
-      MapCenterOn(_map, fix.lat, fix.lon, _centered ? MapZoom(_map) : kPlaceZoom, _centered);
+      // Without an animation: one every second (a fix) would fight a finger on the map.
+      MapCenterOn(_map, fix.lat, fix.lon, _centered ? MapZoom(_map) : kPlaceZoom, false);
       _centered = true;
     }
   }
@@ -679,6 +693,7 @@ LocationViewer::LocationViewer(not_null<MainWindow *> window, not_null<HistoryIt
   _signals.clicked(_mine, [=] { toggleMyLocation(); });
   gtk_box_append(GTK_BOX(buttons), _mine);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), buttons);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), MakeZoomButtons(_map));
   MapOnUserMove(_map, [=] { _moved = true; });
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), overlay);
 

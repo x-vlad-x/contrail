@@ -296,6 +296,10 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
     attachRecording();
   }
 
+  // A group's or a channel's reactions (which ones, whether any) come with its full info, as other things the
+  // chat needs; the core asks for it at most once in a while.
+  _history->peer->updateFull();
+
   loadInitial();
 }
 

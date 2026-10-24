@@ -17,8 +17,12 @@ namespace Contrail {
 // A ShumateSimpleMap: pinch, drag, the zoom buttons, the scale and the attribution.
 [[nodiscard]] GtkWidget *MakeMap();
 void MapCenterOn(GtkWidget *map, double lat, double lon, double zoom, bool animate);
+// A whole level in or out, animated, around the middle of the map (the phone apps' + and -).
+void MapZoomBy(GtkWidget *map, int levels);
+[[nodiscard]] GtkWidget *MakeMapZoomButtons(GtkWidget *map);
 void MapCenter(GtkWidget *map, double *lat, double *lon);
 [[nodiscard]] double MapZoom(GtkWidget *map);
+[[nodiscard]] double MapRotation(GtkWidget *map);
 // A widget on the map at a place (its child's center there), on the map's own marker layer.
 GtkWidget *MapAddMarker(GtkWidget *map, GtkWidget *child, double lat, double lon);
 void MapMoveMarker(GtkWidget *marker, double lat, double lon);

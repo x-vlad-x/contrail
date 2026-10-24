@@ -9,13 +9,14 @@
 //           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
 //             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
 //             live-start:SECONDS (Saved Messages)] |
-//           screenshot [call] PATH
+//           map | screenshot [call] PATH
 
 #include "debug.hpp"
 
 #include "demo.hpp"
 
 #include "main_window.hpp"
+#include "map_view.hpp"
 #include "zoom_view.hpp"
 #include "core/sandbox.h"
 
@@ -97,6 +98,14 @@ void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
   g_object_unref(texture);
   gsk_render_node_unref(node);
   g_object_unref(paintable);
+}
+
+GtkWidget *FindByClass(GtkWidget *root, const char *cssClass) {
+  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
+    if (gtk_widget_get_mapped(child) && gtk_widget_has_css_class(child, cssClass)) return child;
+    if (auto *found = FindByClass(child, cssClass)) return found;
+  }
+  return nullptr;
 }
 
 // Activates the first visible row (AdwPreferencesRow or a list row with a label) containing |text|.
@@ -187,6 +196,17 @@ void Run(MainWindow &w, const std::string &cmdline) {
     StartDemo();
   } else if (cmd == "demo-sponsored") {
     AddDemoSponsored();
+  } else if (cmd == "map") {
+    // The open map (a location's, the location picker's): where it is, its zoom and rotation.
+#ifdef CONTRAIL_SHUMATE
+    if (auto *map = w.widget() ? FindByClass(w.widget(), "contrail-map") : nullptr) {
+      auto lat = 0., lon = 0.;
+      MapCenter(map, &lat, &lon);
+      g_message("Map: center=%.6f,%.6f zoom=%.3f rotation=%.3f", lat, lon, MapZoom(map), MapRotation(map));
+    } else {
+      g_message("Map: none");
+    }
+#endif  // CONTRAIL_SHUMATE
   } else if (cmd == "screenshot") {
     // screenshot [call] PATH: the window drawn by GTK itself, 3x, nothing of the phone around it.
     const auto value = Q(arg.c_str());
