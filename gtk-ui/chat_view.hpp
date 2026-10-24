@@ -123,6 +123,9 @@ private:
   void readReactions();
   void pollReactions();
   void refreshTransfer(FullMsgId id);
+  // The rows on the screen, top to bottom, found by their place in the list: a chat scrolled far back has
+  // thousands, too many to go through at every step of the scrolling.
+  [[nodiscard]] std::vector<MessageWidget *> visibleRows() const;
 
   void scrollToBottom();
   void scrollToItem(not_null<const HistoryItem *> item, bool highlight);

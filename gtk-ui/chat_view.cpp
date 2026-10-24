@@ -472,9 +472,10 @@ void ChatView::buildTopBars() {
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBar);
   refreshLiveBar();
 
-  _pinnedPreview = gtk_picture_new();
-  gtk_picture_set_content_fit(GTK_PICTURE(_pinnedPreview), GTK_CONTENT_FIT_COVER);
-  gtk_widget_set_size_request(_pinnedPreview, 36, 36);
+  // A GtkImage keeps its size whatever the picture: a GtkPicture's height follows its width, which the bar's
+  // layout must not depend on (see MakeHeightForWidthBin).
+  _pinnedPreview = gtk_image_new();
+  gtk_image_set_pixel_size(GTK_IMAGE(_pinnedPreview), 36);
   gtk_widget_add_css_class(_pinnedPreview, "pinned-preview");
   gtk_widget_set_overflow(_pinnedPreview, GTK_OVERFLOW_HIDDEN);
   gtk_widget_set_visible(_pinnedPreview, FALSE);
@@ -583,11 +584,11 @@ void ChatView::refreshPinnedBar() {
   gtk_label_set_text(GTK_LABEL(_pinnedTitle), U8(_pinnedTitleText).c_str());
   gtk_label_set_text(GTK_LABEL(_pinnedText), U8(QString(_pinnedTextText).replace('\n', ' ')).c_str());
   if (auto *texture = ToTexture(_pinnedImage)) {
-    gtk_picture_set_paintable(GTK_PICTURE(_pinnedPreview), GDK_PAINTABLE(texture));
+    gtk_image_set_from_paintable(GTK_IMAGE(_pinnedPreview), GDK_PAINTABLE(texture));
     g_object_unref(texture);
     gtk_widget_set_visible(_pinnedPreview, TRUE);
   } else {
-    gtk_picture_set_paintable(GTK_PICTURE(_pinnedPreview), nullptr);
+    gtk_image_clear(GTK_IMAGE(_pinnedPreview));
     gtk_widget_set_visible(_pinnedPreview, FALSE);
   }
   // Several pinned: the list of them; one: unpin it (or hide the bar, without the right to unpin).
@@ -605,12 +606,14 @@ void ChatView::updatePinnedViewer() {
                         || (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && loadedAtBottom());
   if (_initialLoaded && !atBottom) {
     auto bottom = MsgId();
-    for (const auto &[item, row] : _itemRows) {
-      if (!item->isRegular() || item->id <= bottom) continue;
-      auto *widget = row->widgetFor(item);
-      double y = 0;
-      const auto height = gtk_widget_get_height(widget);
-      if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page) bottom = item->id;
+    for (const auto row : visibleRows()) {
+      for (const auto &item : row->items()) {
+        if (!item->isRegular() || item->id <= bottom) continue;
+        auto *widget = row->widgetFor(item);
+        double y = 0;
+        const auto height = gtk_widget_get_height(widget);
+        if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page) bottom = item->id;
+      }
     }
     if (bottom) lessThan = bottom + 1;
   }
@@ -1610,6 +1613,26 @@ void ChatView::updateViewport() {
   if (_window->isActive() && !_readTimer.isActive()) _readTimer.callOnce(300);
 }
 
+std::vector<MessageWidget *> ChatView::visibleRows() const {
+  auto result = std::vector<MessageWidget *>();
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
+  graphene_point_t top;
+  if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return result;
+  // Above the first message (the room for older pages): the list starts lower on the screen.
+  auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(_list), std::max(int(top.y), 0));
+  if (!row && top.y < 0) row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), 0);
+  for (; row; row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), gtk_list_box_row_get_index(row) + 1)) {
+    graphene_rect_t bounds;
+    if (!gtk_widget_compute_bounds(GTK_WIDGET(row), _list, &bounds)) break;
+    if (bounds.origin.y >= top.y + page) break;
+    if (auto *message = static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message"))) {
+      result.push_back(message);
+    }
+  }
+  return result;
+}
+
 // The reactions of the messages on the screen are asked for again from time to time, as Telegram Desktop does
 // for the ones it paints (in groups and channels: in chats with a user the server sends them).
 void ChatView::pollReactions() {
@@ -1617,7 +1640,7 @@ void ChatView::pollReactions() {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto now = crl::now();
   auto &reactions = _history->owner().reactions();
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     double y = 0;
     const auto height = gtk_widget_get_height(row->row());
     if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height > 0 && y < page) {
@@ -1632,7 +1655,7 @@ void ChatView::pollReactions() {
 void ChatView::readReactions() {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   auto read = base::flat_set<not_null<HistoryItem *>>();
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     for (const auto &item : row->items()) {
       if (!item->hasUnreadReaction()) continue;
       double y = 0;
@@ -2026,7 +2049,7 @@ void ChatView::markAsRead() {
   // Higher up, read till the lowest unread message seen whole, as HistoryInner does. Opening a chat
   // puts its first unread message on the screen, and the list may have nowhere further to scroll.
   HistoryItem *till = nullptr;
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     for (const auto &item : row->items()) {
       if (item->out() || !item->isRegular() || !item->unread(_thread) || (till && item->id < till->id)) continue;
       double y = 0;
