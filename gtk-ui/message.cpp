@@ -216,6 +216,7 @@ void MessageWidget::refresh() {
     g_source_remove(base::take(_liveTimer));
   }
   _cells.clear();
+  _replyPending = false;
   _name = _avatar = _footer = _footerTime = _footerStatus = _reactions = nullptr;
   build();
 }
@@ -416,8 +417,19 @@ GtkWidget *MessageWidget::buildReply(not_null<HistoryItem *> item) {
                : reply->fields().quote;
   } else {
     name = reply->fields().externalSenderName;
-    text = reply->fields().quote.text.isEmpty() ? TextWithEntities{tr::lng_deleted_message(tr::now)}
-                                                : reply->fields().quote;
+    if (name.isEmpty() && reply->externalPeerId()) {
+      if (const auto peer = item->history()->owner().peerLoaded(reply->externalPeerId())) name = peer->name();
+    }
+    // A message that isn't loaded yet isn't deleted: the core asks the server for it (as Telegram Desktop does
+    // when it paints the reply) and says when it is there (Data::Session::itemResizeRequest), or that it is gone.
+    const auto deleted = reply->unavailable();
+    if (!deleted && reply->messageId()) {
+      _replyPending = true;
+      item->resolveDependent();
+    }
+    text = !reply->fields().quote.text.isEmpty() ? reply->fields().quote
+           : deleted ? TextWithEntities{tr::lng_deleted_message(tr::now)}
+                     : TextWithEntities{tr::lng_profile_loading(tr::now)};
   }
   for (auto &ch : text.text) {
     if (ch == '\n') {

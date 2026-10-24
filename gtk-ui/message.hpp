@@ -46,6 +46,8 @@ public:
 
   // Rebuilds everything (a message was edited, its media changed...).
   void refresh();
+  // A reply shows "Loading..." until the message it replies to comes from the server.
+  [[nodiscard]] bool replyPending() const { return _replyPending; }
   // Updates the time and the read ticks only.
   void refreshFooter();
   // The reactions changed (and maybe nothing else): only their bar is rebuilt. False when they didn't change.
@@ -119,6 +121,7 @@ private:
   GtkWidget *_footerStatus = nullptr;
   GtkWidget *_reactions = nullptr;
   QString _reactionsKey;
+  bool _replyPending = false;
   guint _liveTimer = 0;
   std::vector<std::unique_ptr<Cell>> _cells;
   GtkWidget *_highlighted = nullptr;

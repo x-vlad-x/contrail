@@ -196,6 +196,10 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
     if (rowFor(item)) pollReactions();
   }, _lifetime);
   Live().changes() | rpl::on_next([=] { refreshLiveBanner(); }, _lifetime);
+  // A replied message came from the server (or turned out deleted): the reply shows it.
+  data.itemResizeRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) {
+    if (const auto row = rowFor(item); row && row->replyPending()) refreshItem(item);
+  }, _lifetime);
   data.itemViewRefreshRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) { refreshItem(item); }, _lifetime);
   session->changes().messageUpdates(Data::MessageUpdate::Flag::Edited | Data::MessageUpdate::Flag::NewAdded)
       | rpl::on_next([=](const Data::MessageUpdate &update) { refreshItem(update.item); }, _lifetime);

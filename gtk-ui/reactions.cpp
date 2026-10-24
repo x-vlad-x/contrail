@@ -85,7 +85,9 @@ void SetReactionLabel(GtkWidget *label, not_null<Main::Session *> session, const
   if (id.paid()) {
     gtk_label_set_text(GTK_LABEL(label), kStar);
     return;
-  } else if (const auto emoji = id.emoji(); !emoji.isEmpty()) {
+  } else if (auto emoji = id.emoji(); !emoji.isEmpty()) {
+    // Telegram's heart is "❤" alone, which fonts draw as a plain text heart: the emoji one asks for U+FE0F.
+    if (emoji.size() == 1) emoji += QChar(0xFE0F);
     gtk_label_set_text(GTK_LABEL(label), U8(emoji).c_str());
     return;
   }
