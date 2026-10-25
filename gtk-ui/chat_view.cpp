@@ -89,6 +89,13 @@ constexpr auto kPreloadHeight = 6000.;  // About eight phone screens: pages come
 // render transforms starts to blur the text.
 constexpr auto kTopReserve = 200000;
 constexpr auto kTopReserveLow = 100000;
+constexpr auto kTopReserveHigh = 300000;  // Rows removed above the screen leave their height to the reserve.
+// The window of messages with rows: this many around a message the chat opens at, rows within this distance
+// from the screen kept when the list stands still (well beyond where the next rows are made or loaded, so
+// the two don't take turns), and removed only when there are more rows than this.
+constexpr auto kWindowMessages = 200;
+constexpr auto kKeepHeight = 2.5 * kPreloadHeight;
+constexpr auto kMaxRows = 300;
 // Voice messages are recorded while the microphone button is held, as in the phone apps.
 constexpr auto kRecordCancelDistance = 120.;  // Slide left to cancel.
 constexpr auto kRecordLockDistance = 90.;     // Slide up to keep recording without holding.
@@ -603,7 +610,7 @@ void ChatView::updatePinnedViewer() {
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto atBottom = _stickToBottom
-                        || (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && loadedAtBottom());
+                        || (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && shownAtBottom());
   if (_initialLoaded && !atBottom) {
     auto bottom = MsgId();
     for (const auto row : visibleRows()) {
@@ -1084,6 +1091,7 @@ void ChatView::loadInitial() {
   }
   if (_pendingShowAt > 0) {
     if (_history->owner().message(_history->peer, _pendingShowAt)) {
+      windowAround(_pendingShowAt);
       sync();
       if (scrollToLoaded(_pendingShowAt)) {
         _initialLoaded = true;
@@ -1097,8 +1105,10 @@ void ChatView::loadInitial() {
   }
   if (!_history->isEmpty() && _history->loadedAtBottom()) {
     _initialLoaded = true;
+    // The core keeps the messages loaded before: rows only for the newest of them.
+    windowAround(0);
     sync();
-    setTopReserve(_history->loadedAtTop() ? 0 : kTopReserve, 0);
+    setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
     scrollToBottom();
     _readTimer.callOnce(500);
     if (_itemRows.size() < 20) {
@@ -1193,6 +1203,7 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
               }
               const auto first = !self->_initialLoaded;
               self->_initialLoaded = true;
+              if (first) self->windowAround(std::max(self->_pendingShowAt, MsgId(0)));
               self->sync();
               if (keepPosition) {
                 if (const auto added = self->listHeight() - heightBefore; added > 0) {
@@ -1202,7 +1213,7 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
                 }
               }
               if (first) {
-                self->setTopReserve(history->loadedAtTop() ? 0 : kTopReserve, 0);
+                self->setTopReserve(self->shownAtTop() ? 0 : kTopReserve, 0);
                 if (self->_pendingShowAt > 0) {
                   if (!self->scrollToLoaded(base::take(self->_pendingShowAt))) self->scrollToBottom();
                 } else {
@@ -1273,6 +1284,7 @@ void ChatView::applyTopicSlice(Data::MessagesSlice &&slice) {
   if (newerAdded || loadedAtBottom()) _topicNewerWaiting = false;
   _initialLoaded = true;
   _applyingPage = true;
+  if (first) windowAround(std::max(_pendingShowAt, MsgId(0)));
   sync();
   if (keepPosition) {
     if (const auto added = listHeight() - heightBefore; added > 0) {
@@ -1281,7 +1293,7 @@ void ChatView::applyTopicSlice(Data::MessagesSlice &&slice) {
     }
   }
   if (first) {
-    setTopReserve(loadedAtTop() ? 0 : kTopReserve, 0);
+    setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
     if (_pendingShowAt > 0) {
       if (!scrollToLoaded(base::take(_pendingShowAt))) scrollToBottom();
     } else {
@@ -1304,8 +1316,8 @@ bool ChatView::loadedAtBottom() const {
   return _topic ? (_topicSkippedAfter == 0) : _history->loadedAtBottom();
 }
 
-// The messages of the chat, oldest first.
-std::vector<not_null<HistoryItem *>> ChatView::items() const {
+// The loaded messages of the chat, oldest first.
+std::vector<not_null<HistoryItem *>> ChatView::loadedItems() const {
   auto result = std::vector<not_null<HistoryItem *>>();
   if (_topic) {
     result.reserve(_topicIds.size());
@@ -1322,6 +1334,135 @@ std::vector<not_null<HistoryItem *>> ChatView::items() const {
     }
   }
   return result;
+}
+
+std::vector<not_null<HistoryItem *>> ChatView::items() const {
+  auto all = loadedItems();
+  if (!_windowMin && !_windowMax) return all;
+  auto result = std::vector<not_null<HistoryItem *>>();
+  result.reserve(std::min(all.size(), size_t(kWindowMessages * 2)));
+  auto started = !_windowMin;
+  for (const auto &item : all) {
+    if (item->isRegular()) {
+      if (_windowMax && item->id > _windowMax) break;
+      if (_windowMin && item->id < _windowMin) continue;
+      started = true;
+    } else if (!started || _windowMax) {
+      // Sponsored messages and the ones being sent go with the messages around them.
+      continue;
+    }
+    result.push_back(item);
+  }
+  return result;
+}
+
+namespace {
+
+// The nearest server message's id from `index` on, going by `step`; 0 past the end.
+MsgId RegularIdFrom(const std::vector<not_null<HistoryItem *>> &all, int index, int step) {
+  for (; index >= 0 && index < int(all.size()); index += step) {
+    if (all[index]->isRegular()) return all[index]->id;
+  }
+  return MsgId();
+}
+
+int IndexOf(const std::vector<not_null<HistoryItem *>> &all, MsgId id) {
+  const auto i = std::find_if(all.begin(), all.end(), [&](not_null<HistoryItem *> item) {
+    return item->isRegular() && item->id >= id;
+  });
+  return int(i - all.begin());
+}
+
+}  // namespace
+
+void ChatView::windowAround(MsgId id) {
+  _windowMin = _windowMax = MsgId();
+  const auto all = loadedItems();
+  const auto count = int(all.size());
+  if (count <= kWindowMessages) return;
+  const auto index = id ? std::min(IndexOf(all, id), count - 1) : count - 1;
+  const auto from = id ? std::max(index - kWindowMessages / 2, 0) : count - kWindowMessages;
+  const auto till = id ? std::min(index + kWindowMessages / 2, count - 1) : count - 1;
+  if (from > 0) _windowMin = RegularIdFrom(all, from, 1);
+  if (till < count - 1) _windowMax = RegularIdFrom(all, till, -1);
+}
+
+// Jumping to a loaded message without a row (or to the end, from rows far back): the window moves there whole.
+void ChatView::showWindowAround(MsgId id) {
+  windowAround(id);
+  sync();
+  setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
+}
+
+// The next rows above, from the loaded messages: they take the room reserved above, as an older page does.
+bool ChatView::extendWindowUp() {
+  if (!_windowMin) return false;
+  const auto all = loadedItems();
+  const auto index = IndexOf(all, _windowMin);
+  const auto heightBefore = listHeight();
+  _windowMin = (index - kMessagesPerPage > 0) ? RegularIdFrom(all, index - kMessagesPerPage, -1) : MsgId();
+  _applyingPage = true;
+  sync();
+  if (const auto added = listHeight() - heightBefore; added > 0) {
+    const auto fromReserve = std::min(added, _topReserve);
+    setTopReserve(_topReserve - fromReserve, added - fromReserve);
+  }
+  _applyingPage = false;
+  return true;
+}
+
+bool ChatView::extendWindowDown() {
+  if (!_windowMax) return false;
+  const auto all = loadedItems();
+  const auto index = IndexOf(all, _windowMax);
+  const auto next = index + kMessagesPerPage;
+  _windowMax = (next < int(all.size()) - 1) ? RegularIdFrom(all, next, 1) : MsgId();
+  sync();
+  return true;
+}
+
+// The rows far from the screen go while the list stands still. Above it they leave their height to the room
+// reserved there, so nothing on the screen moves.
+void ChatView::trimRows(bool force) {
+  if ((!force && int(_rows.size()) <= kMaxRows) || _scrollTarget || !_initialLoaded) return;
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
+  graphene_point_t top;
+  if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return;
+  const auto message = [](GtkListBoxRow *row) {
+    return row ? static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message")) : nullptr;
+  };
+  const auto list = GTK_LIST_BOX(_list);
+  const auto keptBelow = message(gtk_list_box_get_row_at_y(list, int(top.y + page + kKeepHeight)));
+  if (keptBelow && !_stickToBottom
+      && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptBelow->row())) < int(_rows.size()) - 1) {
+    auto newest = MsgId();
+    for (const auto &item : keptBelow->items()) {
+      if (item->isRegular()) newest = std::max(newest, item->id);
+    }
+    if (newest) {
+      _windowMax = newest;
+      sync();
+    }
+  }
+  const auto aboveY = int(top.y - kKeepHeight);
+  const auto keptAbove = (aboveY > 0) ? message(gtk_list_box_get_row_at_y(list, aboveY)) : nullptr;
+  if (keptAbove && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptAbove->row())) > 0) {
+    auto oldest = MsgId();
+    for (const auto &item : keptAbove->items()) {
+      if (item->isRegular() && (!oldest || item->id < oldest)) oldest = item->id;
+    }
+    if (oldest) {
+      const auto heightBefore = listHeight();
+      _windowMin = oldest;
+      sync();
+      if (const auto removed = heightBefore - listHeight(); removed > 0) setTopReserve(_topReserve + removed, 0);
+    }
+  }
+  if (g_getenv("CONTRAIL_DEBUG")) {
+    g_message("History window: rows=%zu min=%d max=%d reserve=%d", _rows.size(), int(_windowMin.bare),
+              int(_windowMax.bare), _topReserve);
+  }
 }
 
 // The rows follow the messages: one per message, one per album. A row keeps its widgets when its album
@@ -1476,6 +1617,8 @@ void ChatView::refreshTransfer(FullMsgId id) {
 }
 
 void ChatView::scrollToBottom() {
+  // The rows end before the newest messages: they go to the end.
+  if (_windowMax) showWindowAround(MsgId());
   _stickToBottom = true;
   _scrollTarget = FullMsgId();
   scheduleViewportUpdate();
@@ -1493,7 +1636,7 @@ std::pair<MsgId, double> ChatView::scrollState() const {
   if (!_initialLoaded || _stickToBottom) return {};
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  if (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && loadedAtBottom()) return {};
+  if (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && shownAtBottom()) return {};
   // The topmost message seen, by its id: it is loaded again when the chat is built again.
   auto result = std::pair<MsgId, double>{MsgId(), 0.};
   auto best = std::numeric_limits<double>::max();
@@ -1546,13 +1689,19 @@ bool ChatView::scrollIdleIgnoringShift() const {
 
 void ChatView::maintainTopReserve() {
   if (!_initialLoaded || _applyingPage || _olderRequest || _topicOlderWaiting) return;
-  const auto wanted = loadedAtTop() ? 0 : (_topReserve < kTopReserveLow) ? kTopReserve : _topReserve;
-  if (wanted == _topReserve) return;
+  const auto wanted = [&] {
+    return shownAtTop() ? 0
+           : (_topReserve < kTopReserveLow || _topReserve > kTopReserveHigh) ? kTopReserve
+                                                                             : _topReserve;
+  };
+  const auto trim = int(_rows.size()) > kMaxRows && !_scrollTarget;
+  if (wanted() == _topReserve && !trim) return;
   if (!scrollIdle()) {
     _reserveTimer.callOnce(300);
     return;
   }
-  setTopReserve(wanted, wanted - _topReserve);
+  if (trim) trimRows();
+  if (const auto now = wanted(); now != _topReserve) setTopReserve(now, now - _topReserve);
 }
 
 void ChatView::scheduleViewportUpdate() {
@@ -1601,7 +1750,7 @@ void ChatView::updateViewport() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto value = gtk_adjustment_get_value(_adjustment);
-  const auto bottom = value + page >= upper - 40 && loadedAtBottom();
+  const auto bottom = value + page >= upper - 40 && shownAtBottom();
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
   preloadVisibleEdges();
   if (bottom) {
@@ -1726,8 +1875,11 @@ void ChatView::preloadVisibleEdges() {
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  if (value - _topReserve < kPreloadHeight && !loadedAtTop()) loadOlder();
-  else if (value + page > upper - kPreloadHeight && !loadedAtBottom()) loadNewer();
+  if (value - _topReserve < kPreloadHeight) {
+    if (!extendWindowUp() && !loadedAtTop()) loadOlder();
+  } else if (value + page > upper - kPreloadHeight) {
+    if (!extendWindowDown() && !loadedAtBottom()) loadNewer();
+  }
 }
 
 void ChatView::showAt(MsgId id) {
@@ -1755,6 +1907,7 @@ void ChatView::reload(MsgId showAt) {
   _waitingMedia.clear();
   _itemRows.clear();
   _rows.clear();
+  _windowMin = _windowMax = MsgId();
   _pendingShowAt = showAt;
   _stickToBottom = !showAt;
   loadInitial();
@@ -1762,6 +1915,11 @@ void ChatView::reload(MsgId showAt) {
 
 bool ChatView::scrollToLoaded(MsgId id) {
   if (const auto item = _history->owner().message(_history->peer, id)) {
+    if (!rowFor(item) && (_windowMin || _windowMax)) {
+      // Loaded, out of the window of rows.
+      const auto all = loadedItems();
+      if (std::find(all.begin(), all.end(), item) != all.end()) showWindowAround(id);
+    }
     if (rowFor(item)) {
       scrollToItem(item, id != _unreadAfter + 1);
       return true;
@@ -1827,7 +1985,7 @@ void ChatView::scrolled() {
   }
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  const auto atBottom = value + page >= upper - 40 && loadedAtBottom();
+  const auto atBottom = value + page >= upper - 40 && shownAtBottom();
   // GTK also changes the adjustment while allocating newly inserted rows. Those changes do not
   // represent a user drag and must not drop the bottom/anchor/target requested before layout.
   // Only input events opt out of bottom following. Layout/clamping changes also emit this signal
@@ -1934,6 +2092,8 @@ void ChatView::debugHistory(const QString &action) {
     } else {
       g_message("Live locations: no recent position");
     }
+  } else if (action == u"trim"_q) {
+    trimRows(true);
   } else if (action == u"live-map"_q) {
     ShowLiveMap(_window, _thread);
   } else if (action == u"live-bar"_q) {
@@ -1969,8 +2129,8 @@ void ChatView::debugHistory(const QString &action) {
   } else if (action == u"forward-menu"_q) {
     showForwardMenu();
   }
-  g_message("History state: rows=%zu min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
-      _itemRows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
+  g_message("History state: rows=%zu window=%d..%d min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
+      _itemRows.size(), int(_windowMin.bare), int(_windowMax.bare), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
       int(loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
       gtk_adjustment_get_value(_adjustment), gtk_adjustment_get_upper(_adjustment), gtk_adjustment_get_page_size(_adjustment));
   for (const auto &[raw, row] : _rows) {
@@ -2031,7 +2191,7 @@ void ChatView::markAsRead() {
   if (page <= 0) return;
   readReactions();
   const auto atBottom = gtk_adjustment_get_value(_adjustment) + page >= gtk_adjustment_get_upper(_adjustment) - 40
-      && loadedAtBottom();
+      && shownAtBottom();
   if (_stickToBottom || atBottom) {
     if (_topic) {
       if (_topic->chatListBadgesState().unread) {
@@ -2208,7 +2368,7 @@ void ChatView::buildComposer() {
           return TRUE;
         } else if (key == GDK_KEY_Up && composerText().isEmpty() && !_editing) {
           // Up in an empty field edits the last sent message.
-          const auto list = items();
+          const auto list = loadedItems();
           for (auto i = list.rbegin(); i != list.rend(); ++i) {
             if ((*i)->out() && (*i)->allowsEdit(base::unixtime::now())) {
               edit(*i);

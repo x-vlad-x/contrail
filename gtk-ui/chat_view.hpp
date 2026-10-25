@@ -95,7 +95,18 @@ private:
   void applyTopicSlice(Data::MessagesSlice &&slice);
   [[nodiscard]] bool loadedAtTop() const;
   [[nodiscard]] bool loadedAtBottom() const;
-  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;
+  // The loaded messages have rows only in a window around the screen (the rest go when the list stands still):
+  // a long scroll through a chat doesn't keep thousands of rows with their pictures. Coming back, the rows are
+  // made again from the loaded messages, before more are asked from the server.
+  [[nodiscard]] bool shownAtTop() const { return loadedAtTop() && !_windowMin; }
+  [[nodiscard]] bool shownAtBottom() const { return loadedAtBottom() && !_windowMax; }
+  [[nodiscard]] std::vector<not_null<HistoryItem *>> loadedItems() const;
+  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;  // In the window.
+  void windowAround(MsgId id);  // Rows for the messages around this one, or the newest ones for 0.
+  void showWindowAround(MsgId id);
+  bool extendWindowUp();
+  bool extendWindowDown();
+  void trimRows(bool force = false);
   void reload(MsgId showAt);
   void sync();
   MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);
@@ -240,6 +251,8 @@ private:
   std::set<const HistoryItem *> _sponsoredViewed;
   bool _sponsoredMediaLoading = false;
 
+  MsgId _windowMin = 0;  // The oldest message with a row; 0: from the oldest loaded.
+  MsgId _windowMax = 0;  // The newest one; 0: up to the newest loaded, with the messages being sent.
   int _olderRequest = 0;
   int _newerRequest = 0;
   // The part of a topic shown: a slice of its messages around a position, growing as it scrolls.
