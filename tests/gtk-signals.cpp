@@ -101,6 +101,35 @@ static void longMessageFitsPhone() {
   g_object_unref(label);
 }
 
+// A bubble aligned to one side of a wide chat, with something that expands in it (the voice player's
+// column): it gets the height its text needs at the width it is given, so the text stays inside it.
+static void bubbleKeepsTextInside() {
+  auto *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  g_object_ref_sink(line);
+  gtk_widget_set_halign(line, GTK_ALIGN_START);
+  auto *bubble = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  auto *bin = Contrail::MakeHeightForWidthBin(bubble);
+  gtk_box_append(GTK_BOX(line), bin);
+  auto *player = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_set_hexpand(player, TRUE);
+  gtk_box_append(GTK_BOX(player), gtk_progress_bar_new());
+  gtk_box_append(GTK_BOX(bubble), player);
+  std::string text;
+  for (auto i = 0; i != 60; ++i) text += "Words wrap differently at every width of the bubble. ";
+  auto *label = gtk_label_new(text.c_str());
+  Contrail::ConfigureMessageWrapping(GTK_LABEL(label));
+  gtk_box_append(GTK_BOX(bubble), label);
+  for (const auto width : {360, 600, 900, 1400}) {
+    int height = 0;
+    gtk_widget_measure(line, GTK_ORIENTATION_VERTICAL, width, &height, nullptr, nullptr, nullptr);
+    gtk_widget_allocate(line, width, height, -1, nullptr);
+    int needed = 0;
+    gtk_widget_measure(bubble, GTK_ORIENTATION_VERTICAL, gtk_widget_get_width(bin), &needed, nullptr, nullptr, nullptr);
+    g_assert_cmpint(gtk_widget_get_height(bin), >=, needed);
+  }
+  g_object_unref(line);
+}
+
 static void mediaFitsPhone() {
   auto *picture = Contrail::MakeMediaPicture(280, 210);
   auto *frame = Contrail::MakeMediaFrame(picture, 280, 210);
@@ -234,6 +263,7 @@ int main(int argc, char **argv) {
   g_test_add_func("/gtk/view/emitter-lifetime", emitterReleasedBeforeView);
   g_test_add_func("/gtk/layout/long-message", longMessageFitsPhone);
   g_test_add_func("/gtk/layout/media", mediaFitsPhone);
+  g_test_add_func("/gtk/layout/bubble-height", bubbleKeepsTextInside);
   g_test_add_func("/gtk/scroll/tap-guard", tapGuard);
   g_test_add_func("/gtk/scroll/label-links", labelLinksLeaveTouchesToScrolling);
   g_test_add_func("/gtk/layout/call-preview", callPreviewStaysSmall);
