@@ -3,7 +3,7 @@
 //     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
 // Commands: testmode | login phone|code|name TEXT | chat N | open NAME | topic N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
 //           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
-//           close | present | state | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
+//           close | present | state | memory [low|critical] | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
 //           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
 //             record-cancel|state |
 //           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
@@ -221,6 +221,9 @@ void Run(MainWindow &w, const std::string &cmdline) {
     w.present();
   } else if (cmd == "state") {
     w.debugState();
+  } else if (cmd == "memory") {
+    // "memory": the system's memory as Contrail sees it; "memory low|critical": free memory as if it were short.
+    w.debugMemory(Q(arg.c_str()));
   } else if (cmd == "core-open") {
     // Saved Messages opened by the core, as a notification's click or a link does: "core-open [ID]".
     const auto window = Core::App().activePrimaryWindow();

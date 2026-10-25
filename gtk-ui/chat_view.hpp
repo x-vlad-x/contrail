@@ -63,7 +63,9 @@ public:
   void showAt(MsgId id);
   // The message at the top of the screen and its place there; none at the bottom of the chat.
   [[nodiscard]] std::pair<MsgId, double> scrollState() const;
-  bool handleEscape();  // Cancels a reply or an edit; false if there was nothing to cancel.
+  bool handleEscape();
+  // Short of memory: only the rows near the screen stay.
+  void releaseMemory();  // Cancels a reply or an edit; false if there was nothing to cancel.
 
   // Used by the messages.
   void openPeer(not_null<PeerData *> peer);
@@ -106,7 +108,7 @@ private:
   void showWindowAround(MsgId id);
   bool extendWindowUp();
   bool extendWindowDown();
-  void trimRows(bool force = false);
+  void trimRows(bool force = false, double keep = 0.);
   void reload(MsgId showAt);
   void sync();
   MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);

@@ -1423,7 +1423,8 @@ bool ChatView::extendWindowDown() {
 
 // The rows far from the screen go while the list stands still. Above it they leave their height to the room
 // reserved there, so nothing on the screen moves.
-void ChatView::trimRows(bool force) {
+void ChatView::trimRows(bool force, double keep) {
+  if (keep <= 0.) keep = kKeepHeight;
   if ((!force && int(_rows.size()) <= kMaxRows) || _scrollTarget || !_initialLoaded) return;
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
@@ -1433,7 +1434,7 @@ void ChatView::trimRows(bool force) {
     return row ? static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message")) : nullptr;
   };
   const auto list = GTK_LIST_BOX(_list);
-  const auto keptBelow = message(gtk_list_box_get_row_at_y(list, int(top.y + page + kKeepHeight)));
+  const auto keptBelow = message(gtk_list_box_get_row_at_y(list, int(top.y + page + keep)));
   if (keptBelow && !_stickToBottom
       && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptBelow->row())) < int(_rows.size()) - 1) {
     auto newest = MsgId();
@@ -1445,7 +1446,7 @@ void ChatView::trimRows(bool force) {
       sync();
     }
   }
-  const auto aboveY = int(top.y - kKeepHeight);
+  const auto aboveY = int(top.y - keep);
   const auto keptAbove = (aboveY > 0) ? message(gtk_list_box_get_row_at_y(list, aboveY)) : nullptr;
   if (keptAbove && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptAbove->row())) > 0) {
     auto oldest = MsgId();
@@ -2667,6 +2668,11 @@ void ChatView::cancelReplyOrEdit() {
   }
   if (!_replyTo) refreshForwardBar();
   refreshSendButton();
+}
+
+void ChatView::releaseMemory() {
+  // A little beyond where the next rows are made, so they aren't made again right away.
+  trimRows(true, kPreloadHeight * 1.25);
 }
 
 bool ChatView::handleEscape() {

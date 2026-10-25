@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app.hpp"
+#include "memory_pressure.hpp"
 
 #include "base/timer.h"
 #include "base/weak_ptr.h"
@@ -29,6 +30,7 @@ class ChatView;
 class SettingsView;
 class CallView;
 class TrayIcon;
+class MemoryGuard;
 
 // The application's window. When it is closed and the app goes on in the background, the whole GTK
 // interface is released (the chats, the lists, the dialogs, their textures and GPU memory) and built
@@ -86,6 +88,7 @@ public:
   void debugHistory(const QString &action);
   void debugAttach(const QString &action);
   void debugState();
+  void debugMemory(const QString &action);
 
 private:
   // Where the interface was, to come back there: a chat or a topic and the scroll position in it.
@@ -108,6 +111,10 @@ private:
   void followCoreWindow();
   void openThreadAt(not_null<Data::Thread *> thread, MsgId showAt, MsgId anchor, double anchorY);
   void endRecordingOutside(Data::Thread *thread);
+  // Short of memory: everything that isn't on the screen goes; when it's critical and the window isn't in front,
+  // the whole interface, as when the window is closed.
+  void releaseMemory(MemoryLevel level);
+  void unloadOtherChats();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
@@ -132,6 +139,7 @@ private:
   std::unique_ptr<ChatView> _chat;
   std::unique_ptr<SettingsView> _settings;
   base::Timer _trimTimer;
+  std::unique_ptr<MemoryGuard> _memoryGuard;
   rpl::lifetime _sessionLifetime;
   rpl::lifetime _lifetime;
 };
