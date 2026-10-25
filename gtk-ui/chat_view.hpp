@@ -110,6 +110,9 @@ private:
   bool extendWindowDown();
   void trimRows(bool force = false, double keep = 0.);
   void reload(MsgId showAt);
+  void unload();  // No rows, no requests: the chat starts loading again.
+  void jumpUp(double gap);
+  void jumpBack(int back);
   void sync();
   MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);
   void setRowItems(MessageWidget *row, std::vector<not_null<HistoryItem *>> items);
@@ -283,6 +286,8 @@ private:
   double _shiftBase = 0;
   bool _touchActive = false;
   MsgId _pendingShowAt = 0;
+  // A jump far back being loaded: so many messages before the oldest one loaded before, -1 for the chat's start.
+  std::optional<int> _jumpBack;
   MsgId _unreadAfter = 0;  // The "Unread messages" bar goes before the first message after this one.
   FullMsgId _replyTo;
   FullMsgId _editing;
@@ -301,6 +306,7 @@ private:
   base::Timer _readTimer;
   base::Timer _statusTimer;
   base::Timer _reserveTimer;
+  base::Timer _jumpTimer;  // Looks again whether the list stopped far above the rows.
   rpl::lifetime _lifetime;
 };
 
