@@ -6,8 +6,8 @@
 
 #include <QtCore/QtEndian>
 #include <QtGui/QPainter>
-#include <QtSvg/QSvgRenderer>
 #include <algorithm>
+#include <map>
 #include <unistd.h>
 
 namespace Contrail {
@@ -109,16 +109,47 @@ const QString &AppIconFile() {
   return result;
 }
 
+// The icon at one size, drawn by GTK as everywhere else in the app (QtSvg doesn't know the icon's clip paths).
+// The cairo renderer needs no window: the tray icon stays while the window is closed.
+QImage DrawAppIcon(int size) {
+  auto *display = gdk_display_get_default();
+  if (!display || AppIconFile().isEmpty()) return {};
+  auto *icon = gtk_icon_theme_lookup_icon(gtk_icon_theme_get_for_display(display), kAppId, nullptr, size, 1,
+      GTK_TEXT_DIR_NONE, GtkIconLookupFlags(0));
+  auto *snapshot = gtk_snapshot_new();
+  gdk_paintable_snapshot(GDK_PAINTABLE(icon), snapshot, size, size);
+  g_object_unref(icon);
+  auto *node = gtk_snapshot_free_to_node(snapshot);
+  if (!node) return {};
+  auto result = QImage();
+  auto *renderer = gsk_cairo_renderer_new();
+  if (gsk_renderer_realize_for_display(renderer, display, nullptr)) {
+    const auto bounds = GRAPHENE_RECT_INIT(0, 0, float(size), float(size));
+    auto *texture = gsk_renderer_render_texture(renderer, node, &bounds);
+    // GDK_MEMORY_DEFAULT is cairo's premultiplied ARGB in native byte order, as QImage's.
+    result = QImage(size, size, QImage::Format_ARGB32_Premultiplied);
+    gdk_texture_download(texture, result.bits(), result.bytesPerLine());
+    g_object_unref(texture);
+    gsk_renderer_unrealize(renderer);
+  }
+  g_object_unref(renderer);
+  gsk_render_node_unref(node);
+  return result;
+}
+
+const QImage &AppIcon(int size) {
+  static auto cache = std::map<int, QImage>();
+  const auto i = cache.find(size);
+  return (i != cache.end()) ? i->second : cache.emplace(size, DrawAppIcon(size)).first->second;
+}
+
 GVariant *IconPixmaps(int unread) {
-  static QSvgRenderer renderer(AppIconFile());
   auto builder = g_variant_builder_new(G_VARIANT_TYPE("a(iiay)"));
   for (const auto size : {16, 22, 24, 32, 48, 64}) {
-    if (!renderer.isValid()) break;
-    auto image = QImage(size, size, QImage::Format_ARGB32_Premultiplied);
-    image.fill(Qt::transparent);
+    if (AppIcon(size).isNull()) break;
+    auto image = AppIcon(size);
     auto painter = QPainter(&image);
     painter.setRenderHint(QPainter::Antialiasing);
-    renderer.render(&painter, QRectF(0, 0, size, size));
     if (unread > 0) {
       // A badge with the number of unread chats, as Telegram's own tray icon has.
       const auto text = unread > 99 ? QStringLiteral("99+") : QString::number(unread);
