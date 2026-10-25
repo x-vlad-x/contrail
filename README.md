@@ -13,15 +13,15 @@ developed on the FuriLabs FLX1s with FuriOS
 
 <p align="center">
   <img src="screenshots/chats.png" width="200" alt="Chat list">
-  <img src="screenshots/chat.png" width="200" alt="A conversation with a photo, a reply and a voice message">
-  <img src="screenshots/group.png" width="200" alt="A group chat">
-  <img src="screenshots/call.png" width="200" alt="An incoming call">
+  <img src="screenshots/chat.png" width="200" alt="A conversation with reactions, a reply, a voice message and a pinned message">
+  <img src="screenshots/group.png" width="200" alt="A group with a place, live locations and reactions">
+  <img src="screenshots/live-map.png" width="200" alt="A group's live locations on one map">
 </p>
 <p align="center">
-  <img src="screenshots/chats-dark.png" width="200" alt="Chat list, dark style">
-  <img src="screenshots/chat-dark.png" width="200" alt="A conversation, dark style">
-  <img src="screenshots/channel.png" width="200" alt="A channel">
-  <img src="screenshots/profile.png" width="200" alt="A profile">
+  <img src="screenshots/chat-dark.png" width="200" alt="A message's menu with reactions, dark style">
+  <img src="screenshots/forward.png" width="200" alt="Choosing the chat to forward a message to">
+  <img src="screenshots/call.png" width="200" alt="An incoming call">
+  <img src="screenshots/channel.png" width="200" alt="A channel with reactions">
 </p>
 
 > [!NOTE]
@@ -33,6 +33,9 @@ keeps everything below the interface — MTProto, the message database, local st
 notifications — and replaces the interface itself with an adaptive GTK4/libadwaita one: a single column
 on a phone, the chat list and the chat side by side on a wider screen, touch gestures, the system's light
 or dark style and accent color.
+
+Contrail now has its own [Flatpak repository](#from-the-flatpak-repository) for x86_64 and ARM64: add it once, and
+new versions come through your app store or `flatpak update`.
 
 ## Features
 
@@ -51,6 +54,10 @@ or dark style and accent color.
   double tap to zoom in around the tap and back; Ctrl+wheel with a mouse.
 - **Writing**: text, replies (long press or swipe left), editing (also Up in an empty field), deleting
   (for everyone too), drafts kept per chat.
+- **Forwarding**: choose the chat (and the topic in a group with topics), and the messages wait above its message
+  field, to go with a comment or alone, with or without the senders' names.
+- **Pinned messages**: a bar with the pinned message above the chat; a tap shows it and goes on to the one pinned
+  before, a list shows all of them; pinning and unpinning from a message's menu.
 - **Sending files and pictures**: from the file chooser or pasted (Ctrl+V, Shift+Insert, Paste in the field's
   menu: a screenshot, an image copied in a browser, files copied in a file manager, also through Flatpak's
   portal), shown first with previews, a caption and "Send as documents" / "Group items"; pictures go as photos
@@ -62,8 +69,9 @@ or dark style and accent color.
 - **Locations** as in the phone apps: a map of the place in the chat, a tap opens it on an interactive map
   (OpenStreetMap) with "Open in Maps" for the system's map application. Sending: your current location, any place
   on the map, places nearby or found by name (Foursquare, as in the phone apps), or a **live location** for
-  15 minutes, an hour, 8 hours or until you stop it; it goes on in the background and after a restart, with a bar
-  in the chat to stop it. Live locations of others move on the map as they are updated. The GPS is used only while
+  15 minutes, an hour, 8 hours or until you stop it; it goes on in the background and after a restart. A bar under
+  the chat's header says who shares a live location there and opens one map with everyone: their pins move as they
+  are updated, with how far each one is from you, and sharing or stopping yours. The GPS is used only while
   the location screen is open, and for a live location only to take a fix now and then (more often while you
   move, every two minutes while you stay): nothing keeps it on.
 - **Voice messages** as in the phone apps: hold the microphone to record and release to send, slide
@@ -84,11 +92,13 @@ or dark style and accent color.
   launcher does. The interface is released meanwhile (its memory, textures and timers): opening the window
   again comes back to the same chat, draft and place in it, or to the chat a notification or a link points to.
   A voice message being recorded goes on.
+- **Memory kept in check**: a chat keeps only the messages near the screen, and when the system runs short of
+  memory Contrail lets go of what isn't on the screen.
 - `tg://` and `t.me` links, chat info, contacts, Saved Messages, settings.
 - **Every language Telegram is translated into**: the strings are Telegram Desktop's own; on the first
   start the language follows the system.
 
-Not there yet: group calls, screen sharing, stories, forwarding and selecting messages,
+Not there yet: group calls, screen sharing, stories, selecting several messages,
 sticker and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't
 planned: Telegram Desktop doesn't have them either.
 
@@ -206,7 +216,7 @@ uses, so nothing has to be installed on the build machine.
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `reactions`, `location` (the device's position from GeoClue or the portal), `live_location` (live locations being shared; `geo.hpp`), `location_ui` (sending a location, a location on the map), `map_view` (libshumate maps), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
+| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `reactions`, `forward` (choosing where to forward), `location` (the device's position from GeoClue or the portal), `live_location` (live locations being shared; `geo.hpp`), `chat_live_locations` and `live_map` (a chat's live locations, on one map), `location_ui` (sending a location, a location on the map), `map_view` (libshumate maps), `memory_guard` (giving memory back when the system is short of it; `memory_pressure.hpp`), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
 | `patches/` | The patches for Telegram Desktop; `patches/tg_owt/` for WebRTC (built by `build-deps.sh`) |
 | `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
@@ -236,8 +246,8 @@ its own log to `~/.local/share/contrail-data/log.txt`.
 
 Regressions for the parts that don't need a Telegram account — GTK handler lifetimes, layout on a phone
 width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation, audio
-routing, the photo viewer's zoom geometry, album cells on narrow screens, what a paste brings and when a live
-location is updated — run on
+routing, the photo viewer's zoom geometry, album cells on narrow screens, what a paste brings, when a live
+location is updated and when memory is short — run on
 any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under AddressSanitizer and
 UBSan:
 
@@ -264,17 +274,21 @@ network after starting, after loading a chat's media and 1, 5 and 15 minutes aft
 The screenshots show the real interface with a made-up account. `tools/demo.sh` starts a second Contrail
 on the phone with its own empty data directory and application ID, in English, inside a network namespace
 without network; the `demo` command (`gtk-ui/demo.cpp`) signs a fictional account in locally and fills it
-with chats, a group and a channel with generated pictures. Nothing reaches Telegram's servers and the
-installed Contrail is not touched. The app draws its own window into a PNG, so the phone's screen can be
-locked meanwhile:
+with chats, a group and a channel with generated pictures, reactions, a pinned message and locations. Nothing
+reaches Telegram's servers and the installed Contrail is not touched. The maps come from a few OpenStreetMap tiles
+that `tools/demo.sh tiles` downloads once and copies into the demo's own cache. The app draws its own window into
+a PNG, so the phone's screen can be locked meanwhile:
 
 ```bash
+tools/demo.sh tiles             # once: the maps around the made-up places
 tools/demo.sh run               # or: tools/demo.sh run dark
 tools/demo.sh cmd demo
 tools/demo.sh cmd 'chat 0'
 tools/demo.sh shot chat.png
 tools/demo.sh stop
 ```
+
+`PROGRAM=.local/share/contrail-test tools/demo.sh run` runs the demo from another SSH install on the phone.
 
 ## License
 
