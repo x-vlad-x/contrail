@@ -8,6 +8,7 @@
 
 #include <rpl/lifetime.h>
 
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -31,12 +32,17 @@ namespace Api {
 struct SendAction;
 } // namespace Api
 
+namespace HistoryView {
+class PinnedTracker;
+} // namespace HistoryView
+
 namespace Contrail {
 
 class MainWindow;
 class MessageWidget;
 class AttachDialog;
 class ClipboardReader;
+class ChatLiveLocations;
 
 // An open chat: the messages (loaded page by page through the core, like Telegram Desktop's
 // HistoryWidget does) and the message field. A topic of a group with topics is a chat of its own:
@@ -57,7 +63,9 @@ public:
   void showAt(MsgId id);
   // The message at the top of the screen and its place there; none at the bottom of the chat.
   [[nodiscard]] std::pair<MsgId, double> scrollState() const;
-  bool handleEscape();  // Cancels a reply or an edit; false if there was nothing to cancel.
+  bool handleEscape();
+  // Short of memory: only the rows near the screen stay.
+  void releaseMemory();  // Cancels a reply or an edit; false if there was nothing to cancel.
 
   // Used by the messages.
   void openPeer(not_null<PeerData *> peer);
@@ -67,6 +75,7 @@ public:
   void refreshMessage(FullMsgId id);
   void showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y);
   void replyTo(not_null<HistoryItem *> item);
+  void forward(not_null<HistoryItem *> item);
   void sendText(const QString &text);  // Bot commands from links.
   void debugScroll(bool top);
   void debugCheckDraft();
@@ -88,7 +97,18 @@ private:
   void applyTopicSlice(Data::MessagesSlice &&slice);
   [[nodiscard]] bool loadedAtTop() const;
   [[nodiscard]] bool loadedAtBottom() const;
-  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;
+  // The loaded messages have rows only in a window around the screen (the rest go when the list stands still):
+  // a long scroll through a chat doesn't keep thousands of rows with their pictures. Coming back, the rows are
+  // made again from the loaded messages, before more are asked from the server.
+  [[nodiscard]] bool shownAtTop() const { return loadedAtTop() && !_windowMin; }
+  [[nodiscard]] bool shownAtBottom() const { return loadedAtBottom() && !_windowMax; }
+  [[nodiscard]] std::vector<not_null<HistoryItem *>> loadedItems() const;
+  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;  // In the window.
+  void windowAround(MsgId id);  // Rows for the messages around this one, or the newest ones for 0.
+  void showWindowAround(MsgId id);
+  bool extendWindowUp();
+  bool extendWindowDown();
+  void trimRows(bool force = false, double keep = 0.);
   void reload(MsgId showAt);
   void sync();
   MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);
@@ -99,10 +119,26 @@ private:
   void refreshItem(const HistoryItem *item);
   // The core says a message's data changed: only the reactions, if it was them.
   void refreshItemData(const HistoryItem *item);
-  void refreshLiveBanner();
+  void buildTopBars();
+  void refreshLiveBar();
+  // The pinned message bar (HistoryWidget's PinnedTracker): the pinned message above the bottom of the screen;
+  // a tap shows it, and then the one pinned before it.
+  void setupPinned();
+  void refreshPinnedBar();
+  void updatePinnedViewer();
+  void pinnedBarClicked();
+  [[nodiscard]] bool pinnedHiddenByUser() const;
+  void showPinnedList();
+  void confirmPin(not_null<HistoryItem *> item);
+  void confirmUnpin(not_null<HistoryItem *> item);
+  void confirmUnpinAll();
+  void confirmHidePinned();
   void readReactions();
   void pollReactions();
   void refreshTransfer(FullMsgId id);
+  // The rows on the screen, top to bottom, found by their place in the list: a chat scrolled far back has
+  // thousands, too many to go through at every step of the scrolling.
+  [[nodiscard]] std::vector<MessageWidget *> visibleRows() const;
 
   void scrollToBottom();
   void scrollToItem(not_null<const HistoryItem *> item, bool highlight);
@@ -125,6 +161,12 @@ private:
   void edit(not_null<HistoryItem *> item);
   void cancelReplyOrEdit();
   void showReplyBar(const QString &title, const QString &text, const char *icon);
+  // The messages waiting to be forwarded here (the chat's forward draft) are shown in the reply bar.
+  [[nodiscard]] bool forwarding() const;
+  void refreshForwardBar();
+  void cancelForward();
+  void showForwardMenu();
+  void refreshSendButton();
   void chooseFiles();
   void chooseLocation();
   // The files from the chooser or a pasted picture, shown before sending (AttachDialog).
@@ -151,7 +193,24 @@ private:
 
   GtkWidget *_root = nullptr;
   GtkWidget *_title = nullptr;
-  GtkWidget *_liveBanner = nullptr;
+  GtkWidget *_liveBar = nullptr;
+  GtkWidget *_liveText = nullptr;
+  GtkWidget *_liveStop = nullptr;
+  std::unique_ptr<ChatLiveLocations> _liveLocations;
+  GtkWidget *_pinnedBar = nullptr;
+  GtkWidget *_pinnedTitle = nullptr;
+  GtkWidget *_pinnedText = nullptr;
+  GtkWidget *_pinnedPreview = nullptr;
+  GtkWidget *_pinnedList = nullptr;
+  GtkWidget *_pinnedClose = nullptr;
+  std::unique_ptr<HistoryView::PinnedTracker> _pinnedTracker;
+  QString _pinnedTitleText;
+  QString _pinnedTextText;
+  QImage _pinnedImage;
+  int _pinnedCount = 0;
+  FullMsgId _pinnedClicked;              // Shown with a tap on the bar: the bar goes on to the one before it.
+  std::optional<FullMsgId> _minPinned;   // The oldest pinned message, once asked while going through them.
+  double _lastScrollValue = 0.;
   GtkWidget *_list = nullptr;
   GtkWidget *_scroll = nullptr;
   GtkAdjustment *_adjustment = nullptr;
@@ -194,6 +253,8 @@ private:
   std::set<const HistoryItem *> _sponsoredViewed;
   bool _sponsoredMediaLoading = false;
 
+  MsgId _windowMin = 0;  // The oldest message with a row; 0: from the oldest loaded.
+  MsgId _windowMax = 0;  // The newest one; 0: up to the newest loaded, with the messages being sent.
   int _olderRequest = 0;
   int _newerRequest = 0;
   // The part of a topic shown: a slice of its messages around a position, growing as it scrolls.
@@ -230,6 +291,7 @@ private:
   QString _loadedDraft;
   QString _beforeEditText;
   bool _editPending = false;
+  bool _forwardShown = false;
   bool _settingComposerText = false;
   int _editGeneration = 0;
   bool _syncScheduled = false;

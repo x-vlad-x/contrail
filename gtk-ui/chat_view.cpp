@@ -1,6 +1,9 @@
 #include "chat_view.hpp"
 
 #include "attach.hpp"
+#include "chat_live_locations.hpp"
+#include "forward.hpp"
+#include "live_map.hpp"
 #include "live_location.hpp"
 #include "location_ui.hpp"
 #include "main_window.hpp"
@@ -49,6 +52,15 @@
 #include "history/history_item.h"
 #include "history/view/history_view_element.h"
 #include "history/view/history_view_item_preview.h"
+#include "history/view/history_view_pinned_bar.h"
+#include "history/view/history_view_pinned_tracker.h"
+#include "history/history_item_components.h"
+#include "history/history_item_helpers.h"
+#include "data/data_shared_media.h"
+#include "main/main_session_settings.h"
+#include "storage/storage_shared_media.h"
+#include "ui/chat/message_bar.h"
+#include "ui/dynamic_image.h"
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "media/audio/media_audio_capture.h"
@@ -77,6 +89,13 @@ constexpr auto kPreloadHeight = 6000.;  // About eight phone screens: pages come
 // render transforms starts to blur the text.
 constexpr auto kTopReserve = 200000;
 constexpr auto kTopReserveLow = 100000;
+constexpr auto kTopReserveHigh = 300000;  // Rows removed above the screen leave their height to the reserve.
+// The window of messages with rows: this many around a message the chat opens at, rows within this distance
+// from the screen kept when the list stands still (well beyond where the next rows are made or loaded, so
+// the two don't take turns), and removed only when there are more rows than this.
+constexpr auto kWindowMessages = 200;
+constexpr auto kKeepHeight = 2.5 * kPreloadHeight;
+constexpr auto kMaxRows = 300;
 // Voice messages are recorded while the microphone button is held, as in the phone apps.
 constexpr auto kRecordCancelDistance = 120.;  // Slide left to cancel.
 constexpr auto kRecordLockDistance = 90.;     // Slide up to keep recording without holding.
@@ -147,6 +166,53 @@ void LaunchFile(const QString &path) {
   g_object_unref(file);
 }
 
+// A bar under the header, as the phone apps show the pinned message and the live locations: a tap on it does one
+// thing, the buttons at its end others. In a revealer, to slide in and out.
+GtkWidget *MakeTopBar(const char *cssClass, GtkWidget *prefix, GtkWidget **title, GtkWidget **text,
+                      std::vector<GtkWidget *> buttons, Fn<void()> tapped) {
+  auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_add_css_class(box, "chat-top-bar");
+  gtk_widget_add_css_class(box, cssClass);
+  if (prefix) {
+    gtk_widget_set_valign(prefix, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(box), prefix);
+  }
+  auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class(column, "top-bar-text");
+  gtk_widget_set_hexpand(column, TRUE);
+  gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
+  *title = gtk_label_new(nullptr);
+  gtk_widget_add_css_class(*title, "top-bar-title");
+  gtk_label_set_xalign(GTK_LABEL(*title), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(*title), PANGO_ELLIPSIZE_END);
+  gtk_box_append(GTK_BOX(column), *title);
+  *text = gtk_label_new(nullptr);
+  gtk_label_set_xalign(GTK_LABEL(*text), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(*text), PANGO_ELLIPSIZE_END);
+  gtk_label_set_single_line_mode(GTK_LABEL(*text), TRUE);
+  gtk_box_append(GTK_BOX(column), *text);
+  gtk_box_append(GTK_BOX(box), column);
+  for (auto *button : buttons) {
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(box), button);
+  }
+  // The buttons claim their own taps.
+  auto *click = gtk_gesture_click_new();
+  Connect<void(GtkGestureClick *, int, double, double)>(click, "released",
+                                                        [tapped](GtkGestureClick *, int, double, double) { tapped(); });
+  gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
+  auto *revealer = gtk_revealer_new();
+  gtk_revealer_set_transition_type(GTK_REVEALER(revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+  gtk_revealer_set_child(GTK_REVEALER(revealer), box);
+  return revealer;
+}
+
+QString ForwardSenderName(not_null<HistoryItem *> item) {
+  if (const auto sender = item->originalSender()) return sender->name();
+  if (const auto hidden = item->originalHiddenSenderInfo()) return hidden->name;
+  return item->from()->name();
+}
+
 }  // namespace
 
 ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt,
@@ -195,7 +261,13 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
   data.itemRepaintRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) {
     if (rowFor(item)) pollReactions();
   }, _lifetime);
-  Live().changes() | rpl::on_next([=] { refreshLiveBanner(); }, _lifetime);
+  Live().changes() | rpl::on_next([=] { refreshLiveBar(); }, _lifetime);
+  if (_liveLocations) {
+    _liveLocations->changes() | rpl::on_next([=] { refreshLiveBar(); }, _lifetime);
+  }
+  // Messages to forward were put here (from another chat, or this one).
+  session->changes().entryUpdates(_thread, Data::EntryUpdate::Flag::ForwardDraft)
+      | rpl::on_next([=] { refreshForwardBar(); }, _lifetime);
   // A replied message came from the server (or turned out deleted): the reply shows it.
   data.itemResizeRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) {
     if (const auto row = rowFor(item); row && row->replyPending()) refreshItem(item);
@@ -304,6 +376,8 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
   // chat needs; the core asks for it at most once in a while.
   _history->peer->updateFull();
 
+  setupPinned();
+  refreshForwardBar();
   loadInitial();
 }
 
@@ -319,6 +393,8 @@ ChatView::~ChatView() {
   _statusTimer.cancel();
   _reserveTimer.cancel();
   _signals.clear();
+  _pinnedTracker = nullptr;
+  _liveLocations = nullptr;
   // Removing rows must not query messages that are being destroyed.
   gtk_list_box_set_header_func(GTK_LIST_BOX(_list), nullptr, nullptr, nullptr);
   gtk_list_box_set_sort_func(GTK_LIST_BOX(_list), nullptr, nullptr, nullptr);
@@ -378,19 +454,73 @@ void ChatView::buildHeader() {
   }
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), header);
 
-  // A live location being shared to this chat, as the phone apps show it above the messages.
-  _liveBanner = adw_banner_new(U8(Translated("You are sharing your live location", "Вы транслируете геопозицию",
-                                            "Ви транслюєте геопозицію")).c_str());
-  adw_banner_set_button_label(ADW_BANNER(_liveBanner), U8(tr::lng_group_call_screen_share_stop(tr::now)).c_str());
-  _signals.connect<void(AdwBanner *)>(_liveBanner, "button-clicked", [this](AdwBanner *) {
-    if (const auto id = Live().sharingIn(_history->peer)) Live().stop(id);
-  });
-  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBanner);
-  refreshLiveBanner();
+  buildTopBars();
 }
 
-void ChatView::refreshLiveBanner() {
-  adw_banner_set_revealed(ADW_BANNER(_liveBanner), bool(Live().sharingIn(_history->peer)));
+void ChatView::buildTopBars() {
+  // Whoever shares a live location in this chat (they don't go to channels).
+  if (!_history->peer->isBroadcast()) {
+    _liveLocations = std::make_unique<ChatLiveLocations>(_history);
+  }
+  auto *liveIcon = gtk_image_new_from_icon_name("contrail-live-location-symbolic");
+  gtk_image_set_pixel_size(GTK_IMAGE(liveIcon), 16);
+  gtk_widget_add_css_class(liveIcon, "location-row-icon");
+  gtk_widget_add_css_class(liveIcon, "live-location");
+  _liveStop = MakeIconButton("window-close-symbolic", U8(tr::lng_group_call_screen_share_stop(tr::now)).c_str(), "flat");
+  gtk_widget_add_css_class(_liveStop, "circular");
+  _signals.clicked(_liveStop, [this] {
+    if (const auto id = Live().sharingIn(_history->peer)) Live().stop(id);
+  });
+  GtkWidget *liveTitle = nullptr;
+  _liveBar = MakeTopBar("live-bar", liveIcon, &liveTitle, &_liveText, {_liveStop}, crl::guard(this, [=] {
+    ShowLiveMap(_window, _thread);
+  }));
+  gtk_label_set_text(GTK_LABEL(liveTitle), U8(tr::lng_live_location(tr::now)).c_str());
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBar);
+  refreshLiveBar();
+
+  // A GtkImage keeps its size whatever the picture: a GtkPicture's height follows its width, which the bar's
+  // layout must not depend on (see MakeHeightForWidthBin).
+  _pinnedPreview = gtk_image_new();
+  gtk_image_set_pixel_size(GTK_IMAGE(_pinnedPreview), 36);
+  gtk_widget_add_css_class(_pinnedPreview, "pinned-preview");
+  gtk_widget_set_overflow(_pinnedPreview, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_set_visible(_pinnedPreview, FALSE);
+  _pinnedList = MakeIconButton("view-list-bullet-symbolic",
+                               U8(Translated("All Pinned Messages", "Все закреплённые сообщения",
+                                             "Усі закріплені повідомлення")).c_str(),
+                               "flat");
+  gtk_widget_add_css_class(_pinnedList, "circular");
+  _signals.clicked(_pinnedList, [this] { showPinnedList(); });
+  _pinnedClose = MakeIconButton("window-close-symbolic", U8(tr::lng_pinned_hide_all_hide(tr::now)).c_str(), "flat");
+  gtk_widget_add_css_class(_pinnedClose, "circular");
+  _signals.clicked(_pinnedClose, [this] {
+    const auto item = _history->owner().message(_pinnedTracker ? _pinnedTracker->currentMessageId().message : FullMsgId());
+    if (item && item->canPin()) {
+      confirmUnpin(item);
+    } else {
+      confirmHidePinned();
+    }
+  });
+  _pinnedBar = MakeTopBar("pinned-bar", _pinnedPreview, &_pinnedTitle, &_pinnedText, {_pinnedList, _pinnedClose},
+                          crl::guard(this, [=] { pinnedBarClicked(); }));
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _pinnedBar);
+}
+
+void ChatView::refreshLiveBar() {
+  const auto sharing = bool(Live().sharingIn(_history->peer));
+  const auto empty = std::vector<not_null<HistoryItem *>>();
+  const auto &active = _liveLocations ? _liveLocations->active() : empty;
+  const auto mine = std::any_of(active.begin(), active.end(), [](not_null<HistoryItem *> item) { return IsMyLiveLocation(item); });
+  auto names = LiveLocationNames(active);
+  if (sharing && !mine) {
+    // Being sent: the message hasn't come back yet.
+    names = active.empty() ? tr::lng_from_you(tr::now)
+                           : Translated("%1 and you", "%1 и вы", "%1 і ви").arg(LiveLocationNames(active));
+  }
+  gtk_label_set_text(GTK_LABEL(_liveText), U8(names).c_str());
+  gtk_widget_set_visible(_liveStop, sharing);
+  gtk_revealer_set_reveal_child(GTK_REVEALER(_liveBar), sharing || !active.empty());
 }
 
 void ChatView::refreshHeader() {
@@ -424,6 +554,308 @@ void ChatView::refreshHeader() {
   }
   adw_window_title_set_title(ADW_WINDOW_TITLE(_title), U8(name).c_str());
   adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), U8(status).c_str());
+}
+
+// --- pinned messages ---------------------------------------------------------
+
+void ChatView::setupPinned() {
+  const auto session = &_history->session();
+  _pinnedTracker = std::make_unique<HistoryView::PinnedTracker>(_thread);
+  HistoryView::PinnedBarContent(session, _pinnedTracker->shownMessageId(), [] {})
+      | rpl::on_next([=](Ui::MessageBarContent &&content) {
+          _pinnedTitleText = content.title;
+          _pinnedTextText = content.text.text;
+          _pinnedCount = content.count;
+          _pinnedImage = content.preview ? content.preview->image(36 * gtk_widget_get_scale_factor(_pinnedBar)) : QImage();
+          refreshPinnedBar();
+        }, _lifetime);
+  // A message pinned or unpinned somewhere: the bar may come back after it was hidden.
+  session->changes().entryUpdates(_thread, Data::EntryUpdate::Flag::HasPinnedMessages)
+      | rpl::on_next([=] { refreshPinnedBar(); }, _lifetime);
+  updatePinnedViewer();
+}
+
+bool ChatView::pinnedHiddenByUser() const {
+  const auto peer = _history->peer;
+  if (peer->canPinMessages()) return false;
+  const auto top = Data::ResolveTopPinnedId(peer, _thread->topicRootId(), _thread->monoforumPeerId());
+  const auto hidden = _history->session().settings().hiddenPinnedMessageId(peer->id, _thread->topicRootId(),
+                                                                           _thread->monoforumPeerId());
+  return top && hidden == top.msg;
+}
+
+void ChatView::refreshPinnedBar() {
+  const auto shown = (!_pinnedTitleText.isEmpty() || !_pinnedTextText.isEmpty()) && !pinnedHiddenByUser();
+  gtk_revealer_set_reveal_child(GTK_REVEALER(_pinnedBar), shown);
+  if (!shown) return;
+  gtk_label_set_text(GTK_LABEL(_pinnedTitle), U8(_pinnedTitleText).c_str());
+  gtk_label_set_text(GTK_LABEL(_pinnedText), U8(QString(_pinnedTextText).replace('\n', ' ')).c_str());
+  if (auto *texture = ToTexture(_pinnedImage)) {
+    gtk_image_set_from_paintable(GTK_IMAGE(_pinnedPreview), GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+    gtk_widget_set_visible(_pinnedPreview, TRUE);
+  } else {
+    gtk_image_clear(GTK_IMAGE(_pinnedPreview));
+    gtk_widget_set_visible(_pinnedPreview, FALSE);
+  }
+  // Several pinned: the list of them; one: unpin it (or hide the bar, without the right to unpin).
+  gtk_widget_set_visible(_pinnedList, _pinnedCount > 1);
+  gtk_widget_set_visible(_pinnedClose, _pinnedCount <= 1);
+}
+
+// The bar shows the last message pinned above the bottom of the screen (HistoryWidget::updatePinnedViewer).
+void ChatView::updatePinnedViewer() {
+  if (!_pinnedTracker) return;
+  auto lessThan = MsgId(ServerMaxMsgId - 1);
+  const auto value = gtk_adjustment_get_value(_adjustment);
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const auto atBottom = _stickToBottom
+                        || (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && shownAtBottom());
+  if (_initialLoaded && !atBottom) {
+    auto bottom = MsgId();
+    for (const auto row : visibleRows()) {
+      for (const auto &item : row->items()) {
+        if (!item->isRegular() || item->id <= bottom) continue;
+        auto *widget = row->widgetFor(item);
+        double y = 0;
+        const auto height = gtk_widget_get_height(widget);
+        if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page) bottom = item->id;
+      }
+    }
+    if (bottom) lessThan = bottom + 1;
+  }
+  if (_pinnedClicked && !_scrollTarget && lessThan <= _pinnedClicked.msg) {
+    // Scrolled above the message shown with the bar.
+    _pinnedClicked = FullMsgId();
+  }
+  if (_pinnedClicked && !_minPinned) {
+    _minPinned = Data::ResolveMinPinnedId(_history->peer, _thread->topicRootId(), _thread->monoforumPeerId());
+  }
+  if (_pinnedClicked && _minPinned && *_minPinned >= _pinnedClicked) {
+    // The oldest one was shown: round to the newest again.
+    _pinnedTracker->trackAround(ServerMaxMsgId - 1);
+  } else {
+    _pinnedTracker->trackAround(_pinnedClicked ? std::min(lessThan, _pinnedClicked.msg) : lessThan);
+  }
+}
+
+void ChatView::pinnedBarClicked() {
+  if (!_pinnedTracker) return;
+  const auto id = _pinnedTracker->currentMessageId().message;
+  if (!id || id.peer != _history->peer->id) return;
+  _pinnedClicked = id;
+  if (const auto item = _history->owner().message(id)) {
+    // A pinned message of an album: the album is shown, the bar goes on before all of it.
+    if (const auto group = _history->owner().groups().find(item)) _pinnedClicked = group->items.front()->fullId();
+  }
+  _minPinned = std::nullopt;
+  showAt(id.msg);
+  updatePinnedViewer();
+}
+
+void ChatView::confirmPin(not_null<HistoryItem *> item) {
+  const auto peer = _history->peer;
+  const auto top = Data::ResolveTopPinnedId(peer, _thread->topicRootId(), _thread->monoforumPeerId());
+  const auto old = top && item->id < top.msg;
+  const auto group = peer->isChat() || peer->isMegagroup();
+  auto *dialog = adw_alert_dialog_new(U8(old ? tr::lng_pinned_pin_old_sure(tr::now)
+                                         : group ? tr::lng_pinned_pin_sure_group(tr::now)
+                                                 : tr::lng_pinned_pin_sure(tr::now)).c_str(),
+                                      nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", U8(tr::lng_cancel(tr::now)).c_str(), "pin",
+                                 U8(tr::lng_pinned_pin(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "pin", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "pin");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  // As PinMessageBox: for the other person too in a chat with a user, the members notified in a group.
+  GtkWidget *forPeer = nullptr;
+  GtkWidget *notify = nullptr;
+  if (peer->isUser() && !peer->isSelf()) {
+    forPeer = gtk_check_button_new_with_label(U8(tr::lng_pinned_also_for_other(tr::now, lt_user, peer->shortName())).c_str());
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), forPeer);
+  } else if (!old && group && !peer->isMonoforum()) {
+    notify = gtk_check_button_new_with_label(U8(tr::lng_pinned_notify(tr::now)).c_str());
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(notify), TRUE);
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), notify);
+  }
+  const auto id = item->id;
+  const auto session = &_history->session();
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "pin") != 0) return;
+    using Flag = MTPmessages_UpdatePinnedMessage::Flag;
+    auto flags = MTPmessages_UpdatePinnedMessage::Flags(0);
+    if (notify && !gtk_check_button_get_active(GTK_CHECK_BUTTON(notify))) flags |= Flag::f_silent;
+    if (forPeer && !gtk_check_button_get_active(GTK_CHECK_BUTTON(forPeer))) flags |= Flag::f_pm_oneside;
+    session->api()
+        .request(MTPmessages_UpdatePinnedMessage(MTP_flags(flags), peer->input(), MTP_int(id)))
+        .done([=](const MTPUpdates &result) { session->api().applyUpdates(result); })
+        .fail([=](const MTP::Error &error) { ShowToast(error.type()); })
+        .send();
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window->widget());
+}
+
+void ChatView::confirmUnpin(not_null<HistoryItem *> item) {
+  auto *dialog = adw_alert_dialog_new(U8(tr::lng_pinned_unpin_sure(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", U8(tr::lng_cancel(tr::now)).c_str(), "unpin",
+                                 U8(tr::lng_pinned_unpin(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "unpin", ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  const auto peer = item->history()->peer;
+  const auto id = item->id;
+  const auto session = &_history->session();
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "unpin") != 0) return;
+    session->api()
+        .request(MTPmessages_UpdatePinnedMessage(MTP_flags(MTPmessages_UpdatePinnedMessage::Flag::f_unpin),
+                                                 peer->input(), MTP_int(id)))
+        .done([=](const MTPUpdates &result) { session->api().applyUpdates(result); })
+        .send();
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window->widget());
+}
+
+// UnpinAllMessages in window_peer_menu.cpp.
+void ChatView::confirmUnpinAll() {
+  auto *dialog = adw_alert_dialog_new(U8(tr::lng_pinned_unpin_all_sure(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", U8(tr::lng_cancel(tr::now)).c_str(), "unpin",
+                                 U8(tr::lng_pinned_unpin(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "unpin", ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  const auto history = _history;
+  const auto topicRootId = _thread->topicRootId();
+  const auto monoforumPeerId = _thread->monoforumPeerId();
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "unpin") != 0) return;
+    const auto api = &history->session().api();
+    const auto send = [=](auto self) -> void {
+      using Flag = MTPmessages_UnpinAllMessages::Flag;
+      api->request(MTPmessages_UnpinAllMessages(MTP_flags(topicRootId ? Flag::f_top_msg_id : Flag()),
+                                                history->peer->input(), MTP_int(topicRootId.bare), MTPInputPeer()))
+          .done([=](const MTPmessages_AffectedHistory &result) {
+            if (api->applyAffectedHistory(history->peer, result) > 0) {
+              self(self);
+            } else {
+              history->unpinMessagesFor(topicRootId, monoforumPeerId);
+            }
+          })
+          .send();
+    };
+    send(send);
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window->widget());
+}
+
+// Without the right to unpin: the bar goes away until something new is pinned (HidePinnedBar).
+void ChatView::confirmHidePinned() {
+  auto *dialog = adw_alert_dialog_new(nullptr, U8(tr::lng_pinned_hide_all_sure(tr::now)).c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", U8(tr::lng_cancel(tr::now)).c_str(), "hide",
+                                 U8(tr::lng_pinned_hide_all_hide(tr::now)).c_str(), nullptr);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  const auto weak = base::make_weak(this);
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=](AdwAlertDialog *, const char *response) {
+    const auto strong = weak.get();
+    if (!strong || g_strcmp0(response, "hide") != 0) return;
+    const auto peer = strong->_history->peer;
+    const auto topicRootId = strong->_thread->topicRootId();
+    const auto monoforumPeerId = strong->_thread->monoforumPeerId();
+    if (const auto top = Data::ResolveTopPinnedId(peer, topicRootId, monoforumPeerId)) {
+      auto &session = peer->session();
+      session.settings().setHiddenPinnedMessageId(peer->id, topicRootId, monoforumPeerId, top.msg);
+      session.saveSettingsDelayed();
+      strong->refreshPinnedBar();
+    }
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window->widget());
+}
+
+// All the pinned messages of the chat, newest first; a tap shows one.
+void ChatView::showPinnedList() {
+  const auto peer = _history->peer;
+  const auto session = &_history->session();
+  auto *dialog = adw_dialog_new();
+  adw_dialog_set_content_width(ADW_DIALOG(dialog), 480);
+  adw_dialog_set_content_height(ADW_DIALOG(dialog), 900);
+  auto *view = adw_toolbar_view_new();
+  auto *header = adw_header_bar_new();
+  auto *title = adw_window_title_new(U8(tr::lng_pinned_message(tr::now)).c_str(), nullptr);
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), title);
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
+  auto *list = gtk_list_box_new();
+  gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+  gtk_widget_add_css_class(list, "boxed-list");
+  gtk_widget_set_valign(list, GTK_ALIGN_START);
+  SetMarginAll(list, 12);
+  auto *clamp = adw_clamp_new();
+  adw_clamp_set_child(ADW_CLAMP(clamp), list);
+  auto *scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
+  gtk_widget_set_vexpand(scroll, TRUE);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
+  // Unpin them all, or (without the right to) hide the bar.
+  auto *action = gtk_button_new_with_label(
+      U8(peer->canPinMessages() ? tr::lng_pinned_unpin_all(tr::now, lt_count, std::max(_pinnedCount, 1))
+                                : tr::lng_pinned_hide_all(tr::now)).c_str());
+  gtk_widget_add_css_class(action, "pill");
+  gtk_widget_add_css_class(action, peer->canPinMessages() ? "destructive-action" : "flat");
+  gtk_widget_set_halign(action, GTK_ALIGN_CENTER);
+  SetMarginAll(action, 12);
+  adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(view), action);
+  adw_dialog_set_child(ADW_DIALOG(dialog), view);
+
+  const auto weak = base::make_weak(this);
+  Connect<void(GtkButton *)>(action, "clicked", [=](GtkButton *) {
+    adw_dialog_close(ADW_DIALOG(dialog));
+    if (const auto strong = weak.get()) {
+      if (strong->_history->peer->canPinMessages()) {
+        strong->confirmUnpinAll();
+      } else {
+        strong->confirmHidePinned();
+      }
+    }
+  });
+  Connect<void(GtkListBox *, GtkListBoxRow *)>(list, "row-activated", [=](GtkListBox *, GtkListBoxRow *row) {
+    const auto id = MsgId(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(row), "contrail-msg")));
+    adw_dialog_close(ADW_DIALOG(dialog));
+    if (const auto strong = weak.get(); strong && id) {
+      strong->_pinnedClicked = FullMsgId(strong->_history->peer->id, id);
+      strong->_minPinned = std::nullopt;
+      strong->showAt(id);
+      strong->updatePinnedViewer();
+    }
+  });
+  // The core's list of pinned messages (shared media of the Pinned kind), as the bar's tracker loads it.
+  auto lifetime = std::make_unique<rpl::lifetime>();
+  SharedMediaMergedViewer(
+      session,
+      SharedMediaMergedKey(SparseIdsMergedSlice::Key(peer->id, _thread->topicRootId(), _thread->monoforumPeerId(),
+                                                     PeerId(0), ServerMaxMsgId - 1),
+                           Storage::SharedMediaType::Pinned),
+      200, 200)
+      | rpl::on_next([=](const SparseIdsMergedSlice &slice) {
+          if (const auto count = slice.fullCount()) {
+            adw_window_title_set_title(ADW_WINDOW_TITLE(title),
+                                       U8(tr::lng_pinned_messages_title(tr::now, lt_count, *count)).c_str());
+          }
+          gtk_list_box_remove_all(GTK_LIST_BOX(list));
+          for (auto i = int(slice.size()); i != 0; --i) {
+            const auto item = session->data().message(slice[i - 1]);
+            if (!item) continue;
+            auto *row = adw_action_row_new();
+            const auto from = item->displayFrom() ? item->displayFrom() : item->from().get();
+            adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
+                                          Escape(from->name() + u" · "_q + FormatListDate(item->date())).c_str());
+            const auto preview = item->toPreview({.hideSender = true, .generateImages = false}).text.text;
+            adw_action_row_set_subtitle(ADW_ACTION_ROW(row), Escape(QString(preview).replace('\n', ' ')).c_str());
+            adw_action_row_set_subtitle_lines(ADW_ACTION_ROW(row), 2);
+            gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+            g_object_set_data(G_OBJECT(row), "contrail-msg", GINT_TO_POINTER(int(item->id.bare)));
+            gtk_list_box_append(GTK_LIST_BOX(list), row);
+          }
+        }, *lifetime);
+  AttachData(dialog, "contrail-pinned-list", std::move(lifetime));
+  adw_dialog_present(ADW_DIALOG(dialog), _window->widget());
 }
 
 // --- messages ----------------------------------------------------------------
@@ -659,6 +1091,7 @@ void ChatView::loadInitial() {
   }
   if (_pendingShowAt > 0) {
     if (_history->owner().message(_history->peer, _pendingShowAt)) {
+      windowAround(_pendingShowAt);
       sync();
       if (scrollToLoaded(_pendingShowAt)) {
         _initialLoaded = true;
@@ -672,8 +1105,10 @@ void ChatView::loadInitial() {
   }
   if (!_history->isEmpty() && _history->loadedAtBottom()) {
     _initialLoaded = true;
+    // The core keeps the messages loaded before: rows only for the newest of them.
+    windowAround(0);
     sync();
-    setTopReserve(_history->loadedAtTop() ? 0 : kTopReserve, 0);
+    setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
     scrollToBottom();
     _readTimer.callOnce(500);
     if (_itemRows.size() < 20) {
@@ -768,6 +1203,7 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
               }
               const auto first = !self->_initialLoaded;
               self->_initialLoaded = true;
+              if (first) self->windowAround(std::max(self->_pendingShowAt, MsgId(0)));
               self->sync();
               if (keepPosition) {
                 if (const auto added = self->listHeight() - heightBefore; added > 0) {
@@ -777,7 +1213,7 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
                 }
               }
               if (first) {
-                self->setTopReserve(history->loadedAtTop() ? 0 : kTopReserve, 0);
+                self->setTopReserve(self->shownAtTop() ? 0 : kTopReserve, 0);
                 if (self->_pendingShowAt > 0) {
                   if (!self->scrollToLoaded(base::take(self->_pendingShowAt))) self->scrollToBottom();
                 } else {
@@ -848,6 +1284,7 @@ void ChatView::applyTopicSlice(Data::MessagesSlice &&slice) {
   if (newerAdded || loadedAtBottom()) _topicNewerWaiting = false;
   _initialLoaded = true;
   _applyingPage = true;
+  if (first) windowAround(std::max(_pendingShowAt, MsgId(0)));
   sync();
   if (keepPosition) {
     if (const auto added = listHeight() - heightBefore; added > 0) {
@@ -856,7 +1293,7 @@ void ChatView::applyTopicSlice(Data::MessagesSlice &&slice) {
     }
   }
   if (first) {
-    setTopReserve(loadedAtTop() ? 0 : kTopReserve, 0);
+    setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
     if (_pendingShowAt > 0) {
       if (!scrollToLoaded(base::take(_pendingShowAt))) scrollToBottom();
     } else {
@@ -879,8 +1316,8 @@ bool ChatView::loadedAtBottom() const {
   return _topic ? (_topicSkippedAfter == 0) : _history->loadedAtBottom();
 }
 
-// The messages of the chat, oldest first.
-std::vector<not_null<HistoryItem *>> ChatView::items() const {
+// The loaded messages of the chat, oldest first.
+std::vector<not_null<HistoryItem *>> ChatView::loadedItems() const {
   auto result = std::vector<not_null<HistoryItem *>>();
   if (_topic) {
     result.reserve(_topicIds.size());
@@ -897,6 +1334,136 @@ std::vector<not_null<HistoryItem *>> ChatView::items() const {
     }
   }
   return result;
+}
+
+std::vector<not_null<HistoryItem *>> ChatView::items() const {
+  auto all = loadedItems();
+  if (!_windowMin && !_windowMax) return all;
+  auto result = std::vector<not_null<HistoryItem *>>();
+  result.reserve(std::min(all.size(), size_t(kWindowMessages * 2)));
+  auto started = !_windowMin;
+  for (const auto &item : all) {
+    if (item->isRegular()) {
+      if (_windowMax && item->id > _windowMax) break;
+      if (_windowMin && item->id < _windowMin) continue;
+      started = true;
+    } else if (!started || _windowMax) {
+      // Sponsored messages and the ones being sent go with the messages around them.
+      continue;
+    }
+    result.push_back(item);
+  }
+  return result;
+}
+
+namespace {
+
+// The nearest server message's id from `index` on, going by `step`; 0 past the end.
+MsgId RegularIdFrom(const std::vector<not_null<HistoryItem *>> &all, int index, int step) {
+  for (; index >= 0 && index < int(all.size()); index += step) {
+    if (all[index]->isRegular()) return all[index]->id;
+  }
+  return MsgId();
+}
+
+int IndexOf(const std::vector<not_null<HistoryItem *>> &all, MsgId id) {
+  const auto i = std::find_if(all.begin(), all.end(), [&](not_null<HistoryItem *> item) {
+    return item->isRegular() && item->id >= id;
+  });
+  return int(i - all.begin());
+}
+
+}  // namespace
+
+void ChatView::windowAround(MsgId id) {
+  _windowMin = _windowMax = MsgId();
+  const auto all = loadedItems();
+  const auto count = int(all.size());
+  if (count <= kWindowMessages) return;
+  const auto index = id ? std::min(IndexOf(all, id), count - 1) : count - 1;
+  const auto from = id ? std::max(index - kWindowMessages / 2, 0) : count - kWindowMessages;
+  const auto till = id ? std::min(index + kWindowMessages / 2, count - 1) : count - 1;
+  if (from > 0) _windowMin = RegularIdFrom(all, from, 1);
+  if (till < count - 1) _windowMax = RegularIdFrom(all, till, -1);
+}
+
+// Jumping to a loaded message without a row (or to the end, from rows far back): the window moves there whole.
+void ChatView::showWindowAround(MsgId id) {
+  windowAround(id);
+  sync();
+  setTopReserve(shownAtTop() ? 0 : kTopReserve, 0);
+}
+
+// The next rows above, from the loaded messages: they take the room reserved above, as an older page does.
+bool ChatView::extendWindowUp() {
+  if (!_windowMin) return false;
+  const auto all = loadedItems();
+  const auto index = IndexOf(all, _windowMin);
+  const auto heightBefore = listHeight();
+  _windowMin = (index - kMessagesPerPage > 0) ? RegularIdFrom(all, index - kMessagesPerPage, -1) : MsgId();
+  _applyingPage = true;
+  sync();
+  if (const auto added = listHeight() - heightBefore; added > 0) {
+    const auto fromReserve = std::min(added, _topReserve);
+    setTopReserve(_topReserve - fromReserve, added - fromReserve);
+  }
+  _applyingPage = false;
+  return true;
+}
+
+bool ChatView::extendWindowDown() {
+  if (!_windowMax) return false;
+  const auto all = loadedItems();
+  const auto index = IndexOf(all, _windowMax);
+  const auto next = index + kMessagesPerPage;
+  _windowMax = (next < int(all.size()) - 1) ? RegularIdFrom(all, next, 1) : MsgId();
+  sync();
+  return true;
+}
+
+// The rows far from the screen go while the list stands still. Above it they leave their height to the room
+// reserved there, so nothing on the screen moves.
+void ChatView::trimRows(bool force, double keep) {
+  if (keep <= 0.) keep = kKeepHeight;
+  if ((!force && int(_rows.size()) <= kMaxRows) || _scrollTarget || !_initialLoaded) return;
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
+  graphene_point_t top;
+  if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return;
+  const auto message = [](GtkListBoxRow *row) {
+    return row ? static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message")) : nullptr;
+  };
+  const auto list = GTK_LIST_BOX(_list);
+  const auto keptBelow = message(gtk_list_box_get_row_at_y(list, int(top.y + page + keep)));
+  if (keptBelow && !_stickToBottom
+      && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptBelow->row())) < int(_rows.size()) - 1) {
+    auto newest = MsgId();
+    for (const auto &item : keptBelow->items()) {
+      if (item->isRegular()) newest = std::max(newest, item->id);
+    }
+    if (newest) {
+      _windowMax = newest;
+      sync();
+    }
+  }
+  const auto aboveY = int(top.y - keep);
+  const auto keptAbove = (aboveY > 0) ? message(gtk_list_box_get_row_at_y(list, aboveY)) : nullptr;
+  if (keptAbove && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptAbove->row())) > 0) {
+    auto oldest = MsgId();
+    for (const auto &item : keptAbove->items()) {
+      if (item->isRegular() && (!oldest || item->id < oldest)) oldest = item->id;
+    }
+    if (oldest) {
+      const auto heightBefore = listHeight();
+      _windowMin = oldest;
+      sync();
+      if (const auto removed = heightBefore - listHeight(); removed > 0) setTopReserve(_topReserve + removed, 0);
+    }
+  }
+  if (g_getenv("CONTRAIL_DEBUG")) {
+    g_message("History window: rows=%zu min=%d max=%d reserve=%d", _rows.size(), int(_windowMin.bare),
+              int(_windowMax.bare), _topReserve);
+  }
 }
 
 // The rows follow the messages: one per message, one per album. A row keeps its widgets when its album
@@ -1051,6 +1618,8 @@ void ChatView::refreshTransfer(FullMsgId id) {
 }
 
 void ChatView::scrollToBottom() {
+  // The rows end before the newest messages: they go to the end.
+  if (_windowMax) showWindowAround(MsgId());
   _stickToBottom = true;
   _scrollTarget = FullMsgId();
   scheduleViewportUpdate();
@@ -1068,7 +1637,7 @@ std::pair<MsgId, double> ChatView::scrollState() const {
   if (!_initialLoaded || _stickToBottom) return {};
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  if (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && loadedAtBottom()) return {};
+  if (value + page >= gtk_adjustment_get_upper(_adjustment) - 40 && shownAtBottom()) return {};
   // The topmost message seen, by its id: it is loaded again when the chat is built again.
   auto result = std::pair<MsgId, double>{MsgId(), 0.};
   auto best = std::numeric_limits<double>::max();
@@ -1121,13 +1690,19 @@ bool ChatView::scrollIdleIgnoringShift() const {
 
 void ChatView::maintainTopReserve() {
   if (!_initialLoaded || _applyingPage || _olderRequest || _topicOlderWaiting) return;
-  const auto wanted = loadedAtTop() ? 0 : (_topReserve < kTopReserveLow) ? kTopReserve : _topReserve;
-  if (wanted == _topReserve) return;
+  const auto wanted = [&] {
+    return shownAtTop() ? 0
+           : (_topReserve < kTopReserveLow || _topReserve > kTopReserveHigh) ? kTopReserve
+                                                                             : _topReserve;
+  };
+  const auto trim = int(_rows.size()) > kMaxRows && !_scrollTarget;
+  if (wanted() == _topReserve && !trim) return;
   if (!scrollIdle()) {
     _reserveTimer.callOnce(300);
     return;
   }
-  setTopReserve(wanted, wanted - _topReserve);
+  if (trim) trimRows();
+  if (const auto now = wanted(); now != _topReserve) setTopReserve(now, now - _topReserve);
 }
 
 void ChatView::scheduleViewportUpdate() {
@@ -1176,7 +1751,7 @@ void ChatView::updateViewport() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto value = gtk_adjustment_get_value(_adjustment);
-  const auto bottom = value + page >= upper - 40 && loadedAtBottom();
+  const auto bottom = value + page >= upper - 40 && shownAtBottom();
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
   preloadVisibleEdges();
   if (bottom) {
@@ -1184,7 +1759,28 @@ void ChatView::updateViewport() {
   }
   reportSponsoredViews();
   pollReactions();
+  updatePinnedViewer();
   if (_window->isActive() && !_readTimer.isActive()) _readTimer.callOnce(300);
+}
+
+std::vector<MessageWidget *> ChatView::visibleRows() const {
+  auto result = std::vector<MessageWidget *>();
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
+  graphene_point_t top;
+  if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return result;
+  // Above the first message (the room for older pages): the list starts lower on the screen.
+  auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(_list), std::max(int(top.y), 0));
+  if (!row && top.y < 0) row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), 0);
+  for (; row; row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), gtk_list_box_row_get_index(row) + 1)) {
+    graphene_rect_t bounds;
+    if (!gtk_widget_compute_bounds(GTK_WIDGET(row), _list, &bounds)) break;
+    if (bounds.origin.y >= top.y + page) break;
+    if (auto *message = static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message"))) {
+      result.push_back(message);
+    }
+  }
+  return result;
 }
 
 // The reactions of the messages on the screen are asked for again from time to time, as Telegram Desktop does
@@ -1194,7 +1790,7 @@ void ChatView::pollReactions() {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto now = crl::now();
   auto &reactions = _history->owner().reactions();
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     double y = 0;
     const auto height = gtk_widget_get_height(row->row());
     if (height > 0 && WidgetViewportY(row->row(), _scroll, y) && y + height > 0 && y < page) {
@@ -1209,7 +1805,7 @@ void ChatView::pollReactions() {
 void ChatView::readReactions() {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   auto read = base::flat_set<not_null<HistoryItem *>>();
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     for (const auto &item : row->items()) {
       if (!item->hasUnreadReaction()) continue;
       double y = 0;
@@ -1280,8 +1876,11 @@ void ChatView::preloadVisibleEdges() {
   const auto value = gtk_adjustment_get_value(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  if (value - _topReserve < kPreloadHeight && !loadedAtTop()) loadOlder();
-  else if (value + page > upper - kPreloadHeight && !loadedAtBottom()) loadNewer();
+  if (value - _topReserve < kPreloadHeight) {
+    if (!extendWindowUp() && !loadedAtTop()) loadOlder();
+  } else if (value + page > upper - kPreloadHeight) {
+    if (!extendWindowDown() && !loadedAtBottom()) loadNewer();
+  }
 }
 
 void ChatView::showAt(MsgId id) {
@@ -1309,6 +1908,7 @@ void ChatView::reload(MsgId showAt) {
   _waitingMedia.clear();
   _itemRows.clear();
   _rows.clear();
+  _windowMin = _windowMax = MsgId();
   _pendingShowAt = showAt;
   _stickToBottom = !showAt;
   loadInitial();
@@ -1316,6 +1916,11 @@ void ChatView::reload(MsgId showAt) {
 
 bool ChatView::scrollToLoaded(MsgId id) {
   if (const auto item = _history->owner().message(_history->peer, id)) {
+    if (!rowFor(item) && (_windowMin || _windowMax)) {
+      // Loaded, out of the window of rows.
+      const auto all = loadedItems();
+      if (std::find(all.begin(), all.end(), item) != all.end()) showWindowAround(id);
+    }
     if (rowFor(item)) {
       scrollToItem(item, id != _unreadAfter + 1);
       return true;
@@ -1370,11 +1975,18 @@ void ChatView::debugCheckDraft() {
 }
 
 void ChatView::scrolled() {
-  if (_adjustingScroll || _applyingPage || !_initialLoaded) return;
   const auto value = gtk_adjustment_get_value(_adjustment);
+  const auto down = value > _lastScrollValue;
+  _lastScrollValue = value;
+  if (_adjustingScroll || _applyingPage || !_initialLoaded) return;
+  if (down && _pinnedClicked && !_scrollTarget) {
+    // Scrolled down by hand: the bar follows the screen again.
+    _pinnedClicked = FullMsgId();
+    _minPinned = std::nullopt;
+  }
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  const auto atBottom = value + page >= upper - 40 && loadedAtBottom();
+  const auto atBottom = value + page >= upper - 40 && shownAtBottom();
   // GTK also changes the adjustment while allocating newly inserted rows. Those changes do not
   // represent a user drag and must not drop the bottom/anchor/target requested before layout.
   // Only input events opt out of bottom following. Layout/clamping changes also emit this signal
@@ -1481,9 +2093,45 @@ void ChatView::debugHistory(const QString &action) {
     } else {
       g_message("Live locations: no recent position");
     }
+  } else if (action == u"trim"_q) {
+    trimRows(true);
+  } else if (action == u"live-map"_q) {
+    ShowLiveMap(_window, _thread);
+  } else if (action == u"live-bar"_q) {
+    g_message("Live bar: revealed=%d text=%s", int(gtk_revealer_get_reveal_child(GTK_REVEALER(_liveBar))),
+              gtk_label_get_text(GTK_LABEL(_liveText)));
+  } else if (action == u"pinned"_q) {
+    g_message("Pinned bar: revealed=%d title=%s text=%s count=%d current=%d clicked=%d",
+              int(gtk_revealer_get_reveal_child(GTK_REVEALER(_pinnedBar))), gtk_label_get_text(GTK_LABEL(_pinnedTitle)),
+              gtk_label_get_text(GTK_LABEL(_pinnedText)), _pinnedCount,
+              _pinnedTracker ? int(_pinnedTracker->currentMessageId().message.msg.bare) : 0, int(_pinnedClicked.msg.bare));
+  } else if (action == u"pinned-click"_q) {
+    pinnedBarClicked();
+  } else if (action == u"pinned-list"_q) {
+    showPinnedList();
+  } else if ((action.startsWith(u"pin:"_q) || action.startsWith(u"unpin:"_q)) && _history->peer->isSelf()) {
+    // Without the confirmation, in Saved Messages only.
+    const auto unpin = action.startsWith(u"unpin:"_q);
+    const auto id = MsgId(action.mid(unpin ? 6 : 4).toLongLong());
+    const auto session = &_history->session();
+    using Flag = MTPmessages_UpdatePinnedMessage::Flag;
+    session->api()
+        .request(MTPmessages_UpdatePinnedMessage(MTP_flags(unpin ? Flag::f_unpin : Flag(0)), _history->peer->input(),
+                                                 MTP_int(id)))
+        .done([=](const MTPUpdates &result) { session->api().applyUpdates(result); })
+        .send();
+  } else if (action.startsWith(u"forward:"_q) && _history->peer->isSelf()) {
+    // The message waiting here to be forwarded (to Saved Messages, from Saved Messages).
+    const auto id = FullMsgId(_history->peer->id, MsgId(action.mid(8).toLongLong()));
+    _history->setForwardDraft(_thread->topicRootId(), _thread->monoforumPeerId(), {.ids = {id}});
+  } else if (action == u"forward-state"_q) {
+    g_message("Forward: shown=%d draft=%d bar=%s / %s", int(_forwardShown), int(forwarding()),
+              gtk_label_get_text(GTK_LABEL(_replyTitle)), gtk_label_get_text(GTK_LABEL(_replyText)));
+  } else if (action == u"forward-menu"_q) {
+    showForwardMenu();
   }
-  g_message("History state: rows=%zu min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
-      _itemRows.size(), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
+  g_message("History state: rows=%zu window=%d..%d min=%d max=%d top=%d bottom=%d initial=%d requests=%d/%d failed=%d scroll=%.0f/%.0f page=%.0f",
+      _itemRows.size(), int(_windowMin.bare), int(_windowMax.bare), int(_history->minMsgId().bare), int(_history->maxMsgId().bare), int(loadedAtTop()),
       int(loadedAtBottom()), int(_initialLoaded), _olderRequest, _newerRequest, int(_loadFailed),
       gtk_adjustment_get_value(_adjustment), gtk_adjustment_get_upper(_adjustment), gtk_adjustment_get_page_size(_adjustment));
   for (const auto &[raw, row] : _rows) {
@@ -1544,7 +2192,7 @@ void ChatView::markAsRead() {
   if (page <= 0) return;
   readReactions();
   const auto atBottom = gtk_adjustment_get_value(_adjustment) + page >= gtk_adjustment_get_upper(_adjustment) - 40
-      && loadedAtBottom();
+      && shownAtBottom();
   if (_stickToBottom || atBottom) {
     if (_topic) {
       if (_topic->chatListBadgesState().unread) {
@@ -1562,7 +2210,7 @@ void ChatView::markAsRead() {
   // Higher up, read till the lowest unread message seen whole, as HistoryInner does. Opening a chat
   // puts its first unread message on the screen, and the list may have nowhere further to scroll.
   HistoryItem *till = nullptr;
-  for (const auto &[raw, row] : _rows) {
+  for (const auto row : visibleRows()) {
     for (const auto &item : row->items()) {
       if (item->out() || !item->isRegular() || !item->unread(_thread) || (till && item->id < till->id)) continue;
       double y = 0;
@@ -1608,8 +2256,21 @@ void ChatView::buildComposer() {
   gtk_box_append(GTK_BOX(_replyBar), replyColumn);
   auto *cancel = MakeIconButton("window-close-symbolic", U8(tr::lng_cancel(tr::now)).c_str(), "flat");
   gtk_widget_add_css_class(cancel, "circular");
-  _signals.clicked(cancel, [this] { cancelReplyOrEdit(); });
+  _signals.clicked(cancel, [this] {
+    if (_replyTo || _editing) {
+      cancelReplyOrEdit();
+    } else {
+      cancelForward();
+    }
+  });
   gtk_box_append(GTK_BOX(_replyBar), cancel);
+  // Messages to forward: a tap on them shows what can be done with them.
+  auto *replyClick = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(replyClick, "released",
+      [this](GtkGestureClick *, int, double, double) {
+        if (_forwardShown && !_replyTo && !_editing) showForwardMenu();
+      });
+  gtk_widget_add_controller(replyColumn, GTK_EVENT_CONTROLLER(replyClick));
   gtk_widget_set_visible(_replyBar, FALSE);
   gtk_box_append(GTK_BOX(_composer), _replyBar);
 
@@ -1673,8 +2334,7 @@ void ChatView::buildComposer() {
   _signals.connect<void(GtkTextBuffer *)>(buffer, "changed", [this, placeholder](GtkTextBuffer *buffer) {
     const auto empty = gtk_text_buffer_get_char_count(buffer) == 0;
     gtk_widget_set_visible(placeholder, empty);
-    gtk_widget_set_sensitive(_sendButton, !empty && !_editPending);
-    gtk_stack_set_visible_child_name(GTK_STACK(_sendStack), (empty && !_editing) ? "mic" : "send");
+    refreshSendButton();
     if (!empty && !_settingComposerText) {
       _history->session().sendProgressManager().update(_history, _thread->topicRootId(), Api::SendProgressType::Typing);
     }
@@ -1709,7 +2369,7 @@ void ChatView::buildComposer() {
           return TRUE;
         } else if (key == GDK_KEY_Up && composerText().isEmpty() && !_editing) {
           // Up in an empty field edits the last sent message.
-          const auto list = items();
+          const auto list = loadedItems();
           for (auto i = list.rbegin(); i != list.rend(); ++i) {
             if ((*i)->out() && (*i)->allowsEdit(base::unixtime::now())) {
               edit(*i);
@@ -1856,11 +2516,120 @@ void ChatView::showReplyBar(const QString &title, const QString &text, const cha
   gtk_widget_grab_focus(_input);
 }
 
+void ChatView::refreshSendButton() {
+  const auto empty = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(GTK_TEXT_VIEW(_input))) == 0;
+  // Messages to forward go without a comment too.
+  const auto forward = !_editing && forwarding();
+  gtk_widget_set_sensitive(_sendButton, (!empty || forward) && !_editPending);
+  gtk_stack_set_visible_child_name(GTK_STACK(_sendStack), (empty && !_editing && !forward) ? "mic" : "send");
+}
+
+bool ChatView::forwarding() const {
+  return !_history->forwardDraft(_thread->topicRootId(), _thread->monoforumPeerId()).ids.empty();
+}
+
+void ChatView::refreshForwardBar() {
+  const auto draft = _history->resolveForwardDraft(_thread->topicRootId(), _thread->monoforumPeerId());
+  if (draft.items.empty() || _editing) {
+    // Shown again when the edit is over.
+    if (std::exchange(_forwardShown, false) && !_replyTo && !_editing) gtk_widget_set_visible(_replyBar, FALSE);
+    refreshSendButton();
+    return;
+  }
+  // One bar: the messages to forward take the place of a reply.
+  _replyTo = FullMsgId();
+  const auto count = int(draft.items.size());
+  auto senders = QStringList();
+  for (const auto &item : draft.items) {
+    const auto name = ForwardSenderName(item);
+    if (!senders.contains(name)) senders.push_back(name);
+  }
+  QString text;
+  if (draft.options != Data::ForwardOptions::PreserveInfo) {
+    text = tr::lng_forward_sender_names_removed(tr::now);
+  } else if (senders.size() > 2) {
+    text = tr::lng_forwarding_from(tr::now, lt_count, senders.size() - 1, lt_user, senders.front());
+  } else if (senders.size() == 2) {
+    text = tr::lng_forwarding_from_two(tr::now, lt_user, senders[0], lt_second_user, senders[1]);
+  } else if (!senders.isEmpty()) {
+    text = senders.front();
+  }
+  if (count == 1) {
+    const auto preview = draft.items.front()->toPreview({.hideSender = true, .generateImages = false}).text.text;
+    if (!preview.isEmpty()) text = text.isEmpty() ? preview : (text + u": "_q + preview);
+  }
+  gtk_image_set_from_icon_name(GTK_IMAGE(_replyIcon), "mail-forward-symbolic");
+  gtk_label_set_text(GTK_LABEL(_replyTitle), U8(count == 1 ? tr::lng_forward_title(tr::now)
+                                                         : tr::lng_forward_many_title(tr::now, lt_count, count)).c_str());
+  gtk_label_set_text(GTK_LABEL(_replyText), U8(text.replace('\n', ' ')).c_str());
+  gtk_widget_set_visible(_replyBar, TRUE);
+  _forwardShown = true;
+  refreshSendButton();
+}
+
+void ChatView::cancelForward() {
+  _history->setForwardDraft(_thread->topicRootId(), _thread->monoforumPeerId(), {});
+}
+
+// With or without the senders' names, or to another chat, as the phone apps offer.
+void ChatView::showForwardMenu() {
+  const auto draft = _history->forwardDraft(_thread->topicRootId(), _thread->monoforumPeerId());
+  if (draft.ids.empty()) return;
+  const auto many = draft.ids.size() > 1;
+  const auto names = (draft.options == Data::ForwardOptions::PreserveInfo);
+  auto *menu = g_menu_new();
+  g_menu_append(menu,
+                U8(names ? (many ? tr::lng_forward_action_hide_senders(tr::now) : tr::lng_forward_action_hide_sender(tr::now))
+                         : (many ? tr::lng_forward_action_show_senders(tr::now) : tr::lng_forward_action_show_sender(tr::now)))
+                    .c_str(),
+                "fwd.names");
+  g_menu_append(menu, U8(tr::lng_forward_change_recipient(tr::now)).c_str(), "fwd.recipient");
+  auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+  g_object_unref(menu);
+  gtk_widget_set_parent(popover, _replyBar);
+  gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+  gtk_popover_set_position(GTK_POPOVER(popover), GTK_POS_TOP);
+  DestroyPopoverOnClose(popover);
+  auto *group = g_simple_action_group_new();
+  const auto weak = base::make_weak(this);
+  const auto add = [&](const char *name, Fn<void(ChatView *)> fn) {
+    auto *action = g_simple_action_new(name, nullptr);
+    Connect<void(GSimpleAction *, GVariant *)>(action, "activate", [=](GSimpleAction *, GVariant *) {
+      if (const auto strong = weak.get()) fn(strong);
+    });
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+    g_object_unref(action);
+  };
+  add("names", [](ChatView *self) {
+    auto draft = self->_history->forwardDraft(self->_thread->topicRootId(), self->_thread->monoforumPeerId());
+    draft.options = (draft.options == Data::ForwardOptions::PreserveInfo) ? Data::ForwardOptions::NoSenderNames
+                                                                          : Data::ForwardOptions::PreserveInfo;
+    self->_history->setForwardDraft(self->_thread->topicRootId(), self->_thread->monoforumPeerId(), std::move(draft));
+  });
+  add("recipient", [](ChatView *self) {
+    auto ids = self->_history->forwardDraft(self->_thread->topicRootId(), self->_thread->monoforumPeerId()).ids;
+    const auto window = self->_window;
+    self->cancelForward();
+    ShowForwardPicker(window, std::move(ids));
+  });
+  gtk_widget_insert_action_group(popover, "fwd", G_ACTION_GROUP(group));
+  g_object_unref(group);
+  gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+void ChatView::forward(not_null<HistoryItem *> item) {
+  // An album goes whole.
+  auto items = HistoryItemsList{item};
+  if (const auto group = _history->owner().groups().find(item)) items = group->items;
+  ShowForwardPicker(_window, _history->owner().itemsToIds(items));
+}
+
 void ChatView::replyTo(not_null<HistoryItem *> item) {
   if (item->isSponsored()) return;
   if (_editing) {
     cancelReplyOrEdit();
   }
+  if (forwarding()) cancelForward();
   _replyTo = item->fullId();
   const auto from = item->displayFrom() ? item->displayFrom() : item->from().get();
   showReplyBar(from->name(), item->toPreview({.hideSender = true, .generateImages = false}).text.text,
@@ -1890,12 +2659,20 @@ void ChatView::cancelReplyOrEdit() {
   ++_editGeneration;
   gtk_text_view_set_editable(GTK_TEXT_VIEW(_input), TRUE);
   gtk_widget_set_visible(_replyBar, FALSE);
+  _forwardShown = false;
   if (wasEditing) {
     setComposerText(base::take(_beforeEditText));
     if (const auto reply = base::take(_beforeEditReplyTo)) {
       if (const auto item = _history->owner().message(reply)) replyTo(item);
     }
   }
+  if (!_replyTo) refreshForwardBar();
+  refreshSendButton();
+}
+
+void ChatView::releaseMemory() {
+  // A little beyond where the next rows are made, so they aren't made again right away.
+  trimRows(true, kPreloadHeight * 1.25);
 }
 
 bool ChatView::handleEscape() {
@@ -1904,6 +2681,9 @@ bool ChatView::handleEscape() {
     return true;
   } else if (_replyTo || _editing) {
     cancelReplyOrEdit();
+    return true;
+  } else if (forwarding()) {
+    cancelForward();
     return true;
   }
   return false;
@@ -1949,13 +2729,19 @@ void ChatView::send() {
     }
     return;
   }
+  auto action = Api::SendAction(_thread);
   if (text.isEmpty()) {
+    // Only the messages to forward.
+    if (forwarding()) {
+      session->api().finishForwarding(action);
+      scrollToBottom();
+    }
     return;
   }
-  auto action = Api::SendAction(_thread);
   if (_replyTo) {
     action.replyTo.messageId = _replyTo;
   }
+  // The comment goes first, then the messages to forward (ApiWrap::sendMessage takes them along).
   auto message = Api::MessageToSend(action);
   message.textWithTags = TextWithTags{text, {}};
   session->api().sendMessage(std::move(message));
@@ -2283,6 +3069,16 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
   if (!item->originalText().text.isEmpty()) {
     g_menu_append(menu, U8(tr::lng_context_copy_text(tr::now)).c_str(), "msg.copy");
   }
+  if (!item->isService() && item->allowsForward()) {
+    g_menu_append(menu, U8(tr::lng_context_forward_msg(tr::now)).c_str(), "msg.forward");
+  }
+  if (item->canPin()) {
+    if (item->isPinned()) {
+      g_menu_append(menu, U8(tr::lng_context_unpin_msg(tr::now)).c_str(), "msg.unpin");
+    } else {
+      g_menu_append(menu, U8(tr::lng_context_pin_msg(tr::now)).c_str(), "msg.pin");
+    }
+  }
   if (item->allowsEdit(now)) {
     g_menu_append(menu, U8(tr::lng_context_edit_msg(tr::now)).c_str(), "msg.edit");
   }
@@ -2345,6 +3141,9 @@ void ChatView::showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, 
     ShowToast(tr::lng_text_copied(tr::now));
   }));
   add("edit", withItem([](ChatView *self, not_null<HistoryItem *> item) { self->edit(item); }));
+  add("forward", withItem([](ChatView *self, not_null<HistoryItem *> item) { self->forward(item); }));
+  add("pin", withItem([](ChatView *self, not_null<HistoryItem *> item) { self->confirmPin(item); }));
+  add("unpin", withItem([](ChatView *self, not_null<HistoryItem *> item) { self->confirmUnpin(item); }));
   add("save", withItem([](ChatView *self, not_null<HistoryItem *> item) {
     const auto media = item->media();
     if (!media) {
@@ -2414,7 +3213,12 @@ void ChatView::openPhoto(not_null<PhotoData *> photo, not_null<HistoryItem *> it
 }
 
 void ChatView::openLocation(not_null<HistoryItem *> item) {
-  ShowLocation(_window, item);
+  // A live location going on: everyone sharing one in this chat, on one map.
+  if (LiveLocationActive(item)) {
+    ShowLiveMap(_window, _thread);
+  } else {
+    ShowLocation(_window, item);
+  }
 }
 
 void ChatView::openDocument(not_null<DocumentData *> document, not_null<HistoryItem *> item) {

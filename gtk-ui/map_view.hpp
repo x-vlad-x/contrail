@@ -4,6 +4,9 @@
 
 #include "base/basic_types.h"
 
+#include <utility>
+#include <vector>
+
 namespace Contrail {
 
 // Interactive maps, with libshumate (as GNOME Maps) and OpenStreetMap's tiles. As OpenStreetMap's tile policy
@@ -27,6 +30,8 @@ void MapCenter(GtkWidget *map, double *lat, double *lon);
 GtkWidget *MapAddMarker(GtkWidget *map, GtkWidget *child, double lat, double lon);
 void MapMoveMarker(GtkWidget *marker, double lat, double lon);
 void MapRemoveMarker(GtkWidget *map, GtkWidget *marker);
+// Shows all the points (FitPoints in geo.hpp) as soon as the map has its size, with room around them for the pins.
+void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &points, double maxZoom, bool animate);
 // Calls `touched` when the user starts moving or zooming the map (not when the app moves it).
 void MapOnUserMove(GtkWidget *map, Fn<void()> touched);
 // Calls `moved` when the middle of the map changes.

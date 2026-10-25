@@ -1,5 +1,6 @@
 #include "map_view.hpp"
 
+#include "geo.hpp"
 #include "text.hpp"
 
 #include "contrail_version.h"
@@ -308,6 +309,31 @@ void MapMoveMarker(GtkWidget *marker, double lat, double lon) {
 
 void MapRemoveMarker(GtkWidget *map, GtkWidget *marker) {
   shumate_marker_layer_remove_marker(MarkerLayer(map), SHUMATE_MARKER(marker));
+}
+
+void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &points, double maxZoom, bool animate) {
+  // A pin stands 44 pixels above its place.
+  constexpr auto kMargin = 56.;
+  if (points.empty()) return;
+  const auto show = [=](bool animated) {
+    const auto width = gtk_widget_get_width(map), height = gtk_widget_get_height(map);
+    if (width <= 0 || height <= 0) return false;
+    const auto fit = FitPoints(points, width, height, kMargin, maxZoom);
+    MapCenterOn(map, fit.lat, fit.lon, fit.zoom, animated);
+    return true;
+  };
+  if (show(animate)) return;
+  // Not allocated yet (the dialog is being opened): on its first frame.
+  struct Pending {
+    Fn<bool(bool)> show;
+  };
+  auto *pending = new Pending{show};
+  gtk_widget_add_tick_callback(
+      map,
+      +[](GtkWidget *, GdkFrameClock *, gpointer data) -> gboolean {
+        return static_cast<Pending *>(data)->show(false) ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+      },
+      pending, [](gpointer data) { delete static_cast<Pending *>(data); });
 }
 
 void MapOnUserMove(GtkWidget *map, Fn<void()> touched) {

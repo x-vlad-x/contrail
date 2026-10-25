@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace Contrail {
 
@@ -28,6 +30,44 @@ inline double DistanceMeters(double lat1, double lon1, double lat2, double lon2)
   const auto a = std::sin(dlat / 2) * std::sin(dlat / 2)
                  + std::cos(radians(lat1)) * std::cos(radians(lat2)) * std::sin(dlon / 2) * std::sin(dlon / 2);
   return 2 * kEarthRadius * std::atan2(std::sqrt(a), std::sqrt(1 - a));
+}
+
+// Where a map shows all the points (the shared map of a chat's live locations): its middle and zoom level for a view
+// of `width` × `height` pixels, with `margin` pixels kept free around them. Web Mercator with 256-pixel tiles, as
+// OpenStreetMap's; a single point (or points close together) gets `maxZoom`.
+struct MapFit {
+  double lat = 0.;
+  double lon = 0.;
+  double zoom = 0.;
+};
+
+inline MapFit FitPoints(const std::vector<std::pair<double, double>> &points, double width, double height,
+                        double margin, double maxZoom) {
+  if (points.empty()) return {};
+  const auto x = [](double lon) { return (lon + 180.) / 360.; };
+  const auto y = [](double lat) {
+    const auto clamped = std::clamp(lat, -85.05112878, 85.05112878) * M_PI / 180.;
+    return (1. - std::asinh(std::tan(clamped)) / M_PI) / 2.;
+  };
+  auto minX = 1., maxX = 0., minY = 1., maxY = 0.;
+  for (const auto &[lat, lon] : points) {
+    minX = std::min(minX, x(lon));
+    maxX = std::max(maxX, x(lon));
+    minY = std::min(minY, y(lat));
+    maxY = std::max(maxY, y(lat));
+  }
+  constexpr auto kTile = 256.;
+  const auto fit = [&](double size, double span) {
+    const auto room = std::max(size - 2 * margin, 1.);
+    return (span * kTile > 0.) ? std::log2(room / (span * kTile)) : maxZoom;
+  };
+  const auto zoom = std::clamp(std::min(fit(width, maxX - minX), fit(height, maxY - minY)), 1., maxZoom);
+  const auto middleY = (minY + maxY) / 2.;
+  return {
+      .lat = std::atan(std::sinh(M_PI * (1. - 2. * middleY))) * 180. / M_PI,
+      .lon = (minX + maxX) / 2. * 360. - 180.,
+      .zoom = zoom,
+  };
 }
 
 // GeoClue reports the last position it knows when a client starts, however old, and a slow source may report

@@ -8,6 +8,7 @@
 #include "dialogs.hpp"
 #include "live_location.hpp"
 #include "login.hpp"
+#include "memory_guard.hpp"
 #include "scroll_helpers.hpp"
 #include "settings.hpp"
 #include "tray.hpp"
@@ -24,6 +25,9 @@
 #include "data/data_peer.h"
 #include "data/data_session.h"
 #include "data/data_user.h"
+#include "dialogs/dialogs_indexed_list.h"
+#include "dialogs/dialogs_main_list.h"
+#include "dialogs/dialogs_row.h"
 #include "history/history.h"
 #include "history/history_item.h"
 #include "lang/lang_cloud_manager.h"
@@ -61,7 +65,9 @@ bool WindowActive() {
   return result;
 }
 
-MainWindow::MainWindow() : _trimTimer([] { malloc_trim(0); }) {
+MainWindow::MainWindow()
+    : _trimTimer([] { malloc_trim(0); }),
+      _memoryGuard(std::make_unique<MemoryGuard>([=](MemoryLevel level) { releaseMemory(level); })) {
   buildWindow();
   Core::App().domain().activeValue() | rpl::on_next([=](Main::Account *account) {
     showAccount(account);
@@ -75,6 +81,7 @@ MainWindow::MainWindow() : _trimTimer([] { malloc_trim(0); }) {
 }
 
 void MainWindow::buildWindow() {
+  _memoryGuard->setForeground(true);
   _window = adw_window_new();
   gtk_window_set_title(GTK_WINDOW(_window), "Contrail");
   gtk_window_set_default_size(GTK_WINDOW(_window), 900, 700);
@@ -226,6 +233,39 @@ void MainWindow::releaseWindow() {
     _session->updates().updateOnline();
   }
   _trimTimer.callOnce(kTrimDelay);
+  _memoryGuard->setForeground(false);
+}
+
+void MainWindow::releaseMemory(MemoryLevel level) {
+  if (_window && _session && level == MemoryLevel::Critical && !isActive()
+      && !adw_window_get_visible_dialog(ADW_WINDOW(_window))) {
+    // Opening the app again comes back to the same chat and place, as after closing the window.
+    closeToBackground();
+  } else if (_window) {
+    if (_chat) _chat->releaseMemory();
+    unloadOtherChats();
+  } else if (_session) {
+    // Messages loaded in the background (a notification's reply) go again.
+    _session->data().histories().unloadAll();
+  }
+  malloc_trim(0);
+}
+
+// The messages loaded for the chats that aren't open: opened again, they load their pages again (the core keeps
+// the messages themselves, only their place in the chat goes).
+void MainWindow::unloadOtherChats() {
+  if (!_session) return;
+  const auto current = _chat ? _chat->history().get() : nullptr;
+  const auto unload = [&](not_null<Dialogs::MainList *> list) {
+    for (const auto &row : list->indexed()->all()) {
+      if (const auto history = row->history(); history && history != current && !history->isEmpty()) {
+        history->clear(History::ClearType::Unload);
+      }
+    }
+  };
+  auto &data = _session->data();
+  unload(data.chatsList());
+  if (const auto archive = data.folderLoaded(Data::Folder::kId)) unload(archive->chatsList());
 }
 
 void MainWindow::closeToBackground() {
@@ -744,6 +784,15 @@ void MainWindow::debugState() {
             _chat ? "open" : "none", _saved ? U8(QString::number(_saved->peer.value) + '/'
                                                   + QString::number(_saved->anchor.bare)).c_str() : "none",
             int(Recorder().active()), qtVisible, int(_session && Core::App().hasActiveWindow(_session)));
+}
+
+void MainWindow::debugMemory(const QString &action) {
+  if (action == u"low"_q) {
+    _memoryGuard->debugSimulate(MemoryLevel::Low);
+  } else if (action == u"critical"_q) {
+    _memoryGuard->debugSimulate(MemoryLevel::Critical);
+  }
+  g_message("Memory: %s", U8(_memoryGuard->debugState()).c_str());
 }
 
 void MainWindow::debugOpenChat(int index) {

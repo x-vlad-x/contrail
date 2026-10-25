@@ -1,10 +1,12 @@
 #pragma once
 
 #include "app.hpp"
+#include "location.hpp"
 
 #include "base/basic_types.h"
 
 class HistoryItem;
+class PeerData;
 
 namespace Data {
 class Thread;
@@ -26,6 +28,19 @@ void ShowLocationPicker(not_null<MainWindow *> window, not_null<Data::Thread *> 
 // tapped: the device's position isn't asked for otherwise), "Open in Maps". A live location moves on the map
 // as it is updated, and one being shared from here can be stopped. Without maps, opens the system's map app.
 void ShowLocation(not_null<MainWindow *> window, not_null<HistoryItem *> item);
+
+// A round button over a map.
+[[nodiscard]] GtkWidget *MapButton(const char *icon, const QString &tooltip);
+#ifdef CONTRAIL_SHUMATE
+// + and - in the top right corner, where libshumate has its own.
+[[nodiscard]] GtkWidget *MakeZoomButtons(GtkWidget *map);
+#endif  // CONTRAIL_SHUMATE
+[[nodiscard]] QString MyLocationText();
+[[nodiscard]] QString FailureText(LocationService::Failure failure);
+// Live locations can't go to channels and to Saved Messages, as in the phone apps.
+[[nodiscard]] bool CanShareLive(not_null<PeerData *> peer);
+// 15 minutes, an hour, 8 hours or until it is turned off.
+void ChooseLivePeriod(GtkWidget *parent, Fn<void(TimeId)> chosen);
 
 // A live location's state, as Telegram Desktop shows it.
 [[nodiscard]] Data::MediaLocation *LocationMedia(not_null<const HistoryItem *> item);

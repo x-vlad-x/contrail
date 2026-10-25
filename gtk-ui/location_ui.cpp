@@ -56,6 +56,8 @@ GtkWidget *RowIcon(const char *icon, const char *cssClass) {
   return image;
 }
 
+}  // namespace
+
 GtkWidget *MapButton(const char *icon, const QString &tooltip) {
   auto *button = MakeIconButton(icon, U8(tooltip).c_str(), "circular");
   gtk_widget_add_css_class(button, "osd");
@@ -64,7 +66,6 @@ GtkWidget *MapButton(const char *icon, const QString &tooltip) {
 }
 
 #ifdef CONTRAIL_SHUMATE
-// + and - in the top right corner, where libshumate has its own.
 GtkWidget *MakeZoomButtons(GtkWidget *map) {
   auto *buttons = MakeMapZoomButtons(map);
   gtk_widget_set_halign(buttons, GTK_ALIGN_END);
@@ -85,7 +86,6 @@ QString FailureText(LocationService::Failure failure) {
              : Translated("Location is unavailable", "Геопозиция недоступна", "Геопозиція недоступна");
 }
 
-// Live locations can't go to channels and to Saved Messages, as in the phone apps.
 bool CanShareLive(not_null<PeerData *> peer) {
   return !peer->isSelf() && !peer->isBroadcast();
 }
@@ -116,6 +116,8 @@ void ChooseLivePeriod(GtkWidget *parent, Fn<void(TimeId)> chosen) {
   });
   adw_dialog_present(ADW_DIALOG(dialog), parent);
 }
+
+namespace {
 
 // --- the picker --------------------------------------------------------------
 
