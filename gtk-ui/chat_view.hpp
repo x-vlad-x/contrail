@@ -71,6 +71,8 @@ public:
   void openPeer(not_null<PeerData *> peer);
   void openPhoto(not_null<PhotoData *> photo, not_null<HistoryItem *> item);
   void openDocument(not_null<DocumentData *> document, not_null<HistoryItem *> item);
+  // Downloading to be opened by itself once it is there (a video), not with another tap (a file).
+  [[nodiscard]] bool opensWhenLoaded(DocumentData *document) const { return _openWhenLoaded.contains(document); }
   void openLocation(not_null<HistoryItem *> item);
   void refreshMessage(FullMsgId id);
   void showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y);

@@ -29,6 +29,9 @@ ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -
   $(pkg-config --cflags --libs glib-2.0) -o "$work/geo"
 "$work/geo"
 "$work/zoom-geometry"
+${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/media-progress.cpp \
+  -o "$work/media-progress"
+"$work/media-progress"
 ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/memory-pressure.cpp \
   -o "$work/memory-pressure"
 "$work/memory-pressure"

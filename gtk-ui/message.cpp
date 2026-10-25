@@ -4,6 +4,7 @@
 #include "layout.hpp"
 #include "location_ui.hpp"
 #include "map_view.hpp"
+#include "media_progress.hpp"
 #include "reactions.hpp"
 #include "scroll_helpers.hpp"
 #include "text.hpp"
@@ -39,6 +40,8 @@
 #include <QtCore/QDir>
 #include <QtCore/QFileInfo>
 #include <QtCore/QStandardPaths>
+
+#include <numbers>
 
 namespace Contrail {
 namespace {
@@ -160,6 +163,53 @@ std::optional<double> UploadProgress(not_null<HistoryItem *> item) {
 
 QString Percent(double value) {
   return QString::number(int(value * 100)) + '%';
+}
+
+// "12.3 / 45.6 MB · 27%"; before the first part comes (other downloads go first): waiting.
+QString DownloadText(int64 offset, int64 size) {
+  if (offset <= 0) return Translated("Waiting…", "Ожидание…", "Очікування…");
+  auto result = Ui::FormatDownloadText(offset, size);
+  if (size > 0) result += u" · "_q + Percent(DownloadFraction(offset, size));
+  return result;
+}
+
+// A download's progress over a video, in place of its play button: a ring around a stop sign, as a tap
+// on the video cancels the download.
+GtkWidget *MakeProgressRing() {
+  constexpr auto kSize = 48;
+  auto *ring = gtk_drawing_area_new();
+  gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(ring), kSize);
+  gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(ring), kSize);
+  gtk_widget_set_halign(ring, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(ring, GTK_ALIGN_CENTER);
+  gtk_widget_set_can_target(ring, FALSE);
+  gtk_widget_set_visible(ring, FALSE);
+  gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(ring), [](GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer) {
+    const auto fraction = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(area), "contrail-fraction")) / 1000.;
+    const auto x = width / 2., y = height / 2., radius = std::min(width, height) / 2.;
+    const auto line = radius - 5.;
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+    cairo_arc(cr, x, y, radius, 0, 2 * std::numbers::pi);
+    cairo_fill(cr);
+    cairo_set_line_width(cr, 3);
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.3);
+    cairo_arc(cr, x, y, line, 0, 2 * std::numbers::pi);
+    cairo_stroke(cr);
+    cairo_set_source_rgb(cr, 1, 1, 1);
+    if (fraction > 0) {
+      cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+      cairo_arc(cr, x, y, line, -std::numbers::pi / 2, -std::numbers::pi / 2 + 2 * std::numbers::pi * fraction);
+      cairo_stroke(cr);
+    }
+    cairo_rectangle(cr, x - 6, y - 6, 12, 12);
+    cairo_fill(cr);
+  }, nullptr, nullptr);
+  return ring;
+}
+
+void SetRingFraction(GtkWidget *ring, double fraction) {
+  g_object_set_data(G_OBJECT(ring), "contrail-fraction", GINT_TO_POINTER(int(std::clamp(fraction, 0., 1.) * 1000)));
+  gtk_widget_queue_draw(ring);
 }
 
 }  // namespace
@@ -592,11 +642,12 @@ GtkWidget *MessageWidget::buildGridCell(Cell &cell, int width, int height) {
     gtk_widget_set_valign(play, GTK_ALIGN_CENTER);
     gtk_widget_set_can_target(play, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), play);
+    cell.play = play;
+    cell.ring = MakeProgressRing();
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.ring);
     auto *click = gtk_gesture_click_new();
     _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      if (!TapAllowed()) return;
-      _chat->openDocument(document, item);
-      refreshMedia();
+      if (TapAllowed()) _chat->openDocument(document, item);
     });
     gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
   }
@@ -694,13 +745,14 @@ GtkWidget *MessageWidget::buildVideoThumb(Cell &cell, not_null<DocumentData *> d
   gtk_widget_set_valign(play, GTK_ALIGN_CENTER);
   gtk_widget_set_can_target(play, FALSE);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), play);
+  cell.play = play;
+  cell.ring = MakeProgressRing();
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.ring);
   cell.status = makeStatus();
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.status);
   auto *click = gtk_gesture_click_new();
   _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-    if (!TapAllowed()) return;
-    _chat->openDocument(document, item);
-    refreshMedia();
+    if (TapAllowed()) _chat->openDocument(document, item);
   });
   gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
   if (document->isVideoMessage()) {
@@ -720,9 +772,7 @@ GtkWidget *MessageWidget::buildDocument(Cell &cell, not_null<DocumentData *> doc
   gtk_widget_add_css_class(cell.documentButton, "document-button");
   gtk_widget_set_valign(cell.documentButton, GTK_ALIGN_CENTER);
   _signals.clicked(cell.documentButton, [=] {
-    if (!TapAllowed()) return;
-    _chat->openDocument(document, item);
-    refreshMedia();
+    if (TapAllowed()) _chat->openDocument(document, item);
   });
   gtk_box_append(GTK_BOX(box), cell.documentButton);
   auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
@@ -733,6 +783,10 @@ GtkWidget *MessageWidget::buildDocument(Cell &cell, not_null<DocumentData *> doc
   gtk_label_set_max_width_chars(GTK_LABEL(name), 28);
   gtk_widget_add_css_class(name, "heading");
   gtk_box_append(GTK_BOX(column), name);
+  cell.loadProgress = gtk_progress_bar_new();
+  gtk_widget_add_css_class(cell.loadProgress, "download-progress");
+  gtk_widget_set_visible(cell.loadProgress, FALSE);
+  gtk_box_append(GTK_BOX(column), cell.loadProgress);
   cell.documentStatus = gtk_label_new(nullptr);
   gtk_label_set_xalign(GTK_LABEL(cell.documentStatus), 0);
   gtk_widget_add_css_class(cell.documentStatus, "dim-label");
@@ -1112,7 +1166,7 @@ void MessageWidget::updateDocumentState(Cell &cell) {
     status = Percent(*upload);
     icon = "contrail-clock-symbolic";
   } else if (document->loading()) {
-    status = Ui::FormatDownloadText(document->loadOffset(), document->size);
+    status = DownloadText(document->loadOffset(), document->size);
     icon = "process-stop-symbolic";
   } else if (!document->filepath(true).isEmpty()) {
     status = Ui::FormatSizeText(document->size);
@@ -1121,6 +1175,10 @@ void MessageWidget::updateDocumentState(Cell &cell) {
     icon = "folder-download-symbolic";
   }
   gtk_label_set_text(GTK_LABEL(cell.documentStatus), U8(status).c_str());
+  if (cell.loadProgress) {
+    gtk_widget_set_visible(cell.loadProgress, document->loading());
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell.loadProgress), DownloadFraction(document->loadOffset(), document->size));
+  }
   if (cell.documentButton) {
     gtk_button_set_icon_name(GTK_BUTTON(cell.documentButton), icon);
   }
@@ -1129,15 +1187,24 @@ void MessageWidget::updateDocumentState(Cell &cell) {
 // Over a picture: how much of it is uploaded or downloaded; a video's length otherwise.
 bool MessageWidget::updateStatus(Cell &cell) {
   const auto upload = UploadProgress(cell.item);
-  const auto transfer = upload || (cell.document && cell.document->loading())
-                        || (cell.photo && !cell.pictureFinal && cell.photo->displayLoading());
+  const auto downloading = cell.document && cell.document->loading();
+  const auto transfer = upload || downloading || (cell.photo && !cell.pictureFinal && cell.photo->displayLoading());
+  if (cell.ring) {
+    // A video downloading: how much of it came instead of the play button.
+    gtk_widget_set_visible(cell.ring, downloading);
+    if (cell.play) gtk_widget_set_visible(cell.play, !downloading);
+    if (downloading) SetRingFraction(cell.ring, DownloadFraction(cell.document->loadOffset(), cell.document->size));
+  }
   if (!cell.status) return transfer;
   QString text;
   if (upload) {
     text = Percent(*upload);
   } else if (const auto document = cell.document) {
-    if (document->loading()) {
-      text = Ui::FormatDownloadText(document->loadOffset(), document->size);
+    if (downloading) {
+      text = DownloadText(document->loadOffset(), document->size);
+      if (_chat->opensWhenLoaded(document)) {
+        text += u"\n"_q + Translated("Opens when downloaded", "Откроется после загрузки", "Відкриється після завантаження");
+      }
     } else if (const auto duration = document->duration(); duration > 0) {
       text = Ui::FormatDurationText(duration / 1000);
     } else if (document->isAnimation()) {

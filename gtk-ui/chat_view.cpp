@@ -3314,6 +3314,8 @@ void ChatView::openDocument(not_null<DocumentData *> document, not_null<HistoryI
       _openWhenLoaded.insert(document);
     }
   }
+  // The row follows the download it started (or shows it cancelled) until it ends.
+  refreshTransfer(item->fullId());
 }
 
 }  // namespace Contrail

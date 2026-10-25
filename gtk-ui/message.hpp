@@ -81,7 +81,10 @@ private:
     GtkWidget *documentButton = nullptr;
     GtkWidget *documentStatus = nullptr;
     GtkWidget *voiceProgress = nullptr;
+    GtkWidget *loadProgress = nullptr;  // A file's download.
     GtkWidget *status = nullptr;  // Upload or download progress over a picture.
+    GtkWidget *play = nullptr;    // Over a video: its play button, or while it downloads the ring of its progress.
+    GtkWidget *ring = nullptr;
     // A location: the map from Telegram's servers, and a live location's state.
     std::unique_ptr<Data::CloudImage> map;
     std::shared_ptr<QImage> mapView;
