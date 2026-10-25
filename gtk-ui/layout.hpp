@@ -110,6 +110,11 @@ inline GtkWidget *MakeHeightForWidthBin(GtkWidget *child) {
                    gtk_widget_allocate(child, width, height, baseline, nullptr);
                  }
                }));
+  // A child that expands (the voice player's column, a location's map) mustn't make the bubble
+  // expand: its row (halign START/END) would measure the bubble's height at the whole width of the
+  // chat and then give it only its natural width, and the text, taller there, would overflow the
+  // bubble into the next messages on a wide window.
+  gtk_widget_set_hexpand(bin, FALSE);
   adw_bin_set_child(ADW_BIN(bin), child);
   return bin;
 }
