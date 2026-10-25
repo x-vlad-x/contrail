@@ -16,11 +16,15 @@ namespace Data {
 class PhotoMedia;
 class DocumentMedia;
 class MediaLocation;
+class LocationPoint;
 } // namespace Data
 
 namespace Contrail {
 
 class ChatView;
+
+// The map of a location in a message, as Telegram's servers draw it (at twice the size for sharp screens).
+[[nodiscard]] GeoPointLocation LocationMapImage(const Data::LocationPoint &point);
 
 // The widgets of one message in a chat, or of an album (messages sent together, by their group id):
 // one bubble with the sender, forward and reply headers, the media (a grid of photos and videos, or a
