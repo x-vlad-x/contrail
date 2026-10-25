@@ -109,7 +109,7 @@ QString ReactionsKey(not_null<HistoryItem *> item) {
 // Double taps on these are theirs (a photo opens, a button acts), not a reaction.
 bool InteractiveTarget(GtkWidget *target, GtkWidget *bubble) {
   for (auto *widget = target; widget && widget != bubble; widget = gtk_widget_get_parent(widget)) {
-    if (GTK_IS_BUTTON(widget) || GTK_IS_PICTURE(widget) || GTK_IS_FLOW_BOX(widget)) return true;
+    if (GTK_IS_BUTTON(widget) || GTK_IS_PICTURE(widget) || GTK_IS_FLOW_BOX(widget) || GTK_IS_RANGE(widget)) return true;
   }
   return false;
 }
@@ -207,6 +207,23 @@ GtkWidget *MakeProgressRing() {
   return ring;
 }
 
+// A player's bar takes no input of its own: the wheel over it scrolls the chat, and the message seeks with
+// its own gestures, which leave vertical moves to the scrolling (MessageWidget::setupSeeking()).
+void DisableControllers(GtkWidget *widget) {
+  auto *controllers = gtk_widget_observe_controllers(widget);
+  const auto count = g_list_model_get_n_items(controllers);
+  for (guint i = 0; i != count; ++i) {
+    auto *controller = GTK_EVENT_CONTROLLER(g_list_model_get_item(controllers, i));
+    gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_NONE);
+    g_object_unref(controller);
+  }
+  g_object_unref(controllers);
+}
+
+QString LoadingText() {
+  return Translated("Loading…", "Загрузка…", "Завантаження…");
+}
+
 void SetRingFraction(GtkWidget *ring, double fraction) {
   g_object_set_data(G_OBJECT(ring), "contrail-fraction", GINT_TO_POINTER(int(std::clamp(fraction, 0., 1.) * 1000)));
   gtk_widget_queue_draw(ring);
@@ -227,6 +244,7 @@ MessageWidget::MessageWidget(Items items, not_null<ChatView *> chat) : _items(st
 
 MessageWidget::~MessageWidget() {
   _signals.clear();
+  cancelSeeking();
   if (_highlightTimeout) {
     g_source_remove(_highlightTimeout);
   }
@@ -258,6 +276,7 @@ GtkWidget *MessageWidget::widgetFor(const HistoryItem *item) const {
 
 void MessageWidget::refresh() {
   _signals.clear();
+  cancelSeeking();
   if (_highlightTimeout) {
     g_source_remove(base::take(_highlightTimeout));
   }
@@ -806,8 +825,10 @@ GtkWidget *MessageWidget::buildVoice(Cell &cell, not_null<DocumentData *> docume
   gtk_widget_add_css_class(cell.documentButton, "circular");
   gtk_widget_add_css_class(cell.documentButton, "suggested-action");
   gtk_widget_set_valign(cell.documentButton, GTK_ALIGN_CENTER);
+  const auto raw = &cell;
   _signals.clicked(cell.documentButton, [=] {
     if (!TapAllowed()) return;
+    raw->playRequested = true;
     Media::Player::instance()->playPause(AudioMsgId(document, item->fullId()));
   });
   gtk_box_append(GTK_BOX(box), cell.documentButton);
@@ -826,8 +847,14 @@ GtkWidget *MessageWidget::buildVoice(Cell &cell, not_null<DocumentData *> docume
     gtk_widget_add_css_class(name, "heading");
     gtk_box_append(GTK_BOX(column), name);
   }
-  cell.voiceProgress = gtk_progress_bar_new();
+  // The position, and how much of the track has come while it streams (the fill level).
+  cell.voiceProgress = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0., 1., 0.001);
+  gtk_scale_set_draw_value(GTK_SCALE(cell.voiceProgress), FALSE);
+  gtk_range_set_restrict_to_fill_level(GTK_RANGE(cell.voiceProgress), FALSE);
+  gtk_widget_set_focusable(cell.voiceProgress, FALSE);
   gtk_widget_add_css_class(cell.voiceProgress, "voice-progress");
+  DisableControllers(cell.voiceProgress);
+  setupSeeking(cell);
   gtk_box_append(GTK_BOX(column), cell.voiceProgress);
   cell.documentStatus = gtk_label_new(U8(Ui::FormatDurationText(document->duration() / 1000)).c_str());
   gtk_label_set_xalign(GTK_LABEL(cell.documentStatus), 0);
@@ -1219,24 +1246,103 @@ bool MessageWidget::updateStatus(Cell &cell) {
 }
 
 void MessageWidget::updatePlayback(const Media::Player::TrackState &state) {
+  using namespace Media::Player;
   for (const auto &cell : _cells) {
-    if (!cell->voiceProgress || !cell->document) {
+    // While the finger or the mouse moves the position, the bar shows where it is.
+    if (!cell->voiceProgress || !cell->document || cell->seeking) {
       continue;
     }
     const auto document = cell->document;
     const auto mine = (state.id.audio() == document && state.id.contextId() == cell->item->fullId());
-    const auto playing = mine && Media::Player::ShowPauseIcon(state.state);
+    const auto playing = mine && ShowPauseIcon(state.state);
+    const auto range = GTK_RANGE(cell->voiceProgress);
     gtk_button_set_icon_name(GTK_BUTTON(cell->documentButton), playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic");
-    if (mine && !Media::Player::IsStoppedOrStopping(state.state) && state.length > 0) {
-      gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell->voiceProgress), double(state.position) / state.length);
-      const auto frequency = state.frequency ? state.frequency : Media::Player::kDefaultFrequency;
-      gtk_label_set_text(GTK_LABEL(cell->documentStatus),
-                         U8(Ui::FormatDurationText(state.position / frequency) + u" / "_q
-                            + Ui::FormatDurationText(state.length / frequency))
-                             .c_str());
+    // Started and not playing yet: the start of the file is being downloaded.
+    if (!mine || state.state != State::Stopped) cell->playRequested = false;
+    if (mine && !IsStoppedOrStopping(state.state) && state.length > 0) {
+      gtk_range_set_value(range, double(state.position) / state.length);
+      gtk_range_set_show_fill_level(range, state.receivedTill > 0);
+      gtk_range_set_fill_level(range, BufferedFraction(state.receivedTill, state.length));
+      const auto frequency = state.frequency ? state.frequency : kDefaultFrequency;
+      auto text = Ui::FormatDurationText(state.position / frequency) + u" / "_q + Ui::FormatDurationText(state.length / frequency);
+      if (!IsPausedOrPausing(state.state) && WaitingForData(state.position, state.receivedTill, state.length)) {
+        text = LoadingText() + u" "_q + text;
+      }
+      gtk_label_set_text(GTK_LABEL(cell->documentStatus), U8(text).c_str());
     } else {
-      gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell->voiceProgress), 0.);
-      gtk_label_set_text(GTK_LABEL(cell->documentStatus), U8(Ui::FormatDurationText(document->duration() / 1000)).c_str());
+      gtk_range_set_value(range, 0.);
+      gtk_range_set_show_fill_level(range, FALSE);
+      const auto text = cell->playRequested ? LoadingText() : Ui::FormatDurationText(document->duration() / 1000);
+      gtk_label_set_text(GTK_LABEL(cell->documentStatus), U8(text).c_str());
+    }
+  }
+}
+
+// A tap on the bar of a voice message or a song plays it from there, a drag along it moves the position
+// (the player pauses while it moves). A drag that starts vertically scrolls the chat.
+void MessageWidget::setupSeeking(Cell &cell) {
+  auto *bar = cell.voiceProgress;
+  const auto raw = &cell;
+  const auto id = AudioMsgId(cell.document, cell.item->fullId());
+  const auto current = [=] {
+    const auto state = Media::Player::instance()->getState(id.type());
+    return state.id.audio() == id.audio() && state.id.contextId() == id.contextId()
+           && !Media::Player::IsStoppedOrStopping(state.state);
+  };
+  const auto show = [=](double fraction) {
+    gtk_range_set_value(GTK_RANGE(bar), fraction);
+    if (const auto duration = raw->document->duration(); duration > 0) {
+      const auto text = Ui::FormatDurationText(int64(fraction * duration) / 1000) + u" / "_q
+                        + Ui::FormatDurationText(duration / 1000);
+      gtk_label_set_text(GTK_LABEL(raw->documentStatus), U8(text).c_str());
+    }
+  };
+  const auto seek = [=](double fraction) {
+    auto *player = Media::Player::instance().get();
+    if (!current()) {
+      raw->playRequested = true;
+      player->play(id);
+    }
+    player->finishSeeking(id.type(), fraction);
+  };
+  auto *click = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double x, double) {
+    if (!TapAllowed() || raw->seeking) return;
+    const auto fraction = SeekFraction(x, gtk_widget_get_width(bar));
+    show(fraction);
+    seek(fraction);
+  });
+  gtk_widget_add_controller(bar, GTK_EVENT_CONTROLLER(click));
+  auto *pan = gtk_gesture_pan_new(GTK_ORIENTATION_HORIZONTAL);
+  const auto position = [=](GtkGestureDrag *drag) {
+    double x = 0, y = 0, dx = 0, dy = 0;
+    gtk_gesture_drag_get_start_point(drag, &x, &y);
+    gtk_gesture_drag_get_offset(drag, &dx, &dy);
+    return SeekFraction(x + dx, gtk_widget_get_width(bar));
+  };
+  _signals.connect<void(GtkGesturePan *, GtkPanDirection, double)>(pan, "pan", [=](GtkGesturePan *gesture, GtkPanDirection, double) {
+    if (!raw->seeking) {
+      // Wins over the swipe to reply and the scrolling.
+      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+      raw->seeking = true;
+      if (current()) Media::Player::instance()->startSeeking(id.type());
+    }
+    show(position(GTK_GESTURE_DRAG(gesture)));
+  });
+  _signals.connect<void(GtkGestureDrag *, double, double)>(pan, "drag-end", [=](GtkGestureDrag *gesture, double, double) {
+    if (std::exchange(raw->seeking, false)) seek(position(gesture));
+  });
+  _signals.connect<void(GtkGesture *, GdkEventSequence *)>(pan, "cancel", [=](GtkGesture *, GdkEventSequence *) {
+    if (std::exchange(raw->seeking, false)) Media::Player::instance()->cancelSeeking(id.type());
+  });
+  gtk_widget_add_controller(bar, GTK_EVENT_CONTROLLER(pan));
+}
+
+// The message goes (or is rebuilt) while its bar is being dragged: the player mustn't stay paused for it.
+void MessageWidget::cancelSeeking() {
+  for (const auto &cell : _cells) {
+    if (std::exchange(cell->seeking, false)) {
+      Media::Player::instance()->cancelSeeking(AudioMsgId(cell->document, cell->item->fullId()).type());
     }
   }
 }

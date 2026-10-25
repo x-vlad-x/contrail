@@ -181,7 +181,6 @@ avatar.archive-avatar {
   min-height: 42px;
 }
 .voice-progress trough,
-.voice-progress progress,
 .download-progress trough,
 .download-progress progress {
   min-height: 4px;
