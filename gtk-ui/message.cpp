@@ -861,6 +861,18 @@ GtkWidget *MessageWidget::buildWebPage(not_null<HistoryItem *> item) {
   return box;
 }
 
+GeoPointLocation LocationMapImage(const Data::LocationPoint &point) {
+  auto result = GeoPointLocation();
+  result.lat = point.lat();
+  result.lon = point.lon();
+  result.access = point.accessHash();
+  result.width = kMapWidth;
+  result.height = kMapHeight;
+  result.zoom = kMapZoom;
+  result.scale = kMapScale;
+  return result;
+}
+
 // A location: the map with the pin (a live location: with the avatar of whoever shares it, and the time left),
 // the venue's name and address, or "Live Location" and when it was updated. A tap opens it on a map.
 GtkWidget *MessageWidget::buildLocation(Cell &cell, not_null<Data::MediaLocation *> location) {
@@ -877,14 +889,7 @@ GtkWidget *MessageWidget::buildLocation(Cell &cell, not_null<Data::MediaLocation
   gtk_widget_add_css_class(cell.picture, "location-map");
   gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, kMapWidth, kMapHeight));
   cell.kind = PictureKind::Map;
-  auto geo = GeoPointLocation();
-  geo.lat = point.lat();
-  geo.lon = point.lon();
-  geo.access = point.accessHash();
-  geo.width = kMapWidth;
-  geo.height = kMapHeight;
-  geo.zoom = kMapZoom;
-  geo.scale = kMapScale;
+  const auto geo = LocationMapImage(point);
   cell.map = std::make_unique<Data::CloudImage>(
       session, ImageWithLocation{.location = ImageLocation({geo}, kMapWidth * kMapScale, kMapHeight * kMapScale)});
   cell.mapView = cell.map->createView();

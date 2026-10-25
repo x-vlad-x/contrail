@@ -1,12 +1,14 @@
 #include "demo.hpp"
 
 #include "app.hpp"
+#include "message.hpp"
 
 #include "api/api_text_entities.h"
 #include "base/unixtime.h"
 #include "core/application.h"
 #include "data/components/sponsored_messages.h"
 #include "data/data_changes.h"
+#include "data/data_location.h"
 #include "data/data_peer_id.h"
 #include "data/data_photo.h"
 #include "data/data_photo_media.h"
@@ -17,9 +19,11 @@
 #include "main/main_domain.h"
 #include "main/main_session.h"
 #include "main/main_session_settings.h"
+#include "storage/cache/storage_cache_database.h"
 #include "storage/storage_account.h"
 
 #include <QtCore/QBuffer>
+#include <QtCore/QFile>
 #include <QtGui/QLinearGradient>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
@@ -237,6 +241,40 @@ MTPGeoPoint Geo(double lat, double lon) {
   return MTP_geoPoint(MTP_flags(0), MTP_double(lon), MTP_double(lat), MTP_long(1), MTPint());
 }
 
+// The map Telegram's servers would draw for a location in a message, put together from OpenStreetMap's tiles in
+// libshumate's cache (tools/demo.sh tiles puts them there): the demo has no network. Without tiles the map stays
+// empty, as offline.
+void CacheLocationMap(not_null<Main::Session *> session, double lat, double lon) {
+  const auto geo = LocationMapImage(Data::LocationPoint(lat, lon, Data::LocationPoint::NoAccessHash));
+  const auto width = geo.width * geo.scale, height = geo.height * geo.scale;
+  const auto zoom = geo.zoom + int(std::lround(std::log2(geo.scale)));  // Twice the size: one level closer.
+  constexpr auto kTile = 256;
+  const auto world = double(kTile << zoom);
+  const auto latRad = lat * M_PI / 180.;
+  const auto left = int(std::lround((lon + 180.) / 360. * world)) - width / 2;
+  const auto top = int(std::lround((1. - std::asinh(std::tan(latRad)) / M_PI) / 2. * world)) - height / 2;
+  const auto tiles = QString::fromUtf8(g_get_user_cache_dir()) + u"/shumate/https___tile_openstreetmap_org__z___x___y__png/"_q;
+  auto image = QImage(width, height, QImage::Format_RGB32);
+  image.fill(QColor(242, 239, 233));
+  auto p = QPainter(&image);
+  auto found = false;
+  for (auto x = left / kTile; x * kTile < left + width; ++x) {
+    for (auto y = top / kTile; y * kTile < top + height; ++y) {
+      const auto tile = QImage(tiles + u"%1/%2/%3.png"_q.arg(zoom).arg(x).arg(y));
+      if (tile.isNull()) continue;
+      p.drawImage(x * kTile - left, y * kTile - top, tile);
+      found = true;
+    }
+  }
+  p.end();
+  if (!found) return;
+  auto bytes = QByteArray();
+  auto buffer = QBuffer(&bytes);
+  image.save(&buffer, "PNG");
+  session->data().cache().put(Data::GeoPointCacheKey(geo),
+                              Storage::Cache::Database::TaggedValue(std::move(bytes), Data::kImageCacheTag));
+}
+
 struct Message {
   MsgId id;
   PeerId from;  // Empty for channel posts.
@@ -247,6 +285,7 @@ struct Message {
   int views = 0;
   std::optional<MTPMessageReactions> reactions;
   TimeId edited = 0;
+  bool pinned = false;
 };
 
 MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &m) {
@@ -262,6 +301,7 @@ MTPMessage ToMTP(not_null<Main::Session *> session, PeerId peer, const Message &
   if (m.views) flags |= Flag::f_views | Flag::f_post;
   if (m.reactions) flags |= Flag::f_reactions;
   if (m.edited) flags |= Flag::f_edit_date | Flag::f_edit_hide;
+  if (m.pinned) flags |= Flag::f_pinned;
   return MTP_message(
       MTP_flags(flags), MTP_int(m.id.bare), m.from ? peerToMTP(m.from) : MTPPeer(),
       MTPint(),     // from_boosts_applied
@@ -357,6 +397,8 @@ void Fill(not_null<Main::Session *> session) {
   const auto maya = peerFromUser(kMaya), sam = peerFromUser(kSam), lena = peerFromUser(kLena);
   const auto jordan = peerFromUser(kJordan), priya = peerFromUser(kPriya);
   const auto lake = Lake(), forest = Forest(), sunrise = Sunrise();
+  constexpr auto kPark = std::pair(46.5072, 6.6262), kPriya = std::pair(46.5101, 6.6318), kJordan = std::pair(46.5088, 6.6405);
+  for (const auto &[lat, lon] : {kPark, kPriya, kJordan}) CacheLocationMap(session, lat, lon);
 
   AddChat(session, maya, {
       {1, maya, minutes(60 * 15 + 20), u"Are we still on for the hike on Saturday? 🥾"_q},
@@ -369,7 +411,7 @@ void Fill(not_null<Main::Session *> session) {
       {7, maya, minutes(40), u"Haha, deal. I'll bring the snacks 🍫"_q, std::nullopt, 0, 0,
        Reactions({{u"😁"_q, 1, true}}, {{self, u"😁"_q}})},
       {8, self, minutes(12), u"Perfect. Let's meet at the parking lot at 8:00. Here's the route: openstreetmap.org"_q,
-       std::nullopt, 0, 0, Reactions({{u"👍"_q, 1, false}}, {{maya, u"👍"_q}})},
+       std::nullopt, 0, 0, Reactions({{u"👍"_q, 1, false}}, {{maya, u"👍"_q}}), 0, true},
       {9, maya, minutes(2), u"See you there! 👋"_q},
   }, 1, true);
   AddChat(session, peerFromChat(kGroup), {
@@ -382,13 +424,18 @@ void Fill(not_null<Main::Session *> session) {
       {6, jordan, minutes(29), u"+1 for the forest"_q, std::nullopt, 5},
       {7, lena, minutes(8), u"Here's the view from last week"_q, PhotoMedia(session, 8100002, forest, minutes(8)), 0, 0,
        Reactions({{u"❤️"_q, 4, false}, {u"😍"_q, 2, false}})},
-      {8, sam, minutes(6), QString(), MTP_messageMediaVenue(Geo(46.5191, 6.6323), MTP_string("Riverside Park"),
+      {8, sam, minutes(6), QString(), MTP_messageMediaVenue(Geo(kPark.first, kPark.second), MTP_string("Riverside Park"),
                                                              MTP_string("Quai d'Ouchy 1, Lausanne"), MTP_string("foursquare"),
                                                              MTP_string("demo"), MTP_string("parks_outdoors/park"))},
-      {9, priya, minutes(4), QString(), MTP_messageMediaGeoLive(MTP_flags(0), Geo(46.5160, 6.6290), MTPint(), MTP_int(3600),
-                                                                MTPint()),
+      {9, jordan, minutes(5), QString(), MTP_messageMediaGeoLive(MTP_flags(0), Geo(kJordan.first, kJordan.second), MTPint(),
+                                                                 MTP_int(8 * 3600), MTPint()),
+       0, 0, std::nullopt, minutes(2)},
+      {10, priya, minutes(4), QString(), MTP_messageMediaGeoLive(MTP_flags(0), Geo(kPriya.first, kPriya.second), MTPint(),
+                                                                 MTP_int(3600), MTPint()),
        0, 0, std::nullopt, minutes(1)},
-  }, 2);
+      {11, lena, minutes(3), u"Almost there, grabbing coffee first ☕"_q, std::nullopt, 0, 0,
+       Reactions({{u"😁"_q, 2, false}}, {{sam, u"😁"_q}, {priya, u"😁"_q}})},
+  }, 3);
   AddChat(session, peerFromChannel(kChannel), {
       {1, PeerId(), minutes(60 * 20), u"Sunrise over the bay. Shot this morning, just before six ☀️"_q,
        PhotoMedia(session, 8100003, sunrise, minutes(60 * 20)), 0, 8412,

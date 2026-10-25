@@ -2124,6 +2124,9 @@ void ChatView::debugHistory(const QString &action) {
     // The message waiting here to be forwarded (to Saved Messages, from Saved Messages).
     const auto id = FullMsgId(_history->peer->id, MsgId(action.mid(8).toLongLong()));
     _history->setForwardDraft(_thread->topicRootId(), _thread->monoforumPeerId(), {.ids = {id}});
+  } else if (action.startsWith(u"forward-picker:"_q)) {
+    // Only shows the chats to forward to: nothing goes anywhere without a tap.
+    if (const auto item = _history->owner().message(_history->peer, MsgId(action.mid(15).toLongLong()))) forward(item);
   } else if (action == u"forward-state"_q) {
     g_message("Forward: shown=%d draft=%d bar=%s / %s", int(_forwardShown), int(forwarding()),
               gtk_label_get_text(GTK_LABEL(_replyTitle)), gtk_label_get_text(GTK_LABEL(_replyText)));

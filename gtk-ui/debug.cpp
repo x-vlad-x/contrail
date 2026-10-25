@@ -9,7 +9,7 @@
 //           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
 //             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|custom-reactions|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
 //             live-start:SECONDS (Saved Messages)|live-map|live-bar|pinned|pinned-click|pinned-list|pin:ID|unpin:ID
-//             (Saved Messages)|forward:ID (Saved Messages)|forward-state|forward-menu|trim (rows far from the screen)] |
+//             (Saved Messages)|forward:ID (Saved Messages)|forward-picker:ID|forward-state|forward-menu|trim (rows far from the screen)] |
 //           map | screenshot [call] PATH
 
 #include "debug.hpp"

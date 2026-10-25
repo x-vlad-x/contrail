@@ -322,18 +322,27 @@ void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &po
     MapCenterOn(map, fit.lat, fit.lon, fit.zoom, animated);
     return true;
   };
+  // The points asked for last win: GTK runs the callbacks waiting for the same frame newest first.
+  constexpr auto kPendingKey = "contrail-pending-fit";
+  if (const auto id = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(map), kPendingKey))) {
+    g_object_set_data(G_OBJECT(map), kPendingKey, nullptr);
+    gtk_widget_remove_tick_callback(map, id);
+  }
   if (show(animate)) return;
   // Not allocated yet (the dialog is being opened): on its first frame.
   struct Pending {
     Fn<bool(bool)> show;
   };
   auto *pending = new Pending{show};
-  gtk_widget_add_tick_callback(
+  const auto id = gtk_widget_add_tick_callback(
       map,
-      +[](GtkWidget *, GdkFrameClock *, gpointer data) -> gboolean {
-        return static_cast<Pending *>(data)->show(false) ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
+      +[](GtkWidget *map, GdkFrameClock *, gpointer data) -> gboolean {
+        if (!static_cast<Pending *>(data)->show(false)) return G_SOURCE_CONTINUE;
+        g_object_set_data(G_OBJECT(map), "contrail-pending-fit", nullptr);
+        return G_SOURCE_REMOVE;
       },
       pending, [](gpointer data) { delete static_cast<Pending *>(data); });
+  g_object_set_data(G_OBJECT(map), kPendingKey, GUINT_TO_POINTER(id));
 }
 
 void MapOnUserMove(GtkWidget *map, Fn<void()> touched) {
