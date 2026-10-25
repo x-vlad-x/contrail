@@ -1,42 +1,88 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.2.1
+# Contrail 0.3.0
 
-A bugfix release of **Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and
-desktops: a chat with a link preview could freeze the app on a phone. It is built on the Telegram Desktop 7.3.3
-core. Contrail is an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by
-Telegram.
+**Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and desktops, now has
+reactions, locations and live locations, pinned messages and forwarding, as in the phone apps, keeps its memory in
+check in long chats, and has a new icon. It comes from its own Flatpak repository too, with updates. It is built on
+the Telegram Desktop 7.3.3 core. Contrail is an unofficial client that uses the Telegram API; it is not affiliated
+with or endorsed by Telegram.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chats.png" width="180" alt="Chat list">
-  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation">
-  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/call.png" width="180" alt="An incoming call">
-  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chats-dark.png" width="180" alt="Chat list, dark style">
+  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation with reactions and a pinned message">
+  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/group.png" width="180" alt="A group with a place and live locations">
+  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/live-map.png" width="180" alt="A group's live locations on one map">
+  <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/forward.png" width="180" alt="Forwarding a message">
 </p>
 <p align="center"><sub>Screenshots of a made-up account.</sub></p>
 
 ## Downloads
 
-| Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
-| --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.2.1-1_amd64.deb` | `contrail_0.2.1-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.2.1-1.x86_64.rpm` | `contrail-0.2.1-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.2.1-x86_64.flatpak` | `Contrail-0.2.1-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.2.1-x86_64.AppImage` | `Contrail-0.2.1-aarch64.AppImage` |
+**With updates**: Contrail's own signed Flatpak repository, [flatpak.xvlad.com](https://flatpak.xvlad.com), for
+x86_64 and ARM64. Open [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in
+GNOME Software, Discover or another app store, or add it in a terminal:
 
 ```sh
-sudo apt install ./contrail_0.2.1-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.2.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
-flatpak install --user ./Contrail-0.2.1-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.2.1-x86_64.AppImage && ./Contrail-0.2.1-x86_64.AppImage
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists xvlad https://flatpak.xvlad.com/xvlad.flatpakrepo
+flatpak install --user xvlad io.github.x_vlad_x.Contrail
+```
+
+Updates then come through the app store or `flatpak update`. If you installed a downloaded `.flatpak` before,
+`flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail` moves it to the repository and keeps the
+account and the chats.
+
+**The files** below need no repository:
+
+| Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
+| --- | --- | --- |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.3.0-1_amd64.deb` | `contrail_0.3.0-1_arm64.deb` |
+| Fedora, openSUSE | `contrail-0.3.0-1.x86_64.rpm` | `contrail-0.3.0-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.3.0-x86_64.flatpak` | `Contrail-0.3.0-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.3.0-x86_64.AppImage` | `Contrail-0.3.0-aarch64.AppImage` |
+
+```sh
+sudo apt install ./contrail_0.3.0-1_arm64.deb              # DEB
+sudo dnf install ./contrail-0.3.0-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
+flatpak install --user ./Contrail-0.3.0-aarch64.flatpak    # Flatpak
+chmod +x Contrail-0.3.0-x86_64.AppImage && ./Contrail-0.3.0-x86_64.AppImage
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
 needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.2.0, 0.1.1 or 0.1.0, install the new DEB, RPM or Flatpak the same
-way, or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
+keeps your account and chats). To update from 0.2.1 or older, install the new DEB, RPM or Flatpak file the same way,
+or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
 
-## What's new since 0.2.0
+## What's new since 0.2.1
+
+- **A Flatpak repository**: [flatpak.xvlad.com](https://flatpak.xvlad.com) serves every release for x86_64 and
+  ARM64, signed, with the GNOME runtime from Flathub. Added once (see Downloads above), Contrail updates like any
+  other app, through GNOME Software, Discover or `flatpak update`; downloaded `.flatpak` files never updated by
+  themselves.
+- **Reactions** as in the phone apps: under the messages with their counts, or with the avatars of the few who
+  reacted, and custom ones as their pictures. A tap on one adds yours or takes it back, a long press shows who
+  reacted. The first reactions are on top of a message's menu, all of them a tap further, and a double tap sends
+  your quick reaction. New reactions to your messages show a heart in the chat list.
+- **Locations**: a map of the place in the chat; a tap opens an interactive map (OpenStreetMap, drawn by
+  libshumate as in GNOME Maps) with "Open in Maps". You can send your current location, any place on the map, or a
+  place nearby or found by name.
+- **Live locations**: share yours for 15 minutes, an hour, 8 hours or until you stop it. It goes on in the
+  background and after a restart; the GPS is used only to take a fix now and then (more often while you move),
+  nothing keeps it on. A bar under a chat's header says who shares a live location there and opens **one map with
+  everyone**: their pins moving as they are updated, how far each one is from you, and sharing or stopping yours.
+- **Pinned messages**: a bar with the pinned message above the chat; a tap shows it and goes on to the one pinned
+  before, a list shows all of them. Pinning and unpinning from a message's menu.
+- **Forwarding**: choose a chat (and the topic in a group with topics); the messages then wait above its message
+  field, to go with a comment or alone, with or without the senders' names.
+- **Replies** to a message that isn't loaded yet show "Loading..." and then the message, instead of "Deleted
+  message".
+- **Memory in long chats**: a chat keeps the rows of the messages near the screen only, where scrolling through
+  2000 messages used to keep about 900 MB of them. When the system runs short of memory, Contrail lets go of the
+  chats that aren't open, and of the whole interface if it's in the background; the phones have nothing that
+  would tell it, so it watches `/proc` itself.
+- **A new icon**, also in the notification area of desktops.
+
+## Earlier, in 0.2.1
 
 - **No more freezes on link previews**: a chat with a link preview that has a picture could freeze Contrail for
   good as soon as it was opened, on a phone-sized screen. GTK went round in circles laying out the message,
@@ -101,6 +147,7 @@ way, or run the new AppImage: the account and chats stay. The DEB also installs 
 - Chats with history loaded while scrolling, replies, forwards, formatted text, photos and albums, stickers,
   files, videos, voice messages (hold to record), link previews, polls, editing and deleting; sending files and
   pasted pictures with a caption; a photo viewer with pinch zoom.
+- Reactions, pinned messages, forwarding; locations and live locations, with a map of everyone sharing one.
 - One-to-one audio and video calls; notifications; `tg://` and `t.me` links; every Telegram language.
 - Sponsored messages in channels, as the Telegram API terms require of clients that show channels.
 - An adaptive layout: one column on a phone, the chat list and the chat side by side on a wider window, with a
@@ -114,15 +161,16 @@ way, or run the new AppImage: the account and chats stay. The DEB also installs 
   an album of music.
 - The energy use in the background was not measured on battery yet: the wakeups and CPU time went down, the
   battery saving is not confirmed (see [the measurements](https://github.com/x-vlad-x/contrail/blob/main/docs/measurements-0.2.0.md)).
-- The Flatpak keeps its own account and chats, apart from the other packages (see the installation guide), and
-  takes `flatpak update` only from a newer file.
+- The Flatpak keeps its own account and chats, apart from the other packages (see the installation guide). A
+  downloaded `.flatpak` file doesn't update by itself: the repository does.
+- The maps need the network: they come from OpenStreetMap's servers and aren't kept for offline use beyond
+  libshumate's cache.
 - The RPM isn't signed.
 - Emoji in messages need a color emoji font on the system (the DEB recommends Noto Color Emoji).
 
 ## Not there yet
 
-Group calls, screen sharing, stories, reactions, voting in polls, forwarding and selecting messages, sticker
-and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't planned: Telegram
+Group calls, screen sharing, stories, voting in polls, selecting several messages, sticker and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't planned: Telegram
 Desktop doesn't have them either.
 
 ## Tested
@@ -145,8 +193,8 @@ Desktop doesn't have them either.
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.2.1-sources.tar.gz` holds Contrail's
-sources; the `Contrail-0.2.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
+contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.3.0-sources.tar.gz` holds Contrail's
+sources; the `Contrail-0.3.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
 packages are built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.
