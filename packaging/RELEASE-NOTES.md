@@ -180,15 +180,17 @@ Desktop doesn't have them either.
   demo account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files,
   outside the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
   `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
-  Arch Linux, the Flatpak with `flatpak` on Fedora 44.
-- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage with a real account: the chat that froze 0.2.0
-  (a link preview with a picture) opens and scrolls, older pages load; in Saved Messages, 19 rounds of sending a
-  picture and deleting it.
+  Arch Linux, the Flatpak with `flatpak` on Fedora 44. The About dialog shows the new icon and 0.3.0.
+- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage with the same offline demo account, run in a network
+  namespace without network: the pinned message bar, reactions, places and live locations in a group with their
+  maps, the bar of who shares a live location, and the map of everyone sharing one (fitting everyone on opening).
+  The features themselves (reactions, locations and live locations, pinned messages, forwarding, the memory
+  guard) were tried with a real account on the phone in a test build of the same code, before the release.
 - The ARM64 DEB, RPM and Flatpak weren't installed in containers for this release; they are built the same way
   as the AppImage, from the same program. 0.2.0's packages were, and nothing in the packaging changed since.
-- Not checked with these files: calls with another person, notifications and calls on a locked phone, writing
-  in a group with topics, pasting files through Flatpak's portal, Wayland desktops. Battery use in the
-  background wasn't measured.
+- Not checked with these files: the tray icon's new drawing on a desktop panel, calls with another person,
+  notifications and calls on a locked phone, writing in a group with topics, pasting files through Flatpak's
+  portal, Wayland desktops. Battery use in the background wasn't measured.
 
 ## Sources and licenses
 
