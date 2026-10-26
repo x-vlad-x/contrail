@@ -264,8 +264,16 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
   data.itemRemoved() | rpl::on_next([=](not_null<const HistoryItem *> item) { removeRow(item); }, _lifetime);
   data.itemDataChanges() | rpl::on_next([=](not_null<HistoryItem *> item) { refreshItemData(item); }, _lifetime);
   // The core asks to repaint a message when its reactions are due to be asked for again (Reactions::poll).
+  // Not right away: the core asks while going through its list of messages to repaint, and polling adds to
+  // that list (it hung the app, then the compositor dropped it).
   data.itemRepaintRequest() | rpl::on_next([=](not_null<const HistoryItem *> item) {
-    if (rowFor(item)) pollReactions();
+    if (!_pollScheduled && rowFor(item)) {
+      _pollScheduled = true;
+      crl::on_main(this, [=] {
+        _pollScheduled = false;
+        pollReactions();
+      });
+    }
   }, _lifetime);
   Live().changes() | rpl::on_next([=] { refreshLiveBar(); }, _lifetime);
   if (_liveLocations) {

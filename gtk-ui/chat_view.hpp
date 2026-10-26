@@ -302,6 +302,7 @@ private:
   bool _settingComposerText = false;
   int _editGeneration = 0;
   bool _syncScheduled = false;
+  bool _pollScheduled = false;
   base::weak_ptr<AttachDialog> _attach;
   std::unique_ptr<ClipboardReader> _pasteReader;
   SignalConnections _signals;
