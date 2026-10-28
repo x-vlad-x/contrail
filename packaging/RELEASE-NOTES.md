@@ -205,15 +205,15 @@ Desktop doesn't have them either.
   demo account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files,
   outside the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
   `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
-  Arch Linux, the Flatpak with `flatpak` on Fedora 44. The About dialog shows the new icon and 0.3.0.
-- On the FuriLabs FLX1s (FuriOS 14, Phosh), the ARM64 AppImage with the same offline demo account, run in a network
-  namespace without network: the pinned message bar, reactions, places and live locations in a group with their
-  maps, the bar of who shares a live location, and the map of everyone sharing one (fitting everyone on opening).
-  The features themselves (reactions, locations and live locations, pinned messages, forwarding, the memory
-  guard) were tried with a real account on the phone in a test build of the same code, before the release.
-- The ARM64 DEB, RPM and Flatpak weren't installed in containers for this release; they are built the same way
-  as the AppImage, from the same program. 0.2.0's packages were, and nothing in the packaging changed since.
-- Not checked with these files: the tray icon's new drawing on a desktop panel, calls with another person,
+  Arch Linux, the Flatpak with `flatpak` on Fedora 44. The About dialog shows 0.3.1; in the Flatpak (GTK 4.24) the
+  messages stay inside their bubbles and a voice message has its full-width bar.
+- On the FuriLabs FLX1s (FuriOS 14, Phosh), with a real account, in test builds of the same code before the
+  release: scrolling groups and channels with reactions for two days of everyday use without a hang, calls
+  without clicks (and a test of the call's sound output with a tone, without a gap in 20 seconds), and the memory
+  of an account in the background (heaptrack).
+- The ARM64 packages weren't installed in containers or on the phone for this release; they are built the same way
+  as the x86_64 ones, from the same sources. 0.2.0's packages were, and nothing in the packaging changed since.
+- Not checked with these files: seeking and download progress on the phone, calls with another person,
   notifications and calls on a locked phone, writing in a group with topics, pasting files through Flatpak's
   portal, Wayland desktops. Battery use in the background wasn't measured.
 
