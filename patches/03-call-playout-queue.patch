@@ -1,0 +1,70 @@
+Calls: the queue of the other side's voice grows when the sound server takes more than it holds.
+PulseAudio on the FuriLabs FLX1s (droid sink) takes 40-60 ms of sound at once every ~45 ms, while the
+OpenAL device module keeps only 5 buffers of 10 ms: the source ran dry several times a second, a click
+each time. It starts with 5 as before and keeps what was taken in one pass plus 4 buffers (up to 16).
+
+diff --git a/Telegram/lib_webrtc/webrtc/details/webrtc_openal_adm.cpp b/Telegram/lib_webrtc/webrtc/details/webrtc_openal_adm.cpp
+index 4962d89..c68480a 100644
+--- a/Telegram/lib_webrtc/webrtc/details/webrtc_openal_adm.cpp
++++ b/Telegram/lib_webrtc/webrtc/details/webrtc_openal_adm.cpp
+@@ -49,9 +49,15 @@ constexpr auto kRecordingPart = (kRecordingFrequency * kBufferSizeMs + 999)
+ constexpr auto kRestartAfterEmptyData = 50; // Half a second with no data.
+ constexpr auto kProcessInterval = crl::time(10);
+ 
+-constexpr auto kBuffersFullCount = 7;
++constexpr auto kBuffersFullCount = 16;
+ constexpr auto kBuffersKeepReadyCount = 5;
+ 
++// Some sound servers take much more than 10 ms at once: PulseAudio on
++// the FuriLabs FLX1s (droid sink) takes 40-60 ms every ~45 ms, emptying
++// a 50 ms queue each time, and every empty queue is a click. The queue
++// grows to what was taken in one pass plus this margin for a late timer.
++constexpr auto kBuffersKeepReadyMargin = 4;
++
+ constexpr auto kDefaultRecordingLatency = crl::time(20);
+ constexpr auto kDefaultPlayoutLatency = crl::time(20);
+ constexpr auto kQueryExactTimeEach = 20;
+@@ -228,6 +234,7 @@ struct AudioDeviceOpenAL::Data {
+ 	QByteArray playoutSamples;
+ 	ALuint source = 0;
+ 	int queuedBuffersCount = 0;
++	int keepReadyCount = kBuffersKeepReadyCount;
+ 	std::array<ALuint, kBuffersFullCount> buffers = { { 0 } };
+ 	std::array<bool, kBuffersFullCount> queuedBuffers = { { false } };
+ 	int64_t exactDeviceTimeCounter = 0;
+@@ -983,14 +990,26 @@ void AudioDeviceOpenAL::processPlayoutData() {
+ 	};
+ 	const auto wasPlaying = playing();
+ 
++	const auto queuedBefore = _data->queuedBuffersCount;
++	const auto taken = [&](int count) {
++		_data->keepReadyCount = std::clamp(
++			count + kBuffersKeepReadyMargin,
++			_data->keepReadyCount,
++			kBuffersFullCount);
++	};
+ 	if (wasPlaying) {
+ 		clearProcessedBuffers();
++		taken(queuedBefore - _data->queuedBuffersCount);
+ 	} else {
++		if (queuedBefore) {
++			// The source played everything we gave it and stopped.
++			taken(_data->keepReadyCount);
++		}
+ 		unqueueAllBuffers();
+ 	}
+ 
+ 	const auto wereQueued = _data->queuedBuffers;
+-	while (_data->queuedBuffersCount < kBuffersKeepReadyCount) {
++	while (_data->queuedBuffersCount < _data->keepReadyCount) {
+ 		const auto available = _audioDeviceBuffer.RequestPlayoutData(
+ 			kPlayoutPart);
+ 		if (available == kPlayoutPart) {
+@@ -1166,6 +1185,7 @@ void AudioDeviceOpenAL::startPlayingOnThread() {
+ 			_data->source = source;
+ 			alGenBuffers(_data->buffers.size(), _data->buffers.data());
+ 
++			_data->keepReadyCount = kBuffersKeepReadyCount;
+ 			_data->exactDeviceTimeCounter = 0;
+ 			_data->lastExactDeviceTime = 0;
+ 			_data->lastExactDeviceTimeWhen = 0;
