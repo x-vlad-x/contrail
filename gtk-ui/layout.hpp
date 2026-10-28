@@ -102,8 +102,18 @@ inline GtkWidget *MakeHeightForWidthBin(GtkWidget *child) {
                  if (!child || !gtk_widget_should_layout(child)) {
                    return;
                  }
-                 gtk_widget_measure(child, orientation, (orientation == GTK_ORIENTATION_HORIZONTAL) ? -1 : forSize,
-                                    minimum, natural, minimumBaseline, naturalBaseline);
+                 if (orientation == GTK_ORIENTATION_HORIZONTAL) {
+                   forSize = -1;
+                 } else if (forSize >= 0) {
+                   // The bubble never gets wider than its natural width (it doesn't expand), but GTK 4.24's
+                   // GtkBox asks for its height at the whole width of the row and then gives it only that.
+                   int naturalWidth = 0;
+                   gtk_widget_measure(child, GTK_ORIENTATION_HORIZONTAL, -1, nullptr, &naturalWidth, nullptr,
+                                      nullptr);
+                   forSize = std::min(forSize, naturalWidth);
+                 }
+                 gtk_widget_measure(child, orientation, forSize, minimum, natural, minimumBaseline,
+                                    naturalBaseline);
                },
                [](GtkWidget *widget, int width, int height, int baseline) {
                  if (auto *child = adw_bin_get_child(ADW_BIN(widget))) {
