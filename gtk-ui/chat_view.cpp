@@ -96,6 +96,11 @@ constexpr auto kTopReserveHigh = 300000;  // Rows removed above the screen leave
 constexpr auto kWindowMessages = 200;
 constexpr auto kKeepHeight = 2.5 * kPreloadHeight;
 constexpr auto kMaxRows = 300;
+// A fling or a drag of the scroll bar that stops this far above the rows doesn't walk there page by page: the
+// messages where it stopped are loaded at once (jumpUp()), as many back as the rows' mean height says.
+constexpr auto kJumpGap = kPreloadHeight;
+constexpr auto kJumpRowMin = 40.;
+constexpr auto kJumpRowMax = 400.;
 // Voice messages are recorded while the microphone button is held, as in the phone apps.
 constexpr auto kRecordCancelDistance = 120.;  // Slide left to cancel.
 constexpr auto kRecordLockDistance = 90.;     // Slide up to keep recording without holding.
@@ -219,7 +224,8 @@ ChatView::ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> windo
                    std::optional<double> showAtY)
     : _thread(thread), _history(thread->owningHistory()), _topic(thread->asTopic()), _window(window),
       _scrollTargetY(showAt ? showAtY : std::nullopt), _pendingShowAt(showAt), _readTimer([=] { markAsRead(); }),
-      _statusTimer([=] { refreshHeader(); }), _reserveTimer([=] { maintainTopReserve(); }) {
+      _statusTimer([=] { refreshHeader(); }), _reserveTimer([=] { maintainTopReserve(); }),
+      _jumpTimer([=] { scheduleViewportUpdate(); }) {
   _root = adw_toolbar_view_new();
   g_object_ref_sink(_root);
   adw_toolbar_view_set_bottom_bar_style(ADW_TOOLBAR_VIEW(_root), ADW_TOOLBAR_RAISED);
@@ -392,6 +398,7 @@ ChatView::~ChatView() {
   _readTimer.cancel();
   _statusTimer.cancel();
   _reserveTimer.cancel();
+  _jumpTimer.cancel();
   _signals.clear();
   _pinnedTracker = nullptr;
   _liveLocations = nullptr;
@@ -1191,6 +1198,14 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
               result.match([&](const MTPDmessages_channelMessages &data) {
                 if (const auto channel = history->peer->asChannel()) channel->ptsReceived(data.vpts().v);
               }, [](const auto &) {});
+              if (list && list->isEmpty() && self->_jumpBack.value_or(-1) >= 0) {
+                // Further back than the chat goes: its first messages.
+                self->_olderRequest = 0;
+                self->_applyingPage = false;
+                crl::on_main(self, [=] { self->jumpBack(-1); });
+                finish();
+                return;
+              }
               // An older page goes above the messages on the screen: measure how much it adds.
               const auto keepPosition = list && older && !initial && self->_initialLoaded;
               const auto heightBefore = keepPosition ? self->listHeight() : 0;
@@ -1203,6 +1218,16 @@ void ChatView::requestHistory(MsgId offsetId, int addOffset, int limit, bool old
               }
               const auto first = !self->_initialLoaded;
               self->_initialLoaded = true;
+              if (first && self->_jumpBack) {
+                // The messages jumped to go where the screen was: the middle of the page in the middle of
+                // the screen, the start of the chat at its top. Messages come newest first.
+                if (list && !list->isEmpty()) {
+                  const auto start = (*self->_jumpBack < 0);
+                  self->_pendingShowAt = IdFromMessage(start ? list->back() : (*list)[list->size() / 2]);
+                  self->_scrollTargetY = start ? 0. : gtk_adjustment_get_page_size(self->_adjustment) / 2;
+                }
+                self->_jumpBack = std::nullopt;
+              }
               if (first) self->windowAround(std::max(self->_pendingShowAt, MsgId(0)));
               self->sync();
               if (keepPosition) {
@@ -1877,6 +1902,15 @@ void ChatView::preloadVisibleEdges() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   if (value - _topReserve < kPreloadHeight) {
+    if (!_topic && value + page < _topReserve - kJumpGap) {
+      // Far above the rows: the messages there are loaded when the list stops, not every page on the way.
+      if (scrollIdle()) {
+        jumpUp(_topReserve - value - page);
+      } else {
+        _jumpTimer.callOnce(300);
+      }
+      return;
+    }
     if (!extendWindowUp() && !loadedAtTop()) loadOlder();
   } else if (value + page > upper - kPreloadHeight) {
     if (!extendWindowDown() && !loadedAtBottom()) loadNewer();
@@ -1891,7 +1925,52 @@ void ChatView::showAt(MsgId id) {
   reload(id);
 }
 
+// A fling or the scroll bar stopped `gap` px above the rows: the messages about that far back come at once.
+void ChatView::jumpUp(double gap) {
+  const auto value = gtk_adjustment_get_value(_adjustment);
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  // At the top of the scroll bar: the start of the chat.
+  const auto toStart = (value < page);
+  const auto rowHeight = std::clamp(double(listHeight()) / std::max(_rows.size(), size_t(1)), kJumpRowMin, kJumpRowMax);
+  const auto back = int((gap + page / 2) / rowHeight);
+  const auto all = loadedItems();
+  const auto above = _windowMin ? IndexOf(all, _windowMin) : 0;  // Loaded, without rows.
+  if (toStart ? loadedAtTop() : (back <= above)) {
+    // Loaded already: only the rows move there.
+    if (const auto target = RegularIdFrom(all, toStart ? 0 : above - back, 1)) {
+      _scrollTargetY = toStart ? 0. : page / 2;
+      if (scrollToLoaded(target)) return;
+      _scrollTargetY = std::nullopt;
+    }
+  }
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("History jump: %s back=%d", toStart ? "start" : "older", back - above);
+  jumpBack(toStart ? -1 : back - above);
+}
+
+// The messages `back` before the oldest loaded one (-1: the first ones of the chat) are asked for alone, without
+// the pages between: the history is unloaded first, as for a jump to a message (History::getReadyFor()).
+void ChatView::jumpBack(int back) {
+  const auto from = _history->minMsgId();
+  unload();
+  _pendingShowAt = 0;
+  _stickToBottom = false;
+  _jumpBack = (back >= 0 && from) ? back : -1;
+  _history->clear(History::ClearType::Unload);
+  if (*_jumpBack < 0) {
+    requestHistory(MsgId(1), -kMessagesPerPage, kMessagesPerPage, true, true);
+  } else {
+    requestHistory(from, back - kMessagesPerPage / 2, kMessagesPerPage, true, true);
+  }
+}
+
 void ChatView::reload(MsgId showAt) {
+  unload();
+  _pendingShowAt = showAt;
+  _stickToBottom = !showAt;
+  loadInitial();
+}
+
+void ChatView::unload() {
   ++_loadEpoch;
   _initialLoaded = false;
   _loadFailed = false;
@@ -1909,9 +1988,7 @@ void ChatView::reload(MsgId showAt) {
   _itemRows.clear();
   _rows.clear();
   _windowMin = _windowMax = MsgId();
-  _pendingShowAt = showAt;
-  _stickToBottom = !showAt;
-  loadInitial();
+  _jumpBack = std::nullopt;
 }
 
 bool ChatView::scrollToLoaded(MsgId id) {
@@ -3237,6 +3314,8 @@ void ChatView::openDocument(not_null<DocumentData *> document, not_null<HistoryI
       _openWhenLoaded.insert(document);
     }
   }
+  // The row follows the download it started (or shows it cancelled) until it ends.
+  refreshTransfer(item->fullId());
 }
 
 }  // namespace Contrail

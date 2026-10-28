@@ -266,6 +266,16 @@ void Run(MainWindow &w, const std::string &cmdline) {
         g_warning("Layout overflow: %s allocated=%d min=%d natural=%d window=%d",
             G_OBJECT_TYPE_NAME(widget), gtk_widget_get_width(widget), minimum, natural, width);
       }
+      // A bubble shorter than its content for the width it got: the text runs out of it. Its bin
+      // gives it its whole size, padding included (the bubble's own size excludes the padding).
+      if (gtk_widget_has_css_class(widget, "bubble")) {
+        auto *bin = gtk_widget_get_parent(widget);
+        auto height = 0;
+        gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, gtk_widget_get_width(bin), &height, nullptr, nullptr, nullptr);
+        if (height > gtk_widget_get_height(bin)) {
+          g_warning("Layout overflow: bubble %dx%d needs height %d", gtk_widget_get_width(bin), gtk_widget_get_height(bin), height);
+        }
+      }
       for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
         self(self, child);
       }

@@ -80,8 +80,13 @@ private:
     DocumentData *document = nullptr;
     GtkWidget *documentButton = nullptr;
     GtkWidget *documentStatus = nullptr;
-    GtkWidget *voiceProgress = nullptr;
+    GtkWidget *voiceProgress = nullptr;  // A voice message's or a song's position: a tap or a drag seeks.
+    bool seeking = false;                // Its position is being dragged.
+    bool playRequested = false;          // Started, waiting for the start of the file.
+    GtkWidget *loadProgress = nullptr;  // A file's download.
     GtkWidget *status = nullptr;  // Upload or download progress over a picture.
+    GtkWidget *play = nullptr;    // Over a video: its play button, or while it downloads the ring of its progress.
+    GtkWidget *ring = nullptr;
     // A location: the map from Telegram's servers, and a live location's state.
     std::unique_ptr<Data::CloudImage> map;
     std::shared_ptr<QImage> mapView;
@@ -101,6 +106,8 @@ private:
   GtkWidget *buildSticker(Cell &cell, not_null<DocumentData *> document);
   GtkWidget *buildDocument(Cell &cell, not_null<DocumentData *> document);
   GtkWidget *buildVoice(Cell &cell, not_null<DocumentData *> document);
+  void setupSeeking(Cell &cell);
+  void cancelSeeking();
   GtkWidget *buildVideoThumb(Cell &cell, not_null<DocumentData *> document, int maxWidth);
   GtkWidget *buildWebPage(not_null<HistoryItem *> item);
   GtkWidget *buildLocation(Cell &cell, not_null<Data::MediaLocation *> location);
