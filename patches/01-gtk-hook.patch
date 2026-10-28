@@ -47,8 +47,25 @@ index a67723f..898a7fb 100644
  	_waitingTrack = Media::Audio::Current().createTrack();
  	const auto trackFileName = Core::App().settings().getSoundPath(
  		(_type == Type::Outgoing)
+diff --git a/Telegram/SourceFiles/chat_helpers/spellchecker_common.cpp b/Telegram/SourceFiles/chat_helpers/spellchecker_common.cpp
+index 28fb35a..7389d23 100644
+--- a/Telegram/SourceFiles/chat_helpers/spellchecker_common.cpp
++++ b/Telegram/SourceFiles/chat_helpers/spellchecker_common.cpp
+@@ -526,6 +526,12 @@ void Start(not_null<Main::Session*> session) {
+ 		{ &ph::lng_spellchecker_remove, tr::lng_spellchecker_remove() },
+ 		{ &ph::lng_spellchecker_ignore, tr::lng_spellchecker_ignore() },
+ 	} });
++#ifdef CONTRAIL_GTK
++	// The GTK interface's message field doesn't check spelling: no
++	// dictionaries are loaded (10 MB with two languages) or downloaded.
++	Spellchecker::SetWorkingDirPath(DictionariesPath());
++	return;
++#endif // CONTRAIL_GTK
+ 	const auto settings = &Core::App().settings();
+ 	auto &lifetime = session->lifetime();
+ 
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
-index 7172206..0254d7d 100644
+index 7172206..40849fa 100644
 --- a/Telegram/SourceFiles/core/application.cpp
 +++ b/Telegram/SourceFiles/core/application.cpp
 @@ -112,6 +112,14 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -89,7 +106,37 @@ index 7172206..0254d7d 100644
  	for (const auto &window : _windowStack) {
  		if (window == _lastActiveWindow) {
  			break;
-@@ -1507,6 +1524,13 @@ bool Application::savingPositionFor(
+@@ -690,9 +707,13 @@ void Application::activate() {
+ auto Application::prepareEmojiSourceImages()
+ -> std::shared_ptr<Ui::Emoji::UniversalImages> {
+ 	const auto &images = Ui::Emoji::SourceImages();
++#ifndef CONTRAIL_GTK
++	// The GTK interface draws emoji with a font, never the core's large
++	// emoji: the source images of every emoji (77 MB) are let go.
+ 	if (settings().largeEmoji()) {
+ 		return images;
+ 	}
++#endif // CONTRAIL_GTK
+ 	Ui::Emoji::ClearSourceImages(images);
+ 	return std::make_shared<Ui::Emoji::UniversalImages>(images->id());
+ }
+@@ -961,9 +982,14 @@ void Application::startLocalStorage() {
+ }
+ 
+ void Application::startEmojiImageLoader() {
++#ifdef CONTRAIL_GTK
++	const auto large = false; // See prepareEmojiSourceImages().
++#else // CONTRAIL_GTK
++	const auto large = settings().largeEmoji();
++#endif // CONTRAIL_GTK
+ 	_emojiImageLoader.with([
+ 		source = prepareEmojiSourceImages(),
+-		large = settings().largeEmoji()
++		large
+ 	](Stickers::EmojiImageLoader &loader) mutable {
+ 		loader.init(std::move(source), large);
+ 	});
+@@ -1507,6 +1533,13 @@ bool Application::savingPositionFor(
  }
  
  bool Application::hasActiveWindow(not_null<Main::Session*> session) const {
@@ -172,6 +219,38 @@ index 8faa6d9..f0ec0d5 100644
  		if (KSandbox::isFlatpak()) {
  			return qEnvironmentVariable("FLATPAK_ID");
  		}
+diff --git a/Telegram/SourceFiles/window/themes/window_theme.cpp b/Telegram/SourceFiles/window/themes/window_theme.cpp
+index 3586af7..d13c625 100644
+--- a/Telegram/SourceFiles/window/themes/window_theme.cpp
++++ b/Telegram/SourceFiles/window/themes/window_theme.cpp
+@@ -830,6 +830,27 @@ void ChatBackground::setPrepared(
+ 	Expects(prepared.isNull() || GoodImageFormatAndSize(prepared));
+ 	Expects(gradient.isNull() || GoodImageFormatAndSize(gradient));
+ 
++#ifdef CONTRAIL_GTK
++	// The GTK interface draws its own chat background: the core keeps tiny
++	// copies of the default one (its pattern fills a screen, 17 MB), which
++	// is never written to disk or uploaded. Chosen wallpapers stay as they are.
++	if (Data::IsDefaultWallPaper(_paper)) {
++		const auto shrink = [](QImage &image) {
++			constexpr auto kMax = 64;
++			if (image.width() > kMax || image.height() > kMax) {
++				image = image.scaled(
++					kMax,
++					kMax,
++					Qt::KeepAspectRatio,
++					Qt::FastTransformation);
++			}
++		};
++		shrink(original);
++		shrink(prepared);
++		shrink(gradient);
++	}
++#endif // CONTRAIL_GTK
++
+ 	if (!prepared.isNull() && !_paper.isPattern() && _paper.isBlurred()) {
+ 		prepared = Ui::PrepareBlurredBackground(std::move(prepared));
+ 	}
 diff --git a/Telegram/SourceFiles/window/window_controller.cpp b/Telegram/SourceFiles/window/window_controller.cpp
 index c286914..cb6c287 100644
 --- a/Telegram/SourceFiles/window/window_controller.cpp
