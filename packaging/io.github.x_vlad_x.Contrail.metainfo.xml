@@ -69,6 +69,14 @@
     <content_attribute id="social-location">intense</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.3.1" date="2026-10-28" type="stable">
+      <description>
+        <p>No more freezes while scrolling groups and channels with reactions. Voice messages and music can be
+          played from any point by tapping or dragging their bar. Downloads of videos and files show clear
+          progress, and a fast scroll far back in a chat loads that place at once. Calls play without clicks on
+          the FuriLabs FLX1s, and the app takes about 105 MB less memory.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-25" type="stable">
       <description>
         <p>Reactions as in the phone apps. Locations: a map in the chat, an interactive map, sending your

@@ -1,12 +1,12 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.3.0
+# Contrail 0.3.1
 
-**Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and desktops, now has
-reactions, locations and live locations, pinned messages and forwarding, as in the phone apps, keeps its memory in
-check in long chats, and has a new icon. It comes from its own Flatpak repository too, with updates. It is built on
-the Telegram Desktop 7.3.3 core. Contrail is an unofficial client that uses the Telegram API; it is not affiliated
-with or endorsed by Telegram.
+**Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and desktops, no longer
+freezes while scrolling groups and channels with reactions, lets you play voice messages and music from any point,
+shows clear progress for downloads, jumps far back in a chat at once, plays calls without clicks on the FLX1s and
+takes about 105 MB less memory. It is built on the Telegram Desktop 7.3.3 core. Contrail is an unofficial client
+that uses the Telegram API; it is not affiliated with or endorsed by Telegram.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation with reactions and a pinned message">
@@ -36,24 +36,49 @@ account and the chats.
 
 | Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
 | --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.3.0-1_amd64.deb` | `contrail_0.3.0-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.3.0-1.x86_64.rpm` | `contrail-0.3.0-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.3.0-x86_64.flatpak` | `Contrail-0.3.0-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.3.0-x86_64.AppImage` | `Contrail-0.3.0-aarch64.AppImage` |
+| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.3.1-1_amd64.deb` | `contrail_0.3.1-1_arm64.deb` |
+| Fedora, openSUSE | `contrail-0.3.1-1.x86_64.rpm` | `contrail-0.3.1-1.aarch64.rpm` |
+| Any distribution with Flatpak | `Contrail-0.3.1-x86_64.flatpak` | `Contrail-0.3.1-aarch64.flatpak` |
+| Any distribution, without installing | `Contrail-0.3.1-x86_64.AppImage` | `Contrail-0.3.1-aarch64.AppImage` |
 
 ```sh
-sudo apt install ./contrail_0.3.0-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.3.0-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
-flatpak install --user ./Contrail-0.3.0-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.3.0-x86_64.AppImage && ./Contrail-0.3.0-x86_64.AppImage
+sudo apt install ./contrail_0.3.1-1_arm64.deb              # DEB
+sudo dnf install ./contrail-0.3.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
+flatpak install --user ./Contrail-0.3.1-aarch64.flatpak    # Flatpak
+chmod +x Contrail-0.3.1-x86_64.AppImage && ./Contrail-0.3.1-x86_64.AppImage
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
 needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.2.1 or older, install the new DEB, RPM or Flatpak file the same way,
+keeps your account and chats). To update from 0.3.0 or older, install the new DEB, RPM or Flatpak file the same way,
 or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
 
-## What's new since 0.2.1
+## What's new since 0.3.0
+
+- **No more freezes while scrolling groups and channels with reactions**: Contrail asked for the reactions of the
+  messages on the screen while Telegram Desktop's core was still going through its own list of them, which made
+  the core go round that list for 20 seconds and more. On a phone the shell then closed the app, which looked like
+  a crash. The reactions are now asked for once the core is done.
+- **Seeking in voice messages and music**: the bar under a voice message or a song is a slider. A tap plays it
+  from there, a drag moves the position; a drag that starts vertically still scrolls the chat. While a file
+  streams, the bar shows how much of it has come, and the label says when playback waits for the next part.
+- **Clear download progress**: a video or a GIF being downloaded shows a ring with its progress in place of the
+  play button (a tap still cancels it) and how much came, in percent too; a file shows a progress bar under its
+  name. A download started with a tap no longer stops showing its progress after the first update.
+- **A fast scroll far back loads that place at once**: a fling or a drag of the scroll bar that stops far above
+  the loaded messages loads the messages about that far back alone, instead of every page on the way there.
+- **Calls without clicks on the FuriLabs FLX1s**: the other side's voice had soft clicks several times a second.
+  The phone's sound server takes 40–60 ms of sound at once, and the call kept only 50 ms ready, so the sound
+  stopped and started again. The call now keeps as much as the sound server takes plus a margin, 160 ms at most
+  (about 100 ms on the FLX1s).
+- **About 105 MB less memory**, measured on the FLX1s with an account in the background: Telegram Desktop's core
+  no longer keeps what the GTK interface never shows, the source images of every emoji (77 MB), the default chat
+  background drawn at the size of the screen (17 MB) and the spell checking dictionaries (10 MB, now neither
+  loaded nor downloaded).
+- On a wide window, the text of a message no longer runs out of its bubble over the next messages: with a voice
+  message or a map in it, and with GTK 4.24 (the Flatpak's GNOME 51 runtime) with any message.
+
+## Earlier, in 0.3.0
 
 - **A Flatpak repository**: [flatpak.xvlad.com](https://flatpak.xvlad.com) serves every release for x86_64 and
   ARM64, signed, with the GNOME runtime from Flathub. Added once (see Downloads above), Contrail updates like any
@@ -195,8 +220,8 @@ Desktop doesn't have them either.
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.3.0-sources.tar.gz` holds Contrail's
-sources; the `Contrail-0.3.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
+contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.3.1-sources.tar.gz` holds Contrail's
+sources; the `Contrail-0.3.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
 packages are built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.
