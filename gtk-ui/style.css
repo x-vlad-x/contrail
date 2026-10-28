@@ -180,6 +180,10 @@ avatar.archive-avatar {
   min-width: 42px;
   min-height: 42px;
 }
+/* A scale is only as wide as its knob: the bar of a voice message or a song gets the width of a progress bar. */
+.voice-progress {
+  min-width: 150px;
+}
 .voice-progress trough,
 .download-progress trough,
 .download-progress progress {
