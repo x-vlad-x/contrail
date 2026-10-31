@@ -14,3 +14,4 @@
 # g-ir-scanner cache from the build container
 /.cache/
 __pycache__/
+/build-td-probes/
