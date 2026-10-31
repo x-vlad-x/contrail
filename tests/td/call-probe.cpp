@@ -207,10 +207,30 @@ class Probe {
         }
         break;
       }
+      case td_api::updateUnconfirmedSession::ID: {
+        // Telegram asks on the other devices whether a new login is genuine; "no" ends that login.
+        const auto &update = static_cast<td_api::updateUnconfirmedSession &>(*object);
+        std::printf("Unconfirmed sessions on this account: %d\n", int(update.unconfirmed_session_count_));
+        if (update.session_) std::printf("  %s, %s\n", update.session_->device_model_.c_str(), update.session_->location_.c_str());
+        std::fflush(stdout);
+        break;
+      }
+      case td_api::updateServiceNotification::ID: {
+        auto &update = static_cast<td_api::updateServiceNotification &>(*object);
+        std::printf("SERVICE NOTIFICATION, type \"%s\"\n", update.type_.c_str());
+        if (update.content_ && update.content_->get_id() == td_api::messageText::ID) {
+          std::printf("  %s\n", static_cast<td_api::messageText &>(*update.content_).text_->text_.c_str());
+        }
+        std::fflush(stdout);
+        break;
+      }
       case td_api::updateOption::ID: {
         auto &update = static_cast<td_api::updateOption &>(*object);
         if (update.value_->get_id() == td_api::optionValueInteger::ID) {
           const auto value = static_cast<td_api::optionValueInteger &>(*update.value_).value_;
+          if (update.name_ == "authorization_autoconfirm_period") {
+            std::printf("A new login confirms by itself after %lld s\n", (long long)value);
+          }
           if (update.name_ == "call_connect_timeout_ms") _connectTimeoutMs = value;
           if (update.name_ == "call_packet_timeout_ms") _packetTimeoutMs = value;
         }
@@ -256,6 +276,7 @@ class Probe {
         _prompt = Prompt::None;
         std::puts("Logged in. Commands: contacts, call ID, call @USERNAME, accept, decline, hangup, mute, unmute, "
                   "route speaker, route earpiece, load N, stats, quit");
+        printSessions();
         break;
       case td_api::authorizationStateLoggingOut::ID:
         std::puts("LOGGED OUT: the session is lost, TDLib deletes its database. The reason is in the TDLib log.");
@@ -345,6 +366,25 @@ class Probe {
       std::puts("Unknown command.");
     }
     std::fflush(stdout);
+  }
+
+  // Shows how the server sees this login. Other sessions are only counted: their details are not needed here.
+  void printSessions() {
+    send(td_api::make_object<td_api::getActiveSessions>(), [this](Object object) {
+      if (object->get_id() != td_api::sessions::ID) return reportError("sessions", object);
+      const auto &list = static_cast<td_api::sessions &>(*object).sessions_;
+      auto unconfirmed = 0;
+      for (const auto &session : list) {
+        unconfirmed += session->is_unconfirmed_ ? 1 : 0;
+        if (session->is_current_) {
+          std::printf("This session: unconfirmed=%d password_pending=%d official=%d login_date=%d\n",
+                      int(session->is_unconfirmed_), int(session->is_password_pending_),
+                      int(session->is_official_application_), int(session->log_in_date_));
+        }
+      }
+      std::printf("Sessions on the account: %zu, unconfirmed %d\n", list.size(), unconfirmed);
+      std::fflush(stdout);
+    });
   }
 
   void contacts() {
