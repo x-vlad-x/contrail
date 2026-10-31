@@ -147,7 +147,9 @@ class Probe {
     const auto hadCall = _callId || _instance;
     if (hadCall) finish("the client closed");
     restoreRoute();
-    std::fflush(nullptr);
+    // Not fflush(nullptr): it would wait for stdin, held by the reader thread blocked in getline.
+    std::fflush(stdout);
+    std::fflush(stderr);
     // tgcalls takes a call apart on its own threads after stop() and reset() return, with no signal when it is done,
     // and static destructors at exit run under those threads. teardown-probe pair reproduces this crash.
     if (hadCall) std::this_thread::sleep_for(std::chrono::seconds(2));
