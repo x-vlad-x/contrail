@@ -41,9 +41,11 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -119,6 +121,19 @@ void PrintStackAndAbort() {
   std::fputs("CRASH, send this stack:\n", stderr);
   backtrace_symbols_fd(frames, count, STDERR_FILENO);
   std::abort();
+}
+
+// The local and remote route of each network state, "p2p" or "turn". The addresses in the file stay out of the output.
+void PrintRoutes(const std::string &path) {
+  auto file = std::ifstream(path);
+  auto text = std::string(std::istreambuf_iterator<char>(file), {});
+  static const auto route = std::regex("\"(local|remote)\": \"(\\w+)\"");
+  std::printf("Routes:");
+  for (auto it = std::sregex_iterator(text.begin(), text.end(), route); it != std::sregex_iterator(); ++it) {
+    std::printf(" %s=%s", (*it)[1].str().c_str(), (*it)[2].str().c_str());
+  }
+  std::puts("");
+  std::fflush(stdout);
 }
 
 class Probe {
@@ -574,6 +589,11 @@ class Probe {
       }
     }
 
+    // CONTRAIL_CALL_RELAY=1 forces the servers, to test that path on a network where direct would win.
+    if (std::getenv("CONTRAIL_CALL_RELAY")) descriptor.config.enableP2P = false;
+    std::printf("Direct connection %s\n", descriptor.config.enableP2P ? "allowed" : "forbidden");
+    descriptor.config.statsLogPath.data = _directory + ".call.json";
+
     _instance = tgcalls::Meta::Create(version, std::move(descriptor));
     if (!_instance) {
       std::printf("tgcalls does not know version %s.\n", version.c_str());
@@ -609,7 +629,8 @@ class Probe {
     _sound = nullptr;
     if (_instance) {
       if (_instance) std::printf("Debug: %s\n", _instance->getDebugInfo().c_str());
-      _instance->stop([](tgcalls::FinalState) {});
+      // getDebugInfo() is empty in InstanceV2Impl: the route is only in the log it writes while stopping.
+      _instance->stop([path = _directory + ".call.json"](tgcalls::FinalState) { PrintRoutes(path); });
       _instance.reset();
     }
     _callId = 0;
