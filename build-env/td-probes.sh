@@ -34,6 +34,12 @@ case "${1:-tone}" in
       "$OUT/openal_adm.o" $LIBS
     ls -la "$OUT/tone-probe"
     ;;
+  teardown)
+    compile tests/td/teardown-probe.cpp teardown-probe
+    aarch64-linux-gnu-g++ -Wl,--gc-sections -Wl,--as-needed -s -o "$OUT/teardown-probe" "$OUT/teardown-probe.o" \
+      "$OUT/openal_adm.o" /src/build-aarch64/Telegram/liblib_tgcalls.a $LIBS
+    ls -la "$OUT/teardown-probe"
+    ;;
   call)
     # shellcheck disable=SC1091
     source api-credentials.env
@@ -42,12 +48,15 @@ case "${1:-tone}" in
       -I"$TD/td/tdutils" -I"$TD/build-aarch64/tdutils" -DPROBE_API_ID="$TELEGRAM_API_ID" \
       -DPROBE_API_HASH="\"$TELEGRAM_API_HASH\""
     B=$TD/build-aarch64
-    aarch64-linux-gnu-g++ -Wl,--gc-sections -Wl,--as-needed -s -o "$OUT/call-probe" "$OUT/call-probe.o" \
+    aarch64-linux-gnu-g++ -Wl,--gc-sections -Wl,--as-needed -o "$OUT/call-probe" "$OUT/call-probe.o" \
       "$OUT/openal_adm.o" /src/build-aarch64/Telegram/liblib_tgcalls.a \
       $B/libtdclient.a $B/libtdcore.a $B/libtdapi.a $B/libtdmtproto.a $B/tde2e/libtde2e.a $B/tddb/libtddb.a \
       $B/sqlite/libtdsqlite.a $B/tdnet/libtdnet.a $B/tdactor/libtdactor.a $B/tdutils/libtdutils.a $B/libmemprof.a \
       $LIBS
+    # The symbols stay here, the phone gets the stripped file: they resolve the stack the probe prints when it crashes.
+    aarch64-linux-gnu-objcopy --only-keep-debug "$OUT/call-probe" "$OUT/call-probe.debug"
+    aarch64-linux-gnu-strip "$OUT/call-probe"
     ls -la "$OUT/call-probe"
     ;;
-  *) echo "usage: $0 tone|call" >&2; exit 1 ;;
+  *) echo "usage: $0 tone|teardown|call" >&2; exit 1 ;;
 esac

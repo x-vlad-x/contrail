@@ -25,6 +25,7 @@
 
 #include <api/make_ref_counted.h>
 
+#include <execinfo.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -35,6 +36,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -109,10 +112,25 @@ void SetEcho(bool enabled) {
   tcsetattr(STDIN_FILENO, TCSANOW, &state);
 }
 
+// The stack of a crash goes to the terminal: addresses resolve against call-probe.debug from the build.
+void PrintStackAndAbort() {
+  void *frames[64];
+  const auto count = backtrace(frames, 64);
+  std::fputs("CRASH, send this stack:\n", stderr);
+  backtrace_symbols_fd(frames, count, STDERR_FILENO);
+  std::abort();
+}
+
 class Probe {
  public:
   explicit Probe(std::string directory) : _directory(std::move(directory)) {
-    td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(1));
+    // TDLib tells why it lost the session only from level 2, and it wipes the database directory: the log lives beside it.
+    const auto log = _directory + ".log";
+    std::filesystem::create_directories(std::filesystem::path(log).parent_path());
+    td::ClientManager::execute(td_api::make_object<td_api::setLogStream>(
+        td_api::make_object<td_api::logStreamFile>(log, 16 * 1024 * 1024, false)));
+    td::ClientManager::execute(td_api::make_object<td_api::setLogVerbosityLevel>(2));
+    std::printf("TDLib log: %s\n", log.c_str());
     _client = _manager.create_client_id();
     send(td_api::make_object<td_api::getOption>("version"));
   }
@@ -125,6 +143,9 @@ class Probe {
       if (response.object) handle(response.request_id, std::move(response.object));
       _inbox.drain();
     }
+    // TDLib may close with no last updateCall, when the session is lost: the call must not outlive the client.
+    if (_callId || _instance) finish("the client closed");
+    restoreRoute();
     return 0;
   }
 
@@ -231,7 +252,14 @@ class Probe {
         std::puts("Logged in. Commands: contacts, call ID, call @USERNAME, accept, decline, hangup, mute, unmute, "
                   "route speaker, route earpiece, load N, stats, quit");
         break;
+      case td_api::authorizationStateLoggingOut::ID:
+        std::puts("LOGGED OUT: the session is lost, TDLib deletes its database. The reason is in the TDLib log.");
+        break;
+      case td_api::authorizationStateClosing::ID:
+        std::puts("Closing...");
+        break;
       case td_api::authorizationStateClosed::ID:
+        std::puts("Closed.");
         _closed = true;
         break;
       default:
@@ -247,7 +275,10 @@ class Probe {
       if (!std::getline(std::cin, line)) break;
       _inbox.post([this, line] { command(line); });
     }
-    _inbox.post([this] { command("quit"); });
+    _inbox.post([this] {
+      _prompt = Prompt::None;  // Otherwise "quit" would go to TDLib as the answer to a login prompt.
+      command("quit");
+    });
   }
 
   void command(const std::string &line) {
@@ -597,6 +628,7 @@ class Probe {
 }  // namespace
 
 int main(int argc, char **argv) {
+  std::set_terminate(PrintStackAndAbort);
   const auto home = std::getenv("HOME");
   auto probe = Probe((argc > 1) ? argv[1] : (std::string(home ? home : ".") + "/.local/share/contrail-td/probe"));
   return probe.run();
