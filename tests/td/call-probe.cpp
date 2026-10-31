@@ -144,9 +144,14 @@ class Probe {
       _inbox.drain();
     }
     // TDLib may close with no last updateCall, when the session is lost: the call must not outlive the client.
-    if (_callId || _instance) finish("the client closed");
+    const auto hadCall = _callId || _instance;
+    if (hadCall) finish("the client closed");
     restoreRoute();
-    return 0;
+    std::fflush(nullptr);
+    // tgcalls takes a call apart on its own threads after stop() and reset() return, with no signal when it is done,
+    // and static destructors at exit run under those threads. teardown-probe pair reproduces this crash.
+    if (hadCall) std::this_thread::sleep_for(std::chrono::seconds(2));
+    _exit(0);
   }
 
  private:
