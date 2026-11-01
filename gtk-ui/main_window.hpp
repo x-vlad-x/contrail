@@ -2,12 +2,15 @@
 
 #include "app.hpp"
 #include "td/client.hpp"
+#include "td/store.hpp"
 
 #include <memory>
 #include <string>
 
 namespace Contrail {
 
+class ChatList;
+class ChatView;
 class LoginView;
 
 // The application's window: a spinner while TDLib starts, the login, then the chats.
@@ -25,20 +28,40 @@ class MainWindow final {
   // Telegram ended the session: says why instead of just showing the login again.
   void showSessionLost();
 
+  // On a phone the chat goes over the list. `showAt`: a message to show instead of the last place.
+  void openChat(Td::ChatId chat, std::int64_t showAt = 0);
+  void closeChat();
+  void openArchive();
+  [[nodiscard]] Td::ChatId currentChat() const;
+  [[nodiscard]] Td::Store *store() const { return _store.get(); }
+
   void debugLogin(const std::string &step, const std::string &value);
+  void debugOpenChat(int index);
+  void debugBack();
 
  private:
   void authorization(Td::api::AuthorizationState &state);
   void stringsReady();
   void showLogin(Td::api::AuthorizationState &state);
   void showChats();
+  void buildChats();
+  void clearChats();
+  void setCurrent(Td::ChatId chat);
   // A new login dies within minutes if nobody confirms it on another device.
   void warnAboutConfirmation();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
   GtkStack *_stack = nullptr;
+  AdwNavigationSplitView *_split = nullptr;
+  AdwNavigationView *_sidebarNav = nullptr;
+  AdwNavigationPage *_contentPage = nullptr;
+  GtkWidget *_placeholder = nullptr;
   Td::Session *_session = nullptr;
+  std::unique_ptr<Td::Store> _store;
+  std::unique_ptr<ChatList> _chatList;
+  std::unique_ptr<ChatList> _archive;
+  std::unique_ptr<ChatView> _chat;
   Td::Lifetime _sessionLifetime;
   std::string _language;
   guint _stringsTimeout = 0;

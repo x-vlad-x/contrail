@@ -2,6 +2,7 @@
 #include "contrail_version.h"
 #include "debug.hpp"
 #include "main_window.hpp"
+#include "td/scenario.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
 
@@ -37,9 +38,11 @@ void SessionClosed(bool lost) {
 void StartSession() {
   auto &program = Instance();
   const auto language = SystemLanguage();
+  // The window's store goes with the client it listens to.
+  GetApp().session = nullptr;
   program.session.reset();
   program.session = std::make_unique<Td::Session>(
-      Td::MakeTdTransport(), Td::SessionConfig{Td::DataDirectory(), language, kContrailVersion});
+      g_getenv("CONTRAIL_SCENARIO") ? Td::MakeScenarioTransport() : Td::MakeTdTransport(), Td::SessionConfig{Td::DataDirectory(), language, kContrailVersion});
   GetApp().session = program.session.get();
   program.session->setClosedHandler(SessionClosed);
   program.window->attach(*program.session, language);

@@ -1,6 +1,9 @@
 #include "main_window.hpp"
 
+#include "chat_list.hpp"
+#include "chat_view.hpp"
 #include "login.hpp"
+#include "td/message_text.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
 
@@ -42,10 +45,72 @@ MainWindow::MainWindow(GtkApplication *application) {
   adw_toast_overlay_set_child(_toasts, GTK_WIDGET(_stack));
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(_window), GTK_WIDGET(_toasts));
   gtk_stack_add_named(_stack, MakeLoadingPage(), "loading");
+  buildChats();
+
+  // Telegram shows the account as online while the window is in front, and only then.
+  Connect<void(GObject *, GParamSpec *)>(_window, "notify::is-active", [this](GObject *, GParamSpec *) {
+    if (_session) _session->setOnline(gtk_window_is_active(GTK_WINDOW(_window)));
+  });
+}
+
+// A sidebar with the chat list and a content pane with the open chat. Collapses into one column on a phone.
+void MainWindow::buildChats() {
+  _split = ADW_NAVIGATION_SPLIT_VIEW(adw_navigation_split_view_new());
+  adw_navigation_split_view_set_min_sidebar_width(_split, 300);
+  adw_navigation_split_view_set_max_sidebar_width(_split, 400);
+  _sidebarNav = ADW_NAVIGATION_VIEW(adw_navigation_view_new());
+  adw_navigation_split_view_set_sidebar(_split, adw_navigation_page_new(GTK_WIDGET(_sidebarNav), "Contrail"));
+
+  auto *placeholderView = adw_toolbar_view_new();
+  auto *header = adw_header_bar_new();
+  adw_header_bar_set_show_title(ADW_HEADER_BAR(header), FALSE);
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(placeholderView), header);
+  auto *status = adw_status_page_new();
+  adw_status_page_set_icon_name(ADW_STATUS_PAGE(status), "contrail-chats-symbolic");
+  adw_status_page_set_title(ADW_STATUS_PAGE(status), Tr("lng_willbe_history").c_str());
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(placeholderView), status);
+  _placeholder = placeholderView;
+  // The page releases its child when a chat replaces it. Keep the empty view alive for Back.
+  g_object_ref_sink(_placeholder);
+  _contentPage = ADW_NAVIGATION_PAGE(adw_navigation_page_new(_placeholder, "Contrail"));
+  adw_navigation_split_view_set_content(_split, _contentPage);
+  gtk_stack_add_named(_stack, GTK_WIDGET(_split), "chats");
+
+  auto *breakpoint = adw_breakpoint_new(adw_breakpoint_condition_parse("max-width: 600sp"));
+  GValue collapsed = G_VALUE_INIT;
+  g_value_init(&collapsed, G_TYPE_BOOLEAN);
+  g_value_set_boolean(&collapsed, TRUE);
+  adw_breakpoint_add_setter(breakpoint, G_OBJECT(_split), "collapsed", &collapsed);
+  g_value_unset(&collapsed);
+  adw_application_window_add_breakpoint(ADW_APPLICATION_WINDOW(_window), breakpoint);
+
+  // Back from a chat on a phone: forget it, so its messages stop being marked as read.
+  Connect<void(GObject *, GParamSpec *)>(_split, "notify::show-content", [this](GObject *, GParamSpec *) {
+    if (!adw_navigation_split_view_get_collapsed(_split) || adw_navigation_split_view_get_show_content(_split)) return;
+    g_idle_add_once(+[](gpointer data) {
+      auto *self = static_cast<MainWindow *>(data);
+      if (adw_navigation_split_view_get_collapsed(self->_split)
+          && !adw_navigation_split_view_get_show_content(self->_split)) {
+        self->closeChat();
+      }
+    }, this);
+  });
 }
 
 MainWindow::~MainWindow() {
   if (_stringsTimeout) g_source_remove(_stringsTimeout);
+  clearChats();
+  g_object_unref(_placeholder);
+}
+
+void MainWindow::clearChats() {
+  if (_chat) adw_navigation_page_set_child(_contentPage, _placeholder);
+  _chat = nullptr;
+  if (_archive) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
+  _archive = nullptr;
+  if (_chatList) adw_navigation_view_remove(_sidebarNav, _chatList->page());
+  _chatList = nullptr;
+  _store = nullptr;
 }
 
 void MainWindow::present() {
@@ -57,8 +122,13 @@ void MainWindow::showToast(const std::string &text) {
 }
 
 void MainWindow::attach(Td::Session &session, const std::string &language) {
+  clearChats();
   _session = &session;
   _sessionLifetime.reset();
+  // From the first update on: TDLib sends what it knows about chats only once.
+  _store = std::make_unique<Td::Store>(session.client(), [this](const api::message &message) {
+    return Td::MessagePreview(message, *_store);
+  });
   _language = language;
   _stringsAsked = false;
   _stringsReady = false;
@@ -133,10 +203,10 @@ void MainWindow::showLogin(api::AuthorizationState &state) {
 }
 
 void MainWindow::showChats() {
-  if (!gtk_stack_get_child_by_name(_stack, "chats")) {
-    auto *page = adw_toolbar_view_new();
-    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(page), adw_header_bar_new());
-    gtk_stack_add_named(_stack, page, "chats");
+  if (!_chatList) {
+    _chatList = std::make_unique<ChatList>(*_store, Td::ListKind::Main, *this);
+    adw_navigation_view_add(_sidebarNav, _chatList->page());
+    _store->loadMore(Td::ListKind::Main);
   }
   gtk_stack_set_visible_child_name(_stack, "chats");
   if (_login) {
@@ -147,6 +217,48 @@ void MainWindow::showChats() {
     _loginShown = false;
     warnAboutConfirmation();
   }
+}
+
+void MainWindow::setCurrent(Td::ChatId chat) {
+  if (_chatList) _chatList->setCurrent(chat);
+  if (_archive) _archive->setCurrent(chat);
+}
+
+Td::ChatId MainWindow::currentChat() const {
+  return _chat ? _chat->chat() : 0;
+}
+
+void MainWindow::openChat(Td::ChatId chat, std::int64_t showAt) {
+  if (!_store || !_store->chat(chat)) return;
+  if (_chat && _chat->chat() == chat) {
+    if (showAt) _chat->showAt(showAt);
+  } else {
+    auto old = std::move(_chat);
+    _chat = std::make_unique<ChatView>(*_store, chat, *this, showAt);
+    adw_navigation_page_set_child(_contentPage, _chat->widget());
+    adw_navigation_page_set_title(_contentPage, _store->chat(chat)->title.c_str());
+    old = nullptr;
+  }
+  setCurrent(chat);
+  adw_navigation_split_view_set_show_content(_split, TRUE);
+}
+
+void MainWindow::closeChat() {
+  if (!_chat) return;
+  adw_navigation_page_set_child(_contentPage, _placeholder);
+  adw_navigation_page_set_title(_contentPage, "Contrail");
+  _chat = nullptr;
+  setCurrent(0);
+}
+
+void MainWindow::openArchive() {
+  if (!_store) return;
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (!_archive) {
+    _archive = std::make_unique<ChatList>(*_store, Td::ListKind::Archive, *this);
+    _store->loadMore(Td::ListKind::Archive);
+  }
+  adw_navigation_view_push(_sidebarNav, _archive->page());
 }
 
 void MainWindow::warnAboutConfirmation() {
@@ -171,6 +283,18 @@ void MainWindow::showSessionLost() {
                            "другого устройства.",
                            "Telegram завершив цей сеанс, його дані на пристрої видалено. Так буває з новим входом, "
                            "який не підтвердили на іншому пристрої, або коли сеанс завершено з іншого пристрою."));
+}
+
+void MainWindow::debugOpenChat(int index) {
+  if (_chatList) _chatList->openRow(index);
+}
+
+void MainWindow::debugBack() {
+  if (adw_navigation_split_view_get_show_content(_split) && adw_navigation_split_view_get_collapsed(_split)) {
+    adw_navigation_split_view_set_show_content(_split, FALSE);
+  } else {
+    adw_navigation_view_pop(_sidebarNav);
+  }
 }
 
 void MainWindow::debugLogin(const std::string &step, const std::string &value) {

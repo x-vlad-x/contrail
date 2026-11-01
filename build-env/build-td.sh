@@ -8,6 +8,7 @@ cd /src
 ARCH=${1:?usage: $0 aarch64|x86_64 [test]}
 # shellcheck disable=SC1091
 source api-credentials.env
+BUILD=${BUILD_DIR:-build-td/$ARCH}  # Another directory lets two builds run side by side.
 ARGS=()
 if [[ $ARCH == aarch64 ]]; then
   ARGS+=(-DCMAKE_TOOLCHAIN_FILE=/src/build-env/aarch64-toolchain.cmake)
@@ -15,6 +16,6 @@ fi
 if [[ ${2:-} == test ]]; then
   ARGS+=(-DCONTRAIL_TESTS=ON)
 fi
-cmake -S gtk-ui -B "build-td/$ARCH" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCONTRAIL_TD_DIR=/src/deps-td \
+cmake -S gtk-ui -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCONTRAIL_TD_DIR=/src/deps-td \
   -DTELEGRAM_API_ID="$TELEGRAM_API_ID" -DTELEGRAM_API_HASH="$TELEGRAM_API_HASH" "${ARGS[@]}" >/dev/null
-ninja -C "build-td/$ARCH"
+ninja -C "$BUILD"

@@ -56,10 +56,14 @@ target_link_libraries(tdlib INTERFACE
 # Everything but the entry point: the tests link it too.
 add_library(contrail_core STATIC
   app.cpp
+  chat_list.cpp
+  chat_view.cpp
   debug.cpp
   login.cpp
   main_window.cpp
   td/client.cpp
+  td/message_text.cpp
+  td/scenario.cpp
   td/session.cpp
   td/store.cpp
   td/strings.cpp)

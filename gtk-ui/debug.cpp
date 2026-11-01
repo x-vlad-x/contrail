@@ -1,6 +1,6 @@
 // Remote control for testing on the phone without touching it (only with CONTRAIL_DEBUG=1):
 //   tools/phone.sh td-cmd 'tree'
-// Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT
+// Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
 #include "debug.hpp"
 
 #include "main_window.hpp"
@@ -46,6 +46,10 @@ void Run(MainWindow &window, const std::string &command) {
     auto out = std::string();
     Print(window.widget(), 0, out);
     g_message("tree\n%s", out.c_str());
+  } else if (name == "chat") {
+    window.debugOpenChat(std::atoi(rest.c_str()));
+  } else if (name == "back") {
+    window.debugBack();
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));
