@@ -34,6 +34,7 @@ class MainWindow final {
   void openArchive();
   [[nodiscard]] Td::ChatId currentChat() const;
   [[nodiscard]] Td::Store *store() const { return _store.get(); }
+  [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
 
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);

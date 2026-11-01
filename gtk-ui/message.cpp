@@ -2,175 +2,389 @@
 
 #include "chat_view.hpp"
 #include "layout.hpp"
-#include "location_ui.hpp"
-#include "map_view.hpp"
 #include "media_progress.hpp"
-#include "reactions.hpp"
 #include "scroll_helpers.hpp"
+#include "td/dates.hpp"
+#include "td/message_text.hpp"
+#include "td/strings.hpp"
 #include "text.hpp"
 #include "userpics.hpp"
 
-#include "core/file_utilities.h"
-#include "data/components/sponsored_messages.h"
-#include "data/data_channel.h"
-#include "data/data_document.h"
-#include "data/data_document_media.h"
-#include "data/data_file_origin.h"
-#include "data/data_location.h"
-#include "data/data_message_reactions.h"
-#include "data/data_media_types.h"
-#include "data/data_peer.h"
-#include "data/data_photo.h"
-#include "data/data_photo_media.h"
-#include "data/data_poll.h"
-#include "data/data_session.h"
-#include "data/data_user.h"
-#include "data/data_web_page.h"
-#include "history/history.h"
-#include "history/history_item.h"
-#include "history/history_item_components.h"
-#include "history/view/history_view_item_preview.h"
-#include "lang/lang_keys.h"
-#include "main/main_session.h"
-#include "media/player/media_player_instance.h"
-#include "ui/grouped_layout.h"
-#include "ui/image/image.h"
-#include "ui/text/format_values.h"
+#include <gdk-pixbuf/gdk-pixbuf.h>
 
-#include <QtCore/QDir>
-#include <QtCore/QFileInfo>
-#include <QtCore/QStandardPaths>
-
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <numbers>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
 
 namespace Contrail {
 namespace {
+
+namespace api = Td::api;
 
 constexpr auto kMaxPhotoWidth = 280;
 constexpr auto kMaxPhotoHeight = 320;
 constexpr auto kMinPhotoSize = 100;
 constexpr auto kStickerSize = 160;
+constexpr auto kRoundVideoWidth = 200;
 constexpr auto kAlbumMinWidth = 100;  // The narrowest cell, before the album is scaled to the screen.
 constexpr auto kAlbumSpacing = 2;
-// A location's map, as Telegram's servers draw it (at twice the size for sharp screens).
-constexpr auto kMapWidth = 280;
-constexpr auto kMapHeight = 150;
-constexpr auto kMapZoom = 15;
-constexpr auto kMapScale = 2;
+constexpr auto kDescriptionLimit = 300;  // UTF-16 units, as TDLib counts.
+constexpr auto kPictureDownloadPriority = 8;
+constexpr auto kMegabyte = std::int64_t(1024 * 1024);
+constexpr auto kKilobyte = std::int64_t(1024);
+constexpr auto kPlayIcon = "media-playback-start-symbolic";
+constexpr auto kImageIcon = "image-x-generic-symbolic";
+constexpr auto kClockIcon = "contrail-clock-symbolic";
+constexpr auto kIconKey = "contrail-icon";
+constexpr auto kQualityKey = "contrail-media-quality";
 
-QSize FitPhoto(int w, int h, int maxWidth) {
+// What a picture shows. A slower decode of something worse must not replace something better.
+enum PictureQuality { kQualityThumbnail = 1, kQualityFull = 2 };
+
+template <typename Type, typename Base>
+[[nodiscard]] const Type *Cast(const Base *object) {
+  return (object && object->get_id() == Type::ID) ? static_cast<const Type *>(object) : nullptr;
+}
+
+[[nodiscard]] const api::MessageContent *ContentOf(const MessageItem *item) {
+  return (item && item->data) ? item->data->content_.get() : nullptr;
+}
+
+[[nodiscard]] Size FitPhoto(int w, int h, int maxWidth) {
   if (w <= 0 || h <= 0) {
     return {maxWidth, maxWidth * 3 / 4};
   }
   auto width = std::min(w, maxWidth);
-  auto height = h * width / w;
+  auto height = int(std::int64_t(h) * width / w);
   if (height > kMaxPhotoHeight) {
     height = kMaxPhotoHeight;
-    width = std::max(w * height / h, kMinPhotoSize);
+    width = std::max(int(std::int64_t(w) * height / h), kMinPhotoSize);
   }
   return {std::max(width, kMinPhotoSize), std::max(height, 48)};
 }
 
-void SetPictureQImage(GtkWidget *picture, QImage original) {
-  // A texture as large as the picture on the screen: drawing a downscaled full-size photo costs
-  // time on every frame while scrolling, and the memory of all the loaded photos.
-  const auto scale = std::max(gtk_widget_get_scale_factor(picture), 1);
-  const auto target = QSize(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-width")),
-                            GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-height")))
-                      * scale;
-  if (!target.isEmpty() && original.width() > target.width() && original.height() > target.height()) {
-    original = original.scaled(target, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
-  }
-  if (auto *texture = ToTexture(original)) {
-    gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
-    g_object_unref(texture);
-  }
-}
-
-void SetPictureImage(GtkWidget *picture, Image *image) {
-  if (!image || image->isNull()) {
-    return;
-  }
-  SetPictureQImage(picture, image->original());
-}
-
-// What the bar of reactions shows: rebuilt only when this changes.
-QString ReactionsKey(not_null<HistoryItem *> item) {
-  auto result = QString();
-  for (const auto &reaction : item->reactionsWithLocal()) {
-    result += Data::ReactionEntityData(reaction.id) + ':' + QString::number(reaction.count) + (reaction.my ? u"+"_q : u";"_q);
-  }
-  for (const auto &[id, list] : item->recentReactions()) {
-    for (const auto &one : list) result += QString::number(one.peer->id.value) + ',';
+[[nodiscard]] const api::photoSize *LargestSize(const api::photo &photo) {
+  const api::photoSize *result = nullptr;
+  auto best = std::int64_t(-1);
+  for (const auto &size : photo.sizes_) {
+    if (!size || !size->photo_) continue;
+    const auto area = std::int64_t(size->width_) * size->height_;
+    if (area > best) {
+      best = area;
+      result = size.get();
+    }
   }
   return result;
 }
 
-// Double taps on these are theirs (a photo opens, a button acts), not a reaction.
-bool InteractiveTarget(GtkWidget *target, GtkWidget *bubble) {
-  for (auto *widget = target; widget && widget != bubble; widget = gtk_widget_get_parent(widget)) {
-    if (GTK_IS_BUTTON(widget) || GTK_IS_PICTURE(widget) || GTK_IS_FLOW_BOX(widget) || GTK_IS_RANGE(widget)) return true;
+// The smallest size that fills `width` x `height`, the largest there is when none does.
+[[nodiscard]] const api::photoSize *FittingSize(const api::photo &photo, int width, int height) {
+  const api::photoSize *result = nullptr;
+  for (const auto &size : photo.sizes_) {
+    if (!size || !size->photo_ || size->width_ < width || size->height_ < height) continue;
+    if (!result || std::int64_t(size->width_) * size->height_ < std::int64_t(result->width_) * result->height_) {
+      result = size.get();
+    }
   }
-  return false;
+  return result ? result : LargestSize(photo);
 }
 
-const char *DocumentIcon(not_null<DocumentData *> document) {
-  if (document->isAudioFile() || document->isSong()) {
-    return "audio-x-generic-symbolic";
-  } else if (document->isVideoFile()) {
-    return "video-x-generic-symbolic";
-  } else if (document->isImage()) {
-    return "image-x-generic-symbolic";
-  }
-  return "text-x-generic-symbolic";
-}
+// A video or a GIF, which are drawn the same.
+struct Visual {
+  int width = 0;
+  int height = 0;
+  const api::minithumbnail *mini = nullptr;
+  const api::thumbnail *thumbnail = nullptr;
+  const api::file *file = nullptr;
+  int duration = 0;
+  bool gif = false;
+};
 
-QString PeerColorClass(not_null<PeerData *> peer) {
-  return u"peer-color-"_q + QString::number(peer->colorIndex() % 7);
+[[nodiscard]] Visual VisualOf(const api::MessageContent *content) {
+  if (const auto message = Cast<api::messageVideo>(content); message && message->video_) {
+    const auto &video = *message->video_;
+    return {video.width_, video.height_, video.minithumbnail_.get(), video.thumbnail_.get(), video.video_.get(),
+            video.duration_, false};
+  }
+  if (const auto message = Cast<api::messageAnimation>(content); message && message->animation_) {
+    const auto &animation = *message->animation_;
+    return {animation.width_, animation.height_, animation.minithumbnail_.get(), animation.thumbnail_.get(),
+            animation.animation_.get(), animation.duration_, true};
+  }
+  return {};
 }
 
 // A photo or a video: these make the grid of an album. Files (pictures sent as files too) and music make a
 // column, as in Telegram's apps.
-bool IsVisualMedia(not_null<HistoryItem *> item) {
-  const auto media = item->media();
-  if (!media || media->webpage()) return false;
-  if (media->photo()) return true;
-  const auto document = media->document();
-  return document && !document->sticker() && (document->isVideoFile() || document->isAnimation());
-}
-
-QSize VisualSize(not_null<HistoryItem *> item) {
-  const auto media = item->media();
-  auto size = QSize();
-  if (const auto photo = media ? media->photo() : nullptr) {
-    size = QSize(photo->width(), photo->height());
-  } else if (const auto document = media ? media->document() : nullptr) {
-    size = document->dimensions;
+[[nodiscard]] bool IsVisualMedia(const MessageItem *item) {
+  const auto content = ContentOf(item);
+  if (const auto message = Cast<api::messagePhoto>(content)) {
+    return message->photo_ && LargestSize(*message->photo_);
   }
-  return (size.width() > 0 && size.height() > 0) ? size : QSize(kMaxPhotoWidth, kMaxPhotoWidth);
+  return VisualOf(content).file != nullptr;
 }
 
-// An upload going on: the part already sent.
-std::optional<double> UploadProgress(not_null<HistoryItem *> item) {
-  const auto media = item->media();
-  const auto state = !media ? nullptr
-                     : media->photo() ? media->photo()->uploadingData.get()
-                     : media->document() ? media->document()->uploadingData.get()
-                     : nullptr;
-  if (!state || state->size <= 0) return std::nullopt;
-  return std::clamp(double(state->offset) / state->size, 0., 1.);
+[[nodiscard]] Size VisualSize(const MessageItem *item) {
+  const auto content = ContentOf(item);
+  auto size = Size();
+  if (const auto message = Cast<api::messagePhoto>(content); message && message->photo_) {
+    if (const auto largest = LargestSize(*message->photo_)) size = {largest->width_, largest->height_};
+  } else {
+    const auto visual = VisualOf(content);
+    size = {visual.width, visual.height};
+  }
+  return (size.width > 0 && size.height > 0) ? size : Size{kMaxPhotoWidth, kMaxPhotoWidth};
 }
 
-QString Percent(double value) {
-  return QString::number(int(value * 100)) + '%';
+// The text or the caption.
+[[nodiscard]] const api::formattedText *TextOf(const MessageItem *item) {
+  const auto content = ContentOf(item);
+  if (!content) return nullptr;
+  const api::formattedText *result = nullptr;
+  switch (content->get_id()) {
+    case api::messageText::ID: result = static_cast<const api::messageText *>(content)->text_.get(); break;
+    case api::messagePhoto::ID: result = static_cast<const api::messagePhoto *>(content)->caption_.get(); break;
+    case api::messageVideo::ID: result = static_cast<const api::messageVideo *>(content)->caption_.get(); break;
+    case api::messageAnimation::ID:
+      result = static_cast<const api::messageAnimation *>(content)->caption_.get();
+      break;
+    case api::messageVoiceNote::ID:
+      result = static_cast<const api::messageVoiceNote *>(content)->caption_.get();
+      break;
+    case api::messageAudio::ID: result = static_cast<const api::messageAudio *>(content)->caption_.get(); break;
+    case api::messageDocument::ID:
+      result = static_cast<const api::messageDocument *>(content)->caption_.get();
+      break;
+    default: break;
+  }
+  return (result && !result->text_.empty()) ? result : nullptr;
+}
+
+[[nodiscard]] const char *DocumentIcon(const std::string &mime) {
+  if (mime.starts_with("audio/")) {
+    return "audio-x-generic-symbolic";
+  } else if (mime.starts_with("video/")) {
+    return "video-x-generic-symbolic";
+  } else if (mime.starts_with("image/")) {
+    return kImageIcon;
+  }
+  return "text-x-generic-symbolic";
+}
+
+[[nodiscard]] std::string PeerColorClass(int color) {
+  return "peer-color-" + std::to_string(std::abs(color) % 7);
+}
+
+[[nodiscard]] std::string UserName(const Td::Store &store, Td::UserId id) {
+  const auto user = store.user(id);
+  return user ? Td::DisplayName(*user) : std::string();
+}
+
+[[nodiscard]] std::string ChatTitle(const Td::Store &store, Td::ChatId id) {
+  const auto chat = store.chat(id);
+  return chat ? chat->title : std::string();
+}
+
+[[nodiscard]] std::string SenderName(const Td::Store &store, const api::MessageSender *sender) {
+  if (const auto user = Cast<api::messageSenderUser>(sender)) return UserName(store, user->user_id_);
+  if (const auto chat = Cast<api::messageSenderChat>(sender)) return ChatTitle(store, chat->chat_id_);
+  return {};
+}
+
+[[nodiscard]] int SenderColor(const Td::Store &store, const api::MessageSender *sender) {
+  if (const auto id = Cast<api::messageSenderUser>(sender)) {
+    const auto user = store.user(id->user_id_);
+    return user ? user->accentColor : 0;
+  }
+  if (const auto id = Cast<api::messageSenderChat>(sender)) {
+    const auto chat = store.chat(id->chat_id_);
+    return chat ? chat->accentColor : 0;
+  }
+  return 0;
+}
+
+[[nodiscard]] std::string OriginName(const Td::Store &store, const api::MessageOrigin *origin) {
+  if (const auto user = Cast<api::messageOriginUser>(origin)) return UserName(store, user->sender_user_id_);
+  if (const auto hidden = Cast<api::messageOriginHiddenUser>(origin)) return hidden->sender_name_;
+  if (const auto chat = Cast<api::messageOriginChat>(origin)) return ChatTitle(store, chat->sender_chat_id_);
+  if (const auto channel = Cast<api::messageOriginChannel>(origin)) return ChatTitle(store, channel->chat_id_);
+  return {};
+}
+
+// The state of a file when a row is built. The store knows a file only once it has changed or was asked for: TDLib
+// sends no update for one already on disk, and the object in the message is all there is.
+[[nodiscard]] Td::File FileState(const Td::Store &store, const api::file &file) {
+  if (const auto known = store.file(file.id_)) return *known;
+  auto result = Td::File();
+  result.id = file.id_;
+  result.size = file.size_ ? file.size_ : file.expected_size_;
+  if (file.local_) {
+    result.downloaded = file.local_->downloaded_size_;
+    result.downloading = file.local_->is_downloading_active_;
+    result.complete = file.local_->is_downloading_completed_;
+    if (result.complete) result.path = file.local_->path_;
+  }
+  return result;
+}
+
+// The rows that want a picture: one sticker can be in many messages, and the last of them to go stops the download.
+[[nodiscard]] std::unordered_map<Td::FileId, int> &WantedPictures() {
+  static auto result = std::unordered_map<Td::FileId, int>();
+  return result;
+}
+
+void WantPicture(Td::FileId id) {
+  if (id) ++WantedPictures()[id];
+}
+
+void ReleasePicture(Td::Store &store, Td::FileId id) {
+  if (!id) return;
+  auto &wanted = WantedPictures();
+  const auto it = wanted.find(id);
+  if (it == wanted.end() || --it->second > 0) return;
+  wanted.erase(it);
+  const auto known = store.file(id);
+  if (!known || !known->complete) store.cancelDownload(id);
+}
+
+struct PictureDecode {
+  std::string path;
+  int width = 0;
+  int height = 0;
+};
+
+// A texture as large as the picture on the screen: drawing a downscaled full-size photo costs time on every frame
+// while scrolling, and the memory of all the loaded photos.
+void DecodePicture(GTask *task, gpointer, gpointer data, GCancellable *) {
+  const auto &decode = *static_cast<PictureDecode *>(data);
+  auto original = 0, originalHeight = 0;
+  GdkPixbuf *pixbuf = nullptr;
+  if (gdk_pixbuf_get_file_info(decode.path.c_str(), &original, &originalHeight)) {
+    if (decode.width > 0 && decode.height > 0 && original > decode.width && originalHeight > decode.height) {
+      const auto scale = std::max(double(decode.width) / original, double(decode.height) / originalHeight);
+      pixbuf = gdk_pixbuf_new_from_file_at_scale(decode.path.c_str(), std::max(int(original * scale), 1),
+                                                 std::max(int(originalHeight * scale), 1), TRUE, nullptr);
+    } else {
+      pixbuf = gdk_pixbuf_new_from_file(decode.path.c_str(), nullptr);
+    }
+  }
+  if (pixbuf) {
+    // Files keep their camera's rotation; Telegram's own photos have none and this returns the same picture.
+    auto *turned = gdk_pixbuf_apply_embedded_orientation(pixbuf);
+    g_object_unref(pixbuf);
+    pixbuf = turned;
+  }
+  g_task_return_pointer(task, pixbuf, pixbuf ? g_object_unref : nullptr);
+}
+
+void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
+  // The picture is the task's source object: it is alive here even if its message has gone.
+  auto *picture = GTK_WIDGET(source);
+  auto *task = G_TASK(result);
+  auto *pixbuf = static_cast<GdkPixbuf *>(g_task_propagate_pointer(task, nullptr));
+  if (!pixbuf) return;
+  const auto quality = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(task), kQualityKey));
+  if (GPOINTER_TO_INT(g_object_get_data(source, kQualityKey)) > quality
+      || gdk_pixbuf_get_bits_per_sample(pixbuf) != 8) {
+    g_object_unref(pixbuf);
+    return;
+  }
+  g_object_set_data(source, kQualityKey, GINT_TO_POINTER(quality));
+  const auto width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
+  const auto stride = gdk_pixbuf_get_rowstride(pixbuf);
+  auto *bytes = g_bytes_new_with_free_func(gdk_pixbuf_read_pixels(pixbuf), gdk_pixbuf_get_byte_length(pixbuf),
+                                           g_object_unref, pixbuf);
+  const auto format = gdk_pixbuf_get_has_alpha(pixbuf) ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8;
+  auto *texture = gdk_memory_texture_new(width, height, format, bytes, stride);
+  gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
+  g_object_unref(texture);
+  g_bytes_unref(bytes);
+}
+
+void LoadPicture(GtkWidget *picture, const std::string &path, PictureQuality quality) {
+  const auto scale = std::max(gtk_widget_get_scale_factor(picture), 1);
+  auto *decode = new PictureDecode{
+      path, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-width")) * scale,
+      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-height")) * scale};
+  auto *task = g_task_new(picture, nullptr, PictureDecoded, nullptr);
+  g_task_set_task_data(task, decode, [](gpointer data) { delete static_cast<PictureDecode *>(data); });
+  g_object_set_data(G_OBJECT(task), kQualityKey, GINT_TO_POINTER(int(quality)));
+  g_task_run_in_thread(task, DecodePicture);
+  g_object_unref(task);
+}
+
+// The blurred picture a message carries in itself, a JPEG of a few hundred bytes: small enough to decode right here.
+void SetMiniThumbnail(GtkWidget *picture, const api::minithumbnail *mini) {
+  if (!mini || mini->data_.empty()) return;
+  auto *bytes = g_bytes_new(mini->data_.data(), mini->data_.size());
+  if (auto *texture = gdk_texture_new_from_bytes(bytes, nullptr)) {
+    gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+  }
+  g_bytes_unref(bytes);
+}
+
+[[nodiscard]] std::string Percent(double value) {
+  return std::to_string(int(value * 100)) + "%";
+}
+
+// Tenths of a unit, as Telegram's apps round them: down.
+[[nodiscard]] std::string Tenths(std::int64_t value, std::int64_t unit) {
+  const auto tenths = value * 10 / unit;
+  return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10);
+}
+
+[[nodiscard]] std::string FormatSize(std::int64_t size) {
+  if (size >= kMegabyte) return Tenths(size, kMegabyte) + " MB";
+  if (size >= kKilobyte) return Tenths(size, kKilobyte) + " KB";
+  return std::to_string(size) + " B";
 }
 
 // "12.3 / 45.6 MB · 27%"; before the first part comes (other downloads go first): waiting.
-QString DownloadText(int64 offset, int64 size) {
+[[nodiscard]] std::string DownloadText(std::int64_t offset, std::int64_t size) {
   if (offset <= 0) return Translated("Waiting…", "Ожидание…", "Очікування…");
-  auto result = Ui::FormatDownloadText(offset, size);
-  if (size > 0) result += u" · "_q + Percent(DownloadFraction(offset, size));
-  return result;
+  if (size <= 0) return FormatSize(offset);
+  auto result = (size >= kMegabyte)   ? Tenths(offset, kMegabyte) + " / " + Tenths(size, kMegabyte) + " MB"
+                : (size >= kKilobyte) ? Tenths(offset, kKilobyte) + " / " + Tenths(size, kKilobyte) + " KB"
+                                      : std::to_string(offset) + " / " + std::to_string(size) + " B";
+  return result + " · " + Percent(DownloadFraction(offset, size));
+}
+
+[[nodiscard]] std::string FormatDuration(int seconds) {
+  char buffer[32];
+  const auto hours = seconds / 3600, minutes = seconds / 60 % 60, rest = seconds % 60;
+  if (hours > 0) {
+    std::snprintf(buffer, sizeof(buffer), "%d:%02d:%02d", hours, minutes, rest);
+  } else {
+    std::snprintf(buffer, sizeof(buffer), "%d:%02d", minutes, rest);
+  }
+  return buffer;
+}
+
+// 999, 1.2K, 3.4M: views under a channel post.
+[[nodiscard]] std::string ShortCount(std::int64_t count) {
+  const auto shorten = [](std::int64_t value, std::int64_t unit, const char *suffix) {
+    const auto tenths = value * 10 / unit;
+    auto result = std::to_string(tenths / 10);
+    if (tenths % 10) result += "." + std::to_string(tenths % 10);
+    return result + suffix;
+  };
+  if (count >= 1'000'000) return shorten(count, 1'000'000, "M");
+  if (count >= 1'000) return shorten(count, 1'000, "K");
+  return std::to_string(count);
+}
+
+[[nodiscard]] std::string PhoneText(const std::string &phone) {
+  return (phone.empty() || phone.front() == '+') ? phone : "+" + phone;
+}
+
+[[nodiscard]] std::string FallbackStatus(int duration, bool gif) {
+  if (duration > 0) return FormatDuration(duration);
+  return gif ? "GIF" : "";
 }
 
 // A download's progress over a video, in place of its play button: a ring around a stop sign, as a tap
@@ -184,44 +398,30 @@ GtkWidget *MakeProgressRing() {
   gtk_widget_set_valign(ring, GTK_ALIGN_CENTER);
   gtk_widget_set_can_target(ring, FALSE);
   gtk_widget_set_visible(ring, FALSE);
-  gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(ring), [](GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer) {
-    const auto fraction = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(area), "contrail-fraction")) / 1000.;
-    const auto x = width / 2., y = height / 2., radius = std::min(width, height) / 2.;
-    const auto line = radius - 5.;
-    cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
-    cairo_arc(cr, x, y, radius, 0, 2 * std::numbers::pi);
-    cairo_fill(cr);
-    cairo_set_line_width(cr, 3);
-    cairo_set_source_rgba(cr, 1, 1, 1, 0.3);
-    cairo_arc(cr, x, y, line, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_set_source_rgb(cr, 1, 1, 1);
-    if (fraction > 0) {
-      cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
-      cairo_arc(cr, x, y, line, -std::numbers::pi / 2, -std::numbers::pi / 2 + 2 * std::numbers::pi * fraction);
-      cairo_stroke(cr);
-    }
-    cairo_rectangle(cr, x - 6, y - 6, 12, 12);
-    cairo_fill(cr);
-  }, nullptr, nullptr);
+  gtk_drawing_area_set_draw_func(
+      GTK_DRAWING_AREA(ring),
+      [](GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer) {
+        const auto fraction = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(area), "contrail-fraction")) / 1000.;
+        const auto x = width / 2., y = height / 2., radius = std::min(width, height) / 2.;
+        const auto line = radius - 5.;
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.5);
+        cairo_arc(cr, x, y, radius, 0, 2 * std::numbers::pi);
+        cairo_fill(cr);
+        cairo_set_line_width(cr, 3);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.3);
+        cairo_arc(cr, x, y, line, 0, 2 * std::numbers::pi);
+        cairo_stroke(cr);
+        cairo_set_source_rgb(cr, 1, 1, 1);
+        if (fraction > 0) {
+          cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+          cairo_arc(cr, x, y, line, -std::numbers::pi / 2, -std::numbers::pi / 2 + 2 * std::numbers::pi * fraction);
+          cairo_stroke(cr);
+        }
+        cairo_rectangle(cr, x - 6, y - 6, 12, 12);
+        cairo_fill(cr);
+      },
+      nullptr, nullptr);
   return ring;
-}
-
-// A player's bar takes no input of its own: the wheel over it scrolls the chat, and the message seeks with
-// its own gestures, which leave vertical moves to the scrolling (MessageWidget::setupSeeking()).
-void DisableControllers(GtkWidget *widget) {
-  auto *controllers = gtk_widget_observe_controllers(widget);
-  const auto count = g_list_model_get_n_items(controllers);
-  for (guint i = 0; i != count; ++i) {
-    auto *controller = GTK_EVENT_CONTROLLER(g_list_model_get_item(controllers, i));
-    gtk_event_controller_set_propagation_phase(controller, GTK_PHASE_NONE);
-    g_object_unref(controller);
-  }
-  g_object_unref(controllers);
-}
-
-QString LoadingText() {
-  return Translated("Loading…", "Загрузка…", "Завантаження…");
 }
 
 void SetRingFraction(GtkWidget *ring, double fraction) {
@@ -229,10 +429,24 @@ void SetRingFraction(GtkWidget *ring, double fraction) {
   gtk_widget_queue_draw(ring);
 }
 
+// The picture of a page in a link preview.
+[[nodiscard]] const api::photo *PreviewPhoto(const api::LinkPreviewType *type) {
+  if (const auto article = Cast<api::linkPreviewTypeArticle>(type)) return article->photo_.get();
+  if (const auto photo = Cast<api::linkPreviewTypePhoto>(type)) return photo->photo_.get();
+  if (const auto app = Cast<api::linkPreviewTypeApp>(type)) return app->photo_.get();
+  if (const auto app = Cast<api::linkPreviewTypeWebApp>(type)) return app->photo_.get();
+  if (const auto video = Cast<api::linkPreviewTypeVideo>(type)) return video->cover_.get();
+  if (const auto player = Cast<api::linkPreviewTypeEmbeddedVideoPlayer>(type)) return player->thumbnail_.get();
+  if (const auto player = Cast<api::linkPreviewTypeEmbeddedAnimationPlayer>(type)) return player->thumbnail_.get();
+  if (const auto player = Cast<api::linkPreviewTypeEmbeddedAudioPlayer>(type)) return player->thumbnail_.get();
+  return nullptr;
+}
+
 }  // namespace
 
-MessageWidget::MessageWidget(Items items, not_null<ChatView *> chat) : _items(std::move(items)), _chat(chat) {
-  Expects(!_items.empty());
+MessageWidget::MessageWidget(Items items, ChatView &chat) : _items(std::move(items)), _chat(chat) {
+
+  g_assert(!_items.empty());
   _row = gtk_list_box_row_new();
   g_object_ref_sink(_row);
   gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(_row), FALSE);
@@ -244,12 +458,9 @@ MessageWidget::MessageWidget(Items items, not_null<ChatView *> chat) : _items(st
 
 MessageWidget::~MessageWidget() {
   _signals.clear();
-  cancelSeeking();
+  clearFiles();
   if (_highlightTimeout) {
     g_source_remove(_highlightTimeout);
-  }
-  if (_liveTimer) {
-    g_source_remove(_liveTimer);
   }
   g_object_set_data(G_OBJECT(_row), "contrail-message", nullptr);
   if (auto *parent = gtk_widget_get_parent(_row)) {
@@ -259,13 +470,12 @@ MessageWidget::~MessageWidget() {
 }
 
 void MessageWidget::setItems(Items items) {
-  Expects(!items.empty());
-  if (items == _items) return;
+  if (items.empty() || items == _items) return;
   _items = std::move(items);
   refresh();
 }
 
-GtkWidget *MessageWidget::widgetFor(const HistoryItem *item) const {
+GtkWidget *MessageWidget::widgetFor(const MessageItem *item) const {
   if (_items.size() > 1) {
     for (const auto &cell : _cells) {
       if (cell->item == item && cell->widget) return cell->widget;
@@ -276,21 +486,26 @@ GtkWidget *MessageWidget::widgetFor(const HistoryItem *item) const {
 
 void MessageWidget::refresh() {
   _signals.clear();
-  cancelSeeking();
+  clearFiles();
   if (_highlightTimeout) {
-    g_source_remove(base::take(_highlightTimeout));
+    g_source_remove(std::exchange(_highlightTimeout, 0));
   }
   _highlighted = nullptr;
-  if (_liveTimer) {
-    g_source_remove(base::take(_liveTimer));
-  }
-  _cells.clear();
   _replyPending = false;
-  _name = _avatar = _footer = _footerTime = _footerStatus = _reactions = nullptr;
+  _name = _avatar = _footer = _footerTime = _footerStatus = nullptr;
   build();
 }
 
-MessageWidget::Cell &MessageWidget::addCell(not_null<HistoryItem *> item) {
+void MessageWidget::clearFiles() {
+  auto &store = _chat.store();
+  for (const auto &cell : _cells) {
+    ReleasePicture(store, cell->pictureFile);
+    ReleasePicture(store, cell->thumbnailFile);
+  }
+  _cells.clear();
+}
+
+MessageWidget::Cell &MessageWidget::addCell(MessageItem *item) {
   _cells.push_back(std::make_unique<Cell>(Cell{.item = item}));
   return *_cells.back();
 }
@@ -299,19 +514,33 @@ bool MessageWidget::isAlbumGrid() const {
   return _items.size() > 1 && std::all_of(_items.begin(), _items.end(), IsVisualMedia);
 }
 
+bool MessageWidget::isService() const {
+  const auto content = ContentOf(_items.front());
+  return content && Td::IsServiceMessage(*content);
+}
+
 // The message of the bubble as a whole (the menu outside the cells, swiping to reply): the one with
 // the caption, as the official apps do, else the first.
-not_null<HistoryItem *> MessageWidget::mainItem() const {
+MessageItem *MessageWidget::mainItem() const {
   for (const auto &item : _items) {
-    if (!item->originalText().text.isEmpty()) return item;
+    if (TextOf(item)) return item;
   }
   return _items.front();
 }
 
 void MessageWidget::build() {
   const auto first = _items.front();
-  if (first->isService()) {
-    auto *label = MakeTextLabel(first->notificationText());
+  gtk_widget_set_visible(_row, TRUE);
+  if (!first->data) {
+    gtk_widget_set_visible(_row, FALSE);
+    return;
+  }
+  auto &store = _chat.store();
+  if (isService()) {
+    const auto text = Td::ServiceText(*first->data, store);
+    // Some have no text (a group became a supergroup), and no line then.
+    gtk_widget_set_visible(_row, !text.empty());
+    auto *label = MakeTextLabel(text);
     gtk_label_set_justify(GTK_LABEL(label), GTK_JUSTIFY_CENTER);
     gtk_label_set_xalign(GTK_LABEL(label), 0.5);
     gtk_widget_add_css_class(label, "service-message");
@@ -323,10 +552,11 @@ void MessageWidget::build() {
     return;
   }
 
-  const auto history = first->history();
-  const auto peer = history->peer;
-  const auto out = first->out() && !peer->isBroadcast();
-  const auto showSender = !out && !peer->isUser() && !peer->isBroadcast();
+  const auto chat = store.chat(_chat.chat());
+  const auto broadcast = chat && chat->kind == Td::ChatKind::Channel;
+  const auto group = chat && chat->kind == Td::ChatKind::Group;
+  const auto out = first->data->is_outgoing_ && !broadcast;
+  const auto showSender = !out && group;
 
   auto *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
   gtk_widget_set_halign(line, out ? GTK_ALIGN_END : GTK_ALIGN_START);
@@ -335,9 +565,15 @@ void MessageWidget::build() {
   gtk_widget_set_margin_top(line, 2);
   gtk_widget_set_margin_bottom(line, 2);
 
-  const auto from = first->displayFrom() ? first->displayFrom() : first->from().get();
+  const auto from = first->data->sender_id_.get();
   if (showSender) {
-    _avatar = MakeAvatar(from, 32);
+    if (const auto user = Cast<api::messageSenderUser>(from)) {
+      _avatar = MakeUserAvatar(store, user->user_id_, 32);
+    } else if (const auto sender = Cast<api::messageSenderChat>(from)) {
+      _avatar = MakeAvatar(store, sender->chat_id_, 32);
+    } else {
+      _avatar = adw_avatar_new(32, nullptr, TRUE);
+    }
     gtk_widget_set_valign(_avatar, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(line), _avatar);
   }
@@ -349,11 +585,11 @@ void MessageWidget::build() {
   gtk_box_append(GTK_BOX(line), MakeHeightForWidthBin(bubble));
 
   if (showSender) {
-    _name = gtk_label_new(U8(from->name()).c_str());
+    _name = gtk_label_new(SenderName(store, from).c_str());
     gtk_label_set_xalign(GTK_LABEL(_name), 0);
     gtk_label_set_ellipsize(GTK_LABEL(_name), PANGO_ELLIPSIZE_END);
     gtk_widget_add_css_class(_name, "sender-name");
-    gtk_widget_add_css_class(_name, U8(PeerColorClass(from)).c_str());
+    gtk_widget_add_css_class(_name, PeerColorClass(SenderColor(store, from)).c_str());
     gtk_box_append(GTK_BOX(bubble), _name);
   }
   // An album is forwarded and replies as a whole: the first message that says so speaks for it.
@@ -370,47 +606,45 @@ void MessageWidget::build() {
     }
   }
 
-  auto hasMedia = false;
   if (isAlbumGrid()) {
     gtk_box_append(GTK_BOX(bubble), buildAlbumGrid());
     // Every caption of the album, in its order.
     for (const auto &item : _items) {
-      if (const auto &text = item->originalText(); !text.text.isEmpty()) {
-        gtk_box_append(GTK_BOX(bubble), MakeTextLabel(text));
+      if (const auto text = TextOf(item)) {
+        gtk_box_append(GTK_BOX(bubble), MakeTextLabel(*text));
       }
     }
-    hasMedia = true;
   } else if (_items.size() > 1) {
     // Files and music sent together: one under the other, each with its caption.
     for (const auto &item : _items) {
       auto &cell = addCell(item);
       auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-      const auto document = item->media() ? item->media()->document() : nullptr;
-      if (auto *media = (document && document->isImage()) ? buildDocument(cell, document) : buildMedia(cell, kMaxPhotoWidth)) {
+      const auto document = Cast<api::messageDocument>(ContentOf(item));
+      const auto file = document && document->document_ ? document->document_.get() : nullptr;
+      auto *media = (file && file->document_ && file->mime_type_.starts_with("image/"))
+                        ? buildDocument(cell, *file->document_, file->file_name_, kImageIcon)
+                        : buildMedia(cell, kMaxPhotoWidth);
+      if (media) {
         gtk_box_append(GTK_BOX(box), media);
       }
-      if (const auto &text = item->originalText(); !text.text.isEmpty()) {
-        gtk_box_append(GTK_BOX(box), MakeTextLabel(text));
+      if (const auto text = TextOf(item)) {
+        gtk_box_append(GTK_BOX(box), MakeTextLabel(*text));
       }
       cell.widget = box;
       setupGestures(box, item, false);
       gtk_box_append(GTK_BOX(bubble), box);
     }
-    hasMedia = true;
   } else {
     auto &cell = addCell(first);
     auto *media = buildMedia(cell, kMaxPhotoWidth);
     if (media) {
       gtk_box_append(GTK_BOX(bubble), media);
-      hasMedia = true;
     }
-    const auto &text = first->originalText();
-    if (!text.text.isEmpty()) {
-      gtk_box_append(GTK_BOX(bubble), MakeTextLabel(text));
-    } else if (!media && !first->isSponsored()) {
-      // Something this interface can't show: a short description from the core.
-      auto preview = first->toPreview({.hideSender = true, .generateImages = false});
-      auto *label = MakeTextLabel(preview.text);
+    if (const auto text = TextOf(first)) {
+      gtk_box_append(GTK_BOX(bubble), MakeTextLabel(*text));
+    } else if (!media) {
+      // Something this interface can't show: a short description.
+      auto *label = MakeTextLabel(Td::MessagePreview(*first->data, store));
       gtk_widget_add_css_class(label, "dim-label");
       gtk_box_append(GTK_BOX(bubble), label);
     }
@@ -421,203 +655,197 @@ void MessageWidget::build() {
       gtk_box_append(GTK_BOX(bubble), webpage);
     }
   }
-  (void)hasMedia;
-  if (!first->isSponsored()) {
-    _reactions = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_append(GTK_BOX(bubble), _reactions);
-    _reactionsKey = QString(u"-"_q);  // Never a real key: the bar is built.
-    refreshReactions();
-    _footer = buildFooter();
-    gtk_box_append(GTK_BOX(bubble), _footer);
-    setupDoubleTap(bubble);
-  }
-  refreshLive();
+  _footer = buildFooter();
+  gtk_box_append(GTK_BOX(bubble), _footer);
 
   setupGestures(bubble, mainItem(), true);
   gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(_row), line);
   _content = line;
 }
 
-GtkWidget *MessageWidget::buildForwarded(not_null<HistoryItem *> item) {
-  const auto forwarded = item->Get<HistoryMessageForwarded>();
-  if (!forwarded) {
+GtkWidget *MessageWidget::buildForwarded(MessageItem *item) {
+  const auto forward = item->data ? item->data->forward_info_.get() : nullptr;
+  if (!forward) {
     return nullptr;
   }
-  auto name = forwarded->originalSender ? forwarded->originalSender->name()
-              : forwarded->originalHiddenSenderInfo ? forwarded->originalHiddenSenderInfo->name
-                                                   : QString();
+  const auto origin = forward->origin_.get();
+  const auto name = OriginName(_chat.store(), origin);
   auto *label = gtk_label_new(nullptr);
   gtk_label_set_markup(GTK_LABEL(label),
-                       (Escape(tr::lng_forwarded(tr::now, lt_user, QString())) + "<b>" + Escape(name) + "</b>").c_str());
+                       (Escape(Tr("lng_forwarded", {{"user", ""}})) + "<b>" + Escape(name) + "</b>").c_str());
   gtk_label_set_xalign(GTK_LABEL(label), 0);
   gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
   gtk_widget_add_css_class(label, "forwarded");
-  if (const auto sender = forwarded->originalSender) {
+  auto open = std::function<void()>();
+  if (const auto user = Cast<api::messageOriginUser>(origin)) {
+    open = [id = user->sender_user_id_] { HandleLink("tg-user:" + std::to_string(id)); };
+  } else if (const auto chat = Cast<api::messageOriginChat>(origin)) {
+    open = [this, id = chat->sender_chat_id_] { _chat.openChat(id); };
+  } else if (const auto channel = Cast<api::messageOriginChannel>(origin)) {
+    open = [this, id = channel->chat_id_] { _chat.openChat(id); };
+  }
+  if (open) {
     auto *click = gtk_gesture_click_new();
-    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      if (TapAllowed()) _chat->openPeer(sender);
-    });
+    _signals.connect<void(GtkGestureClick *, int, double, double)>(
+        click, "released", [=](GtkGestureClick *, int, double, double) {
+          if (TapAllowed()) open();
+        });
     gtk_widget_add_controller(label, GTK_EVENT_CONTROLLER(click));
   }
   return label;
 }
 
-GtkWidget *MessageWidget::buildReply(not_null<HistoryItem *> item) {
-  const auto reply = item->Get<HistoryMessageReply>();
-  if (!reply || (!reply->messageId() && reply->fields().quote.text.isEmpty())) {
+GtkWidget *MessageWidget::buildReply(MessageItem *item) {
+  const auto reply = item->data ? Cast<api::messageReplyToMessage>(item->data->reply_to_.get()) : nullptr;
+  if (!reply) {
     return nullptr;
   }
-  // In a group with topics every message "replies" to the start of its topic: that is no reply
-  // (Element::countIsTopicRootReply), unless it quotes it.
-  if (item->history()->isForum() && reply->messageId() == item->topicRootId()
-      && reply->fields().quote.text.isEmpty()) {
+  auto &store = _chat.store();
+  const auto quote = (reply->quote_ && reply->quote_->text_ && !reply->quote_->text_->text_.empty())
+                         ? reply->quote_->text_.get()
+                         : nullptr;
+  // In a group with topics every message "replies" to the start of its topic: that is no reply, unless it quotes
+  // it. A topic's id is the server id of that message, which is in the upper bits of a message id.
+  const auto chat = store.chat(_chat.chat());
+  const auto topic = Cast<api::messageTopicForum>(item->data->topic_id_.get());
+  if (chat && chat->forum && topic && !quote && reply->message_id_ == (std::int64_t(topic->forum_topic_id_) << 20)) {
     return nullptr;
   }
+  const auto preview = _chat.replyPreview(*item);
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_add_css_class(box, "reply-quote");
-  QString name;
-  TextWithEntities text;
-  if (const auto replied = reply->resolvedMessage.get()) {
-    const auto from = replied->displayFrom() ? replied->displayFrom() : replied->from().get();
-    name = from->name();
-    gtk_widget_add_css_class(box, U8(PeerColorClass(from)).c_str());
-    text = reply->fields().quote.text.isEmpty()
-               ? replied->toPreview({.hideSender = true, .generateImages = false}).text
-               : reply->fields().quote;
+  if (preview.color >= 0) {
+    gtk_widget_add_css_class(box, PeerColorClass(preview.color).c_str());
+  }
+  // The name a message from another chat comes with, until there is better.
+  const auto name = preview.name.empty() ? OriginName(store, reply->origin_.get()) : preview.name;
+  _replyPending = _replyPending || !preview.ready;
+  auto markup = std::string();
+  if (quote) {
+    markup = ToMarkup(*quote, false, false);
+  } else if (!preview.ready) {
+    markup = Escape(Tr("lng_profile_loading"));
+  } else if (preview.text.empty()) {
+    markup = Escape(Tr("lng_deleted_message"));
   } else {
-    name = reply->fields().externalSenderName;
-    if (name.isEmpty() && reply->externalPeerId()) {
-      if (const auto peer = item->history()->owner().peerLoaded(reply->externalPeerId())) name = peer->name();
-    }
-    // A message that isn't loaded yet isn't deleted: the core asks the server for it (as Telegram Desktop does
-    // when it paints the reply) and says when it is there (Data::Session::itemResizeRequest), or that it is gone.
-    const auto deleted = reply->unavailable();
-    if (!deleted && reply->messageId()) {
-      _replyPending = true;
-      item->resolveDependent();
-    }
-    text = !reply->fields().quote.text.isEmpty() ? reply->fields().quote
-           : deleted ? TextWithEntities{tr::lng_deleted_message(tr::now)}
-                     : TextWithEntities{tr::lng_profile_loading(tr::now)};
+    markup = Escape(preview.text);
   }
-  for (auto &ch : text.text) {
-    if (ch == '\n') {
-      ch = ' ';
-    }
-  }
-  auto *nameLabel = gtk_label_new(U8(name).c_str());
+  // A single line draws line breaks as a sign.
+  std::replace(markup.begin(), markup.end(), '\n', ' ');
+  auto *nameLabel = gtk_label_new(name.c_str());
   gtk_widget_add_css_class(nameLabel, "reply-name");
   gtk_label_set_xalign(GTK_LABEL(nameLabel), 0);
   gtk_label_set_ellipsize(GTK_LABEL(nameLabel), PANGO_ELLIPSIZE_END);
   gtk_box_append(GTK_BOX(box), nameLabel);
   auto *textLabel = gtk_label_new(nullptr);
-  gtk_label_set_markup(GTK_LABEL(textLabel), ToMarkup(text, false, false).c_str());
+  gtk_label_set_markup(GTK_LABEL(textLabel), markup.c_str());
   gtk_label_set_xalign(GTK_LABEL(textLabel), 0);
   gtk_label_set_ellipsize(GTK_LABEL(textLabel), PANGO_ELLIPSIZE_END);
   gtk_label_set_single_line_mode(GTK_LABEL(textLabel), TRUE);
   gtk_box_append(GTK_BOX(box), textLabel);
-  const auto replyId = reply->messageId();
-  if (replyId) {
+  if (const auto target = preview.target) {
     auto *click = gtk_gesture_click_new();
-    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      if (TapAllowed()) _chat->showAt(replyId);
-    });
+    _signals.connect<void(GtkGestureClick *, int, double, double)>(
+        click, "released", [=, this](GtkGestureClick *, int, double, double) {
+          if (TapAllowed()) _chat.showAt(target);
+        });
     gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   }
   return box;
 }
 
 GtkWidget *MessageWidget::buildMedia(Cell &cell, int maxWidth) {
-  const auto media = cell.item->media();
-  if (!media) {
+  const auto content = ContentOf(cell.item);
+  if (!content) {
     return nullptr;
   }
-  if (media->webpage()) {
-    return nullptr;  // Shown after the text.
-  }
-  if (const auto location = LocationMedia(cell.item)) {
-    return buildLocation(cell, location);
-  }
-  if (const auto photo = media->photo()) {
-    return buildPhoto(cell, photo, maxWidth);
-  }
-  if (const auto document = media->document()) {
-    if (document->sticker()) {
-      return buildSticker(cell, document);
-    } else if (document->isVoiceMessage() || document->isAudioFile() || document->isSong()) {
-      return buildVoice(cell, document);
-    } else if (document->isVideoFile() || document->isAnimation() || document->isVideoMessage()) {
-      return buildVideoThumb(cell, document, document->isVideoMessage() ? 200 : maxWidth);
-    } else if (document->isImage() && document->hasThumbnail()) {
-      return buildVideoThumb(cell, document, maxWidth);
+  switch (content->get_id()) {
+    case api::messagePhoto::ID: {
+      const auto &photo = static_cast<const api::messagePhoto *>(content)->photo_;
+      return photo ? buildPhoto(cell, *photo, maxWidth) : nullptr;
     }
-    return buildDocument(cell, document);
-  }
-  if (const auto poll = media->poll()) {
-    auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    auto *question = MakeTextLabel(poll->question);
-    gtk_widget_add_css_class(question, "heading");
-    gtk_box_append(GTK_BOX(box), question);
-    auto total = 0;
-    for (const auto &answer : poll->answers) {
-      total += answer.votes;
+    case api::messageSticker::ID: {
+      const auto &sticker = static_cast<const api::messageSticker *>(content)->sticker_;
+      return sticker ? buildSticker(cell, *sticker) : nullptr;
     }
-    for (const auto &answer : poll->answers) {
-      auto *line = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-      auto *text = MakeTextLabel(answer.text);
-      gtk_box_append(GTK_BOX(line), text);
-      if (poll->voted() || poll->closed()) {
-        auto *bar = gtk_progress_bar_new();
-        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar), total ? double(answer.votes) / total : 0.);
-        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(bar),
-                                  (std::to_string(total ? answer.votes * 100 / total : 0) + "%").c_str());
-        gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), TRUE);
-        gtk_box_append(GTK_BOX(line), bar);
+    case api::messageVoiceNote::ID: {
+      const auto &voice = static_cast<const api::messageVoiceNote *>(content)->voice_note_;
+      return (voice && voice->voice_) ? buildVoice(cell, *voice->voice_, voice->duration_, {}) : nullptr;
+    }
+    case api::messageAudio::ID: {
+      const auto &audio = static_cast<const api::messageAudio *>(content)->audio_;
+      if (!audio || !audio->audio_) return nullptr;
+      auto title = audio->title_.empty() ? audio->file_name_ : audio->title_;
+      if (!audio->performer_.empty()) {
+        title = audio->performer_ + " – " + title;
       }
-      gtk_box_append(GTK_BOX(box), line);
+      return buildVoice(cell, *audio->audio_, audio->duration_, title);
     }
-    auto *votes = gtk_label_new(U8(tr::lng_polls_votes_count(tr::now, lt_count, total)).c_str());
-    gtk_widget_add_css_class(votes, "dim-label");
-    gtk_widget_add_css_class(votes, "caption");
-    gtk_label_set_xalign(GTK_LABEL(votes), 0);
-    gtk_box_append(GTK_BOX(box), votes);
-    return box;
+    case api::messageVideo::ID:
+    case api::messageAnimation::ID: {
+      const auto visual = VisualOf(content);
+      return visual.file ? buildVideoThumb(cell, visual.width, visual.height, visual.mini, visual.thumbnail,
+                                           *visual.file, visual.duration, visual.gif, false, maxWidth)
+                         : nullptr;
+    }
+    case api::messageVideoNote::ID: {
+      const auto &note = static_cast<const api::messageVideoNote *>(content)->video_note_;
+      if (!note || !note->video_) return nullptr;
+      return buildVideoThumb(cell, note->length_, note->length_, note->minithumbnail_.get(), note->thumbnail_.get(),
+                             *note->video_, note->duration_, false, true, kRoundVideoWidth);
+    }
+    case api::messageDocument::ID: {
+      const auto &document = static_cast<const api::messageDocument *>(content)->document_;
+      if (!document || !document->document_) return nullptr;
+      if (document->mime_type_.starts_with("image/") && document->thumbnail_) {
+        const auto &thumbnail = *document->thumbnail_;
+        return buildVideoThumb(cell, thumbnail.width_, thumbnail.height_, document->minithumbnail_.get(), &thumbnail,
+                               *document->document_, 0, false, false, maxWidth);
+      }
+      return buildDocument(cell, *document->document_, document->file_name_, DocumentIcon(document->mime_type_));
+    }
+    case api::messageContact::ID: {
+      const auto &contact = static_cast<const api::messageContact *>(content)->contact_;
+      return contact ? buildContact(*contact) : nullptr;
+    }
+    default: return nullptr;
   }
-  if (const auto contact = media->sharedContact()) {
-    auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    auto *avatar = adw_avatar_new(40, U8(contact->firstName + ' ' + contact->lastName).c_str(), TRUE);
-    gtk_box_append(GTK_BOX(box), avatar);
-    auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    auto *name = gtk_label_new(U8(contact->firstName + ' ' + contact->lastName).c_str());
-    gtk_widget_add_css_class(name, "heading");
-    gtk_label_set_xalign(GTK_LABEL(name), 0);
-    gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
-    gtk_box_append(GTK_BOX(column), name);
-    auto *phone = gtk_label_new(U8(Ui::FormatPhone(contact->phoneNumber)).c_str());
-    gtk_label_set_selectable(GTK_LABEL(phone), FALSE);
-    gtk_label_set_xalign(GTK_LABEL(phone), 0);
-    gtk_label_set_ellipsize(GTK_LABEL(phone), PANGO_ELLIPSIZE_END);
-    gtk_box_append(GTK_BOX(column), phone);
-    gtk_box_append(GTK_BOX(box), column);
-    return box;
-  }
-  return nullptr;
 }
 
-// Photos and videos sent together: Telegram's own album layout (Ui::LayoutMediaGroup), drawn with GTK.
+GtkWidget *MessageWidget::buildContact(const api::contact &contact) {
+  const auto fullName = contact.last_name_.empty() ? contact.first_name_
+                                                   : contact.first_name_ + ' ' + contact.last_name_;
+  auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_box_append(GTK_BOX(box), adw_avatar_new(40, fullName.c_str(), TRUE));
+  auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  auto *name = gtk_label_new(fullName.c_str());
+  gtk_widget_add_css_class(name, "heading");
+  gtk_label_set_xalign(GTK_LABEL(name), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
+  gtk_box_append(GTK_BOX(column), name);
+  auto *phone = gtk_label_new(PhoneText(contact.phone_number_).c_str());
+  gtk_label_set_selectable(GTK_LABEL(phone), FALSE);
+  gtk_label_set_xalign(GTK_LABEL(phone), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(phone), PANGO_ELLIPSIZE_END);
+  gtk_box_append(GTK_BOX(column), phone);
+  gtk_box_append(GTK_BOX(box), column);
+  return box;
+}
+
+// Photos and videos sent together: Telegram's own album layout, drawn with GTK.
 GtkWidget *MessageWidget::buildAlbumGrid() {
-  auto sizes = std::vector<QSize>();
+  auto sizes = std::vector<Size>();
   sizes.reserve(_items.size());
   for (const auto &item : _items) {
     sizes.push_back(VisualSize(item));
   }
-  const auto layout = Ui::LayoutMediaGroup(sizes, kMaxPhotoWidth, kAlbumMinWidth, kAlbumSpacing);
-  auto rects = std::vector<QRect>();
+  const auto layout = LayoutAlbum(sizes, kMaxPhotoWidth, kAlbumMinWidth, kAlbumSpacing);
+  auto rects = std::vector<Rect>();
   auto children = std::vector<GtkWidget *>();
   for (auto i = 0; i != int(_items.size()) && i != int(layout.size()); ++i) {
-    const auto &rect = layout[i].geometry;
+    const auto &rect = layout[i];
     auto &cell = addCell(_items[i]);
-    children.push_back(buildGridCell(cell, rect.width(), rect.height()));
+    children.push_back(buildGridCell(cell, rect.width, rect.height));
     rects.push_back(rect);
   }
   const auto size = AlbumSize(rects);
@@ -626,55 +854,42 @@ GtkWidget *MessageWidget::buildAlbumGrid() {
 
 GtkWidget *MessageWidget::buildGridCell(Cell &cell, int width, int height) {
   const auto item = cell.item;
-  const auto media = item->media();
+  const auto content = ContentOf(item);
   auto *overlay = gtk_overlay_new();
   gtk_widget_add_css_class(overlay, "album-cell");
   gtk_widget_set_overflow(overlay, GTK_OVERFLOW_HIDDEN);
   cell.picture = MakeMediaPicture(width, height);
+  cell.width = width;
+  cell.height = height;
   gtk_overlay_set_child(GTK_OVERLAY(overlay), cell.picture);
-  if (const auto photo = media->photo()) {
-    cell.kind = PictureKind::Photo;
-    cell.photo = photo;
-    cell.photoMedia = photo->createMediaView();
-    cell.photoMedia->wanted(Data::PhotoSize::Large, item->fullId());
-    if (!refreshPicture(cell)) {
-      SetPictureImage(cell.picture, cell.photoMedia->thumbnailInline());
-    }
-    auto *click = gtk_gesture_click_new();
-    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      if (TapAllowed()) _chat->openPhoto(photo, item);
-    });
-    gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
-  } else if (const auto document = media->document()) {
-    cell.kind = PictureKind::Thumbnail;
-    cell.document = document;
-    cell.documentMedia = document->createMediaView();
-    cell.documentMedia->thumbnailWanted(item->fullId());
-    if (!refreshPicture(cell)) {
-      SetPictureImage(cell.picture, cell.documentMedia->thumbnailInline());
-    }
-    auto *play = gtk_image_new_from_icon_name(document->isImage() ? "image-x-generic-symbolic" : "media-playback-start-symbolic");
-    gtk_image_set_pixel_size(GTK_IMAGE(play), 24);
-    gtk_widget_add_css_class(play, "osd");
-    gtk_widget_add_css_class(play, "media-play");
-    gtk_widget_set_halign(play, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(play, GTK_ALIGN_CENTER);
-    gtk_widget_set_can_target(play, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), play);
-    cell.play = play;
-    cell.ring = MakeProgressRing();
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.ring);
-    auto *click = gtk_gesture_click_new();
-    _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-      if (TapAllowed()) _chat->openDocument(document, item);
-    });
-    gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
-  }
   cell.status = makeStatus();
+  const api::file *shown = nullptr;
+  if (const auto message = Cast<api::messagePhoto>(content); message && message->photo_) {
+    cell.kind = PictureKind::Photo;
+    SetMiniThumbnail(cell.picture, message->photo_->minithumbnail_.get());
+    if (const auto largest = LargestSize(*message->photo_)) {
+      shown = largest->photo_.get();
+      cell.pictureFile = shown->id_;
+      openOnTap(overlay, item, shown->id_);
+      watchPicture(cell, shown);
+    }
+  } else if (const auto visual = VisualOf(content); visual.file) {
+    cell.kind = PictureKind::Thumbnail;
+    SetMiniThumbnail(cell.picture, visual.mini);
+    shown = visual.file;
+    cell.documentFile = shown->id_;
+    cell.fallbackStatus = FallbackStatus(visual.duration, visual.gif);
+    addPlayIcon(cell, overlay);
+    openOnTap(overlay, item, shown->id_);
+    if (visual.thumbnail && visual.thumbnail->file_) {
+      cell.pictureFile = visual.thumbnail->file_->id_;
+      watchPicture(cell, visual.thumbnail->file_.get());
+    }
+  }
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.status);
   cell.widget = overlay;
   setupGestures(overlay, item, false);
-  updateStatus(cell);
+  if (shown) updateStatus(cell, FileState(_chat.store(), *shown));
   return overlay;
 }
 
@@ -690,73 +905,98 @@ GtkWidget *MessageWidget::makeStatus() {
   return status;
 }
 
-GtkWidget *MessageWidget::buildPhoto(Cell &cell, not_null<PhotoData *> photo, int maxWidth) {
-  const auto size = FitPhoto(photo->width(), photo->height(), maxWidth);
-  const auto item = cell.item;
+// `preview`: the picture of a link preview, which stays small; a tap on it still opens the largest size.
+GtkWidget *MessageWidget::buildPhoto(Cell &cell, const api::photo &photo, int maxWidth, bool preview) {
+  const auto largest = LargestSize(photo);
+  const auto size = largest ? FitPhoto(largest->width_, largest->height_, maxWidth) : FitPhoto(0, 0, maxWidth);
   auto *overlay = gtk_overlay_new();
-  cell.picture = MakeMediaPicture(size.width(), size.height());
+  cell.picture = MakeMediaPicture(size.width, size.height);
+  cell.width = size.width;
+  cell.height = size.height;
   gtk_widget_add_css_class(cell.picture, "message-photo");
-  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, size.width(), size.height()));
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, size.width, size.height));
   cell.kind = PictureKind::Photo;
-  cell.photo = photo;
-  cell.photoMedia = photo->createMediaView();
-  cell.photoMedia->wanted(Data::PhotoSize::Large, item->fullId());
-  if (!refreshPicture(cell)) {
-    SetPictureImage(cell.picture, cell.photoMedia->thumbnailInline());
-  }
-  auto *click = gtk_gesture_click_new();
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-    if (TapAllowed()) _chat->openPhoto(photo, item);
-  });
-  gtk_widget_add_controller(cell.picture, GTK_EVENT_CONTROLLER(click));
+  SetMiniThumbnail(cell.picture, photo.minithumbnail_.get());
   cell.status = makeStatus();
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.status);
-  updateStatus(cell);
+  const auto shown = preview ? FittingSize(photo, size.width, size.height) : largest;
+  if (shown) {
+    cell.pictureFile = shown->photo_->id_;
+    openOnTap(cell.picture, cell.item, largest->photo_->id_);
+    watchPicture(cell, shown->photo_.get());
+    updateStatus(cell, FileState(_chat.store(), *shown->photo_));
+  }
   return overlay;
 }
 
-GtkWidget *MessageWidget::buildSticker(Cell &cell, not_null<DocumentData *> document) {
+GtkWidget *MessageWidget::buildSticker(Cell &cell, const api::sticker &sticker) {
   auto width = kStickerSize, height = kStickerSize;
-  if (document->dimensions.width() > 0 && document->dimensions.height() > 0) {
-    const auto &d = document->dimensions;
-    if (d.width() > d.height()) {
-      height = kStickerSize * d.height() / d.width();
+  if (sticker.width_ > 0 && sticker.height_ > 0) {
+    if (sticker.width_ > sticker.height_) {
+      height = kStickerSize * sticker.height_ / sticker.width_;
     } else {
-      width = kStickerSize * d.width() / d.height();
+      width = kStickerSize * sticker.width_ / sticker.height_;
     }
   }
   cell.picture = MakeMediaPicture(width, height);
+  cell.width = width;
+  cell.height = height;
   gtk_picture_set_content_fit(GTK_PICTURE(cell.picture), GTK_CONTENT_FIT_CONTAIN);
   cell.kind = PictureKind::Sticker;
-  cell.documentMedia = document->createMediaView();
-  cell.documentMedia->thumbnailWanted(cell.item->fullId());
-  if ((document->sticker() && document->sticker()->isStatic())) {
-    cell.documentMedia->automaticLoad(cell.item->fullId(), cell.item);
+  const auto thumbnail = (sticker.thumbnail_ && sticker.thumbnail_->file_) ? sticker.thumbnail_->file_.get() : nullptr;
+  // Animated stickers stay with their thumbnail.
+  const auto isStatic = Cast<api::stickerFormatWebp>(sticker.format_.get()) != nullptr;
+  if (isStatic && sticker.sticker_) {
+    if (thumbnail) {
+      cell.thumbnailFile = thumbnail->id_;
+      watchPicture(cell, thumbnail);
+    }
+    cell.pictureFile = sticker.sticker_->id_;
+    watchPicture(cell, sticker.sticker_.get());
+  } else if (thumbnail) {
+    cell.pictureFile = thumbnail->id_;
+    watchPicture(cell, thumbnail);
   }
-  refreshPicture(cell);
   auto *frame = MakeMediaFrame(cell.picture, width, height);
   gtk_widget_set_halign(frame, GTK_ALIGN_START);
   return frame;
 }
 
-GtkWidget *MessageWidget::buildVideoThumb(Cell &cell, not_null<DocumentData *> document, int maxWidth) {
-  const auto size = FitPhoto(document->dimensions.width(), document->dimensions.height(), maxWidth);
-  const auto item = cell.item;
+GtkWidget *MessageWidget::buildVideoThumb(Cell &cell, int width, int height, const api::minithumbnail *mini,
+                                          const api::thumbnail *thumbnail, const api::file &file, int duration,
+                                          bool gif, bool round, int maxWidth) {
+  const auto size = FitPhoto(width, height, maxWidth);
   auto *overlay = gtk_overlay_new();
-  cell.picture = MakeMediaPicture(size.width(), size.height());
+  cell.picture = MakeMediaPicture(size.width, size.height);
+  cell.width = size.width;
+  cell.height = size.height;
   gtk_widget_add_css_class(cell.picture, "message-photo");
-  if (document->isVideoMessage()) {
+  if (round) {
     gtk_widget_add_css_class(cell.picture, "round-video");
   }
-  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, size.width(), size.height()));
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, size.width, size.height));
   cell.kind = PictureKind::Thumbnail;
-  cell.documentMedia = document->createMediaView();
-  cell.documentMedia->thumbnailWanted(item->fullId());
-  if (!refreshPicture(cell)) {
-    SetPictureImage(cell.picture, cell.documentMedia->thumbnailInline());
+  SetMiniThumbnail(cell.picture, mini);
+  cell.documentFile = file.id_;
+  cell.fallbackStatus = FallbackStatus(duration, gif);
+  addPlayIcon(cell, overlay);
+  cell.status = makeStatus();
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.status);
+  openOnTap(overlay, cell.item, file.id_);
+  if (thumbnail && thumbnail->file_) {
+    cell.pictureFile = thumbnail->file_->id_;
+    watchPicture(cell, thumbnail->file_.get());
   }
-  cell.document = document;
-  auto *play = gtk_image_new_from_icon_name(document->isImage() ? "image-x-generic-symbolic" : "media-playback-start-symbolic");
+  if (round) {
+    gtk_widget_set_halign(overlay, GTK_ALIGN_START);  // Stays round in a wider bubble.
+  }
+  updateStatus(cell, FileState(_chat.store(), file));
+  return overlay;
+}
+
+void MessageWidget::addPlayIcon(Cell &cell, GtkWidget *overlay) {
+  const auto image = Cast<api::messageDocument>(ContentOf(cell.item)) != nullptr;
+  auto *play = gtk_image_new_from_icon_name(image ? kImageIcon : kPlayIcon);
   gtk_image_set_pixel_size(GTK_IMAGE(play), 24);
   gtk_widget_add_css_class(play, "osd");
   gtk_widget_add_css_class(play, "media-play");
@@ -767,41 +1007,27 @@ GtkWidget *MessageWidget::buildVideoThumb(Cell &cell, not_null<DocumentData *> d
   cell.play = play;
   cell.ring = MakeProgressRing();
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.ring);
-  cell.status = makeStatus();
-  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.status);
-  auto *click = gtk_gesture_click_new();
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-    if (TapAllowed()) _chat->openDocument(document, item);
-  });
-  gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
-  if (document->isVideoMessage()) {
-    gtk_widget_set_halign(overlay, GTK_ALIGN_START);  // Stays round in a wider bubble.
-  }
-  updateStatus(cell);
-  return overlay;
 }
 
-GtkWidget *MessageWidget::buildDocument(Cell &cell, not_null<DocumentData *> document) {
-  const auto item = cell.item;
-  cell.document = document;
+GtkWidget *MessageWidget::buildDocument(Cell &cell, const api::file &file, const std::string &name, const char *icon) {
+  cell.documentFile = file.id_;
   auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_add_css_class(box, "document");
-  cell.documentButton = gtk_button_new_from_icon_name(DocumentIcon(document));
+  cell.documentButton = gtk_button_new_from_icon_name(icon);
+  g_object_set_data(G_OBJECT(cell.documentButton), kIconKey, const_cast<char *>(icon));
   gtk_widget_add_css_class(cell.documentButton, "circular");
   gtk_widget_add_css_class(cell.documentButton, "document-button");
   gtk_widget_set_valign(cell.documentButton, GTK_ALIGN_CENTER);
-  _signals.clicked(cell.documentButton, [=] {
-    if (TapAllowed()) _chat->openDocument(document, item);
-  });
+  openOnTap(cell.documentButton, cell.item, file.id_);
   gtk_box_append(GTK_BOX(box), cell.documentButton);
   auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
-  auto *name = gtk_label_new(U8(document->filename().isEmpty() ? tr::lng_in_dlg_file(tr::now) : document->filename()).c_str());
-  gtk_label_set_xalign(GTK_LABEL(name), 0);
-  gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
-  gtk_label_set_max_width_chars(GTK_LABEL(name), 28);
-  gtk_widget_add_css_class(name, "heading");
-  gtk_box_append(GTK_BOX(column), name);
+  auto *nameLabel = gtk_label_new(name.empty() ? Tr("lng_in_dlg_file").c_str() : name.c_str());
+  gtk_label_set_xalign(GTK_LABEL(nameLabel), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(nameLabel), PANGO_ELLIPSIZE_MIDDLE);
+  gtk_label_set_max_width_chars(GTK_LABEL(nameLabel), 28);
+  gtk_widget_add_css_class(nameLabel, "heading");
+  gtk_box_append(GTK_BOX(column), nameLabel);
   cell.loadProgress = gtk_progress_bar_new();
   gtk_widget_add_css_class(cell.loadProgress, "download-progress");
   gtk_widget_set_visible(cell.loadProgress, FALSE);
@@ -812,78 +1038,73 @@ GtkWidget *MessageWidget::buildDocument(Cell &cell, not_null<DocumentData *> doc
   gtk_widget_add_css_class(cell.documentStatus, "caption");
   gtk_box_append(GTK_BOX(column), cell.documentStatus);
   gtk_box_append(GTK_BOX(box), column);
-  updateDocumentState(cell);
+  updateDocumentState(cell, FileState(_chat.store(), file));
   return box;
 }
 
-GtkWidget *MessageWidget::buildVoice(Cell &cell, not_null<DocumentData *> document) {
-  const auto item = cell.item;
-  cell.document = document;
+// Voice messages and music: the button, a title for music, and the length. The player isn't here yet: a tap hands
+// the file over like any other.
+GtkWidget *MessageWidget::buildVoice(Cell &cell, const api::file &file, int duration, const std::string &title) {
+  cell.documentFile = file.id_;
+  cell.voice = true;
+  cell.duration = duration;
   auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
   gtk_widget_add_css_class(box, "voice");
-  cell.documentButton = gtk_button_new_from_icon_name("media-playback-start-symbolic");
+  cell.documentButton = gtk_button_new_from_icon_name(kPlayIcon);
+  g_object_set_data(G_OBJECT(cell.documentButton), kIconKey, const_cast<char *>(kPlayIcon));
   gtk_widget_add_css_class(cell.documentButton, "circular");
   gtk_widget_add_css_class(cell.documentButton, "suggested-action");
   gtk_widget_set_valign(cell.documentButton, GTK_ALIGN_CENTER);
-  const auto raw = &cell;
-  _signals.clicked(cell.documentButton, [=] {
-    if (!TapAllowed()) return;
-    raw->playRequested = true;
-    Media::Player::instance()->playPause(AudioMsgId(document, item->fullId()));
-  });
+  openOnTap(cell.documentButton, cell.item, file.id_);
   gtk_box_append(GTK_BOX(box), cell.documentButton);
   auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
   gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
   gtk_widget_set_hexpand(column, TRUE);
-  if (const auto song = document->song(); song && !document->isVoiceMessage()) {
-    auto title = song->title.isEmpty() ? document->filename() : song->title;
-    if (!song->performer.isEmpty()) {
-      title = song->performer + u" – "_q + title;
-    }
-    auto *name = gtk_label_new(U8(title).c_str());
+  if (!title.empty()) {
+    auto *name = gtk_label_new(title.c_str());
     gtk_label_set_xalign(GTK_LABEL(name), 0);
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
     gtk_label_set_max_width_chars(GTK_LABEL(name), 26);
     gtk_widget_add_css_class(name, "heading");
     gtk_box_append(GTK_BOX(column), name);
   }
-  // The position, and how much of the track has come while it streams (the fill level).
-  cell.voiceProgress = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0., 1., 0.001);
-  gtk_scale_set_draw_value(GTK_SCALE(cell.voiceProgress), FALSE);
-  gtk_range_set_restrict_to_fill_level(GTK_RANGE(cell.voiceProgress), FALSE);
-  gtk_widget_set_focusable(cell.voiceProgress, FALSE);
-  gtk_widget_add_css_class(cell.voiceProgress, "voice-progress");
-  DisableControllers(cell.voiceProgress);
-  setupSeeking(cell);
-  gtk_box_append(GTK_BOX(column), cell.voiceProgress);
-  cell.documentStatus = gtk_label_new(U8(Ui::FormatDurationText(document->duration() / 1000)).c_str());
+  cell.loadProgress = gtk_progress_bar_new();
+  gtk_widget_add_css_class(cell.loadProgress, "download-progress");
+  gtk_widget_set_visible(cell.loadProgress, FALSE);
+  gtk_box_append(GTK_BOX(column), cell.loadProgress);
+  cell.documentStatus = gtk_label_new(nullptr);
   gtk_label_set_xalign(GTK_LABEL(cell.documentStatus), 0);
   gtk_widget_add_css_class(cell.documentStatus, "dim-label");
   gtk_widget_add_css_class(cell.documentStatus, "caption");
   gtk_box_append(GTK_BOX(column), cell.documentStatus);
   gtk_box_append(GTK_BOX(box), column);
-  updatePlayback(Media::Player::instance()->getState(document->isVoiceMessage() ? AudioMsgId::Type::Voice
-                                                                                : AudioMsgId::Type::Song));
+  updateDocumentState(cell, FileState(_chat.store(), file));
   return box;
 }
 
-GtkWidget *MessageWidget::buildWebPage(not_null<HistoryItem *> item) {
-  const auto media = item->media();
-  const auto page = media ? media->webpage() : nullptr;
-  if (!page || page->pendingTill || page->failed || (page->title.isEmpty() && page->description.text.isEmpty() && !page->photo)) {
+GtkWidget *MessageWidget::buildWebPage(MessageItem *item) {
+  const auto message = Cast<api::messageText>(ContentOf(item));
+  const auto page = message ? message->link_preview_.get() : nullptr;
+  if (!page) {
+    return nullptr;
+  }
+  const auto photo = PreviewPhoto(page->type_.get());
+  const auto description = (page->description_ && !page->description_->text_.empty()) ? page->description_.get()
+                                                                                      : nullptr;
+  if (page->title_.empty() && !description && !photo) {
     return nullptr;
   }
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_add_css_class(box, "webpage");
-  if (!page->siteName.isEmpty()) {
-    auto *site = gtk_label_new(U8(page->siteName).c_str());
+  if (!page->site_name_.empty()) {
+    auto *site = gtk_label_new(page->site_name_.c_str());
     gtk_widget_add_css_class(site, "webpage-site");
     gtk_label_set_xalign(GTK_LABEL(site), 0);
     gtk_label_set_ellipsize(GTK_LABEL(site), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(box), site);
   }
-  if (!page->title.isEmpty()) {
-    auto *title = gtk_label_new(U8(page->title).c_str());
+  if (!page->title_.empty()) {
+    auto *title = gtk_label_new(page->title_.c_str());
     gtk_widget_add_css_class(title, "heading");
     gtk_label_set_xalign(GTK_LABEL(title), 0);
     gtk_label_set_wrap(GTK_LABEL(title), TRUE);
@@ -891,182 +1112,26 @@ GtkWidget *MessageWidget::buildWebPage(not_null<HistoryItem *> item) {
     gtk_label_set_max_width_chars(GTK_LABEL(title), 44);
     gtk_box_append(GTK_BOX(box), title);
   }
-  if (!page->description.text.isEmpty()) {
-    auto description = page->description;
-    if (description.text.size() > 300) {
-      description = Ui::Text::Mid(description, 0, 300);
-      description.text += QChar(0x2026);
-    }
-    gtk_box_append(GTK_BOX(box), MakeTextLabel(description));
+  if (description) {
+    // A cut description goes without its entities: they count in the whole text.
+    const auto cut = Utf8Offset(description->text_, kDescriptionLimit);
+    gtk_box_append(GTK_BOX(box), cut < description->text_.size()
+                                     ? MakeTextLabel(description->text_.substr(0, cut) + "…")
+                                     : MakeTextLabel(*description));
   }
-  if (page->photo && std::none_of(_cells.begin(), _cells.end(), [](const auto &cell) { return cell->picture != nullptr; })) {
-    gtk_box_append(GTK_BOX(box), buildPhoto(addCell(item), page->photo, kMaxPhotoWidth - 20));
-  }
-  auto url = page->url;
-  auto open = Fn<void()>();
-  if (item->isSponsored()) {
-    // A sponsored message (see ChatView::showSponsored): the core reports the click, the button names the action.
-    gtk_widget_add_css_class(box, "sponsored");
-    auto &sponsored = item->history()->session().sponsoredMessages();
-    const auto details = sponsored.lookupDetails(item->fullId());
-    if (!details.link.isEmpty()) url = details.link;
-    const auto session = &item->history()->session();
-    const auto id = item->fullId();
-    open = [=] {
-      session->sponsoredMessages().clicked(id, false, false);
-      HandleLink(url);
-    };
-    if (!url.isEmpty()) {
-      auto *button = gtk_button_new_with_label(
-          U8(details.buttonText.isEmpty() ? tr::lng_open_link(tr::now) : details.buttonText).c_str());
-      gtk_widget_add_css_class(button, "sponsored-button");
-      gtk_widget_set_margin_top(button, 4);
-      _signals.connect<void(GtkButton *)>(button, "clicked", [=](GtkButton *) { open(); });
-      gtk_box_append(GTK_BOX(box), button);
-    }
-    for (const auto &info : details.info) {
-      auto *label = MakeTextLabel(info);
-      gtk_widget_add_css_class(label, "dim-label");
-      gtk_widget_add_css_class(label, "caption");
-      gtk_box_append(GTK_BOX(box), label);
-    }
-  } else {
-    open = [=] { HandleLink(url); };
+  if (photo) {
+    gtk_box_append(GTK_BOX(box), buildPhoto(addCell(item), *photo, kMaxPhotoWidth - 20, true));
   }
   auto *click = gtk_gesture_click_new();
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *g, int, double, double) {
-    // Taps on the photo open the viewer, the rest opens the page.
-    if (TapAllowed() && !url.isEmpty()) open();
-  });
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      click, "released", [=, url = page->url_](GtkGestureClick *, int, double x, double y) {
+        // Taps on the photo open the viewer, the rest opens the page.
+        if (TapAllowed() && !url.empty() && !GTK_IS_PICTURE(gtk_widget_pick(box, x, y, GTK_PICK_DEFAULT))) {
+          HandleLink(url);
+        }
+      });
   gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   return box;
-}
-
-GeoPointLocation LocationMapImage(const Data::LocationPoint &point) {
-  auto result = GeoPointLocation();
-  result.lat = point.lat();
-  result.lon = point.lon();
-  result.access = point.accessHash();
-  result.width = kMapWidth;
-  result.height = kMapHeight;
-  result.zoom = kMapZoom;
-  result.scale = kMapScale;
-  return result;
-}
-
-// A location: the map with the pin (a live location: with the avatar of whoever shares it, and the time left),
-// the venue's name and address, or "Live Location" and when it was updated. A tap opens it on a map.
-GtkWidget *MessageWidget::buildLocation(Cell &cell, not_null<Data::MediaLocation *> location) {
-  const auto item = cell.item;
-  const auto session = &item->history()->session();
-  const auto &point = location->point();
-  const auto live = LiveLocationActive(item);
-  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-  gtk_widget_add_css_class(box, "location");
-
-  auto *overlay = gtk_overlay_new();
-  cell.picture = MakeMediaPicture(kMapWidth, kMapHeight);
-  gtk_widget_add_css_class(cell.picture, "message-photo");
-  gtk_widget_add_css_class(cell.picture, "location-map");
-  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, kMapWidth, kMapHeight));
-  cell.kind = PictureKind::Map;
-  const auto geo = LocationMapImage(point);
-  cell.map = std::make_unique<Data::CloudImage>(
-      session, ImageWithLocation{.location = ImageLocation({geo}, kMapWidth * kMapScale, kMapHeight * kMapScale)});
-  cell.mapView = cell.map->createView();
-  cell.map->load(session, item->fullId());
-  const auto from = item->displayFrom() ? item->displayFrom() : item->from().get();
-  auto *pin = MakeMapPin(live ? MakeAvatar(from, 30) : nullptr);
-  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), pin);
-  if (live) {
-    cell.liveRemaining = gtk_label_new(nullptr);
-    gtk_widget_add_css_class(cell.liveRemaining, "osd");
-    gtk_widget_add_css_class(cell.liveRemaining, "media-status");
-    gtk_widget_add_css_class(cell.liveRemaining, "numeric");
-    gtk_widget_set_halign(cell.liveRemaining, GTK_ALIGN_END);
-    gtk_widget_set_valign(cell.liveRemaining, GTK_ALIGN_START);
-    gtk_widget_set_can_target(cell.liveRemaining, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.liveRemaining);
-  }
-  auto *click = gtk_gesture_click_new();
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double, double) {
-    if (TapAllowed()) _chat->openLocation(item);
-  });
-  gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
-  gtk_box_append(GTK_BOX(box), overlay);
-
-  const auto addLabel = [&](const QString &text, const char *cssClass) {
-    auto *label = gtk_label_new(U8(text).c_str());
-    gtk_widget_add_css_class(label, cssClass);
-    gtk_label_set_xalign(GTK_LABEL(label), 0);
-    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
-    gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_max_width_chars(GTK_LABEL(label), 36);
-    gtk_box_append(GTK_BOX(box), label);
-    return label;
-  };
-  if (live) {
-    addLabel(tr::lng_live_location(tr::now), "heading");
-    cell.liveStatus = addLabel(QString(), "dim-label");
-    gtk_widget_add_css_class(cell.liveStatus, "caption");
-  } else if (!location->title().isEmpty()) {
-    addLabel(location->title(), "heading");
-    if (!location->description().isEmpty()) {
-      gtk_widget_add_css_class(addLabel(location->description(), "dim-label"), "caption");
-    }
-  }
-  return box;
-}
-
-// A live location's "updated N minutes ago" and the time left go on by themselves; when its time is over it
-// becomes a plain location.
-void MessageWidget::refreshLive() {
-  auto any = false;
-  for (const auto &cell : _cells) {
-    if (!cell->liveStatus) continue;
-    if (!LiveLocationActive(cell->item)) {
-      crl::on_main(_chat.get(), [chat = _chat, id = cell->item->fullId()] { chat->refreshMessage(id); });
-      return;
-    }
-    any = true;
-    gtk_label_set_text(GTK_LABEL(cell->liveStatus), U8(LiveLocationUpdated(cell->item)).c_str());
-    if (cell->liveRemaining) {
-      gtk_label_set_text(GTK_LABEL(cell->liveRemaining), U8(LiveLocationRemaining(cell->item)).c_str());
-    }
-  }
-  if (any && !_liveTimer) {
-    _liveTimer = g_timeout_add_seconds(30, +[](gpointer data) -> gboolean {
-      RunCoreEvent([&] { static_cast<MessageWidget *>(data)->refreshLive(); });
-      return G_SOURCE_CONTINUE;
-    }, this);
-  } else if (!any && _liveTimer) {
-    g_source_remove(base::take(_liveTimer));
-  }
-}
-
-bool MessageWidget::refreshReactions() {
-  if (!_reactions) return false;
-  const auto item = mainItem();
-  auto key = ReactionsKey(item);
-  if (key == _reactionsKey) return false;
-  _reactionsKey = std::move(key);
-  ClearBox(_reactions);
-  auto *bar = MakeReactionsBar(item, _chat->window());
-  if (bar) gtk_box_append(GTK_BOX(_reactions), bar);
-  gtk_widget_set_visible(_reactions, bar != nullptr);
-  return true;
-}
-
-// A double tap on a message sends the quick reaction, as in the phone apps.
-void MessageWidget::setupDoubleTap(GtkWidget *bubble) {
-  auto *click = gtk_gesture_click_new();
-  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "pressed", [=](GtkGestureClick *, int count, double x, double y) {
-    if (count != 2 || !TapAllowed()) return;
-    if (InteractiveTarget(gtk_widget_pick(bubble, x, y, GTK_PICK_DEFAULT), bubble)) return;
-    ToggleQuickReaction(mainItem());
-  });
-  gtk_widget_add_controller(bubble, GTK_EVENT_CONTROLLER(click));
 }
 
 GtkWidget *MessageWidget::buildFooter() {
@@ -1087,34 +1152,42 @@ GtkWidget *MessageWidget::buildFooter() {
 
 // An album's time is its last message's; it is sent when all of it is, read when all of it is.
 void MessageWidget::refreshFooter() {
-  if (!_footer) {
+  const auto last = _items.back();
+  if (!_footer || !last->data) {
     return;
   }
-  const auto last = _items.back();
-  QString text;
-  if (std::any_of(_items.begin(), _items.end(), [](not_null<HistoryItem *> item) {
-        return item->Has<HistoryMessageEdited>() && !item->hideEditedBadge();
-      })) {
-    text = tr::lng_edited(tr::now) + ' ';
+  auto &store = _chat.store();
+  const auto chat = store.chat(_chat.chat());
+  const auto broadcast = chat && chat->kind == Td::ChatKind::Channel;
+  const auto any = [&](auto check) {
+    return std::any_of(_items.begin(), _items.end(),
+                       [&](const MessageItem *item) { return item->data && check(*item->data); });
+  };
+  auto text = std::string();
+  if (any([](const api::message &message) { return message.edit_date_ > 0; })) {
+    text = Tr("lng_edited") + ' ';
   }
-  if (const auto views = last->viewsCount(); views > 0 && last->history()->peer->isBroadcast()) {
-    text = QString::fromUtf8("\xF0\x9F\x91\x81 ") + Lang::FormatCountToShort(views).string + u"  "_q + text;
+  const auto info = last->data->interaction_info_.get();
+  if (const auto views = info ? info->view_count_ : 0; views > 0 && broadcast) {
+    text = "\xF0\x9F\x91\x81 " + ShortCount(views) + "  " + text;
   }
-  if (const auto signature = last->Get<HistoryMessageSigned>(); signature && !signature->author.isEmpty()) {
-    text = signature->author + u", "_q + text;
+  if (!last->data->author_signature_.empty()) {
+    text = last->data->author_signature_ + ", " + text;
   }
-  text += FormatTime(last->date());
-  gtk_label_set_text(GTK_LABEL(_footerTime), U8(text).c_str());
+  text += Td::FormatTime(last->data->date_);
+  gtk_label_set_text(GTK_LABEL(_footerTime), text.c_str());
 
   const char *icon = nullptr;
-  const auto history = last->history();
-  const auto any = [&](auto check) { return std::any_of(_items.begin(), _items.end(), check); };
-  if (last->out() && !history->peer->isBroadcast()) {
-    if (any([](not_null<HistoryItem *> item) { return item->hasFailed(); })) {
+  if (last->data->is_outgoing_ && !broadcast) {
+    const auto self = chat && chat->kind == Td::ChatKind::Private && chat->peerId == store.selfId();
+    const auto readOutbox = chat ? chat->readOutbox : 0;
+    if (any([](const api::message &message) {
+          return Cast<api::messageSendingStateFailed>(message.sending_state_.get()) != nullptr;
+        })) {
       icon = "dialog-error-symbolic";
-    } else if (any([](not_null<HistoryItem *> item) { return item->isSending(); })) {
-      icon = "contrail-clock-symbolic";
-    } else if (!history->peer->isSelf() && any([&](not_null<HistoryItem *> item) { return item->unread(history); })) {
+    } else if (any([](const api::message &message) { return message.sending_state_ != nullptr; })) {
+      icon = kClockIcon;
+    } else if (!self && any([&](const api::message &message) { return message.id_ > readOutbox; })) {
       icon = "contrail-check-symbolic";
     } else {
       icon = "contrail-check-double-symbolic";
@@ -1126,225 +1199,98 @@ void MessageWidget::refreshFooter() {
   }
 }
 
-bool MessageWidget::refreshMedia() {
-  auto done = true;
-  for (const auto &cell : _cells) {
-    updateDocumentState(*cell);
-    // A download or an upload going on is followed until it ends.
-    if (updateStatus(*cell)) done = false;
-    if (!refreshPicture(*cell)) done = false;
+// The file of a picture this cell shows: there it is, or it is asked for. The caller has put its id in the cell.
+void MessageWidget::watchPicture(Cell &cell, const api::file *file) {
+  if (!file) return;
+  auto &store = _chat.store();
+  WantPicture(file->id_);
+  const auto state = FileState(store, *file);
+  if (state.complete) {
+    showPicture(cell, state);
+  } else {
+    store.download(file->id_, kPictureDownloadPriority);
   }
-  return done;
 }
 
-bool MessageWidget::refreshPicture(Cell &cell) {
-  if (!cell.picture || cell.pictureFinal) {
-    return true;
-  }
-  Image *image = nullptr;
-  const auto document = cell.item->media() ? cell.item->media()->document() : nullptr;
-  const auto staticSticker = document && document->sticker() && document->sticker()->isStatic();
-  switch (cell.kind) {
-    case PictureKind::Photo: image = cell.photoMedia ? cell.photoMedia->image(Data::PhotoSize::Large) : nullptr; break;
-    case PictureKind::Sticker:
-      if (cell.documentMedia) {
-        if (staticSticker) {
-          cell.documentMedia->checkStickerLarge();
-          image = cell.documentMedia->getStickerLarge();
-        }
-        if (!image) {
-          if (auto *thumb = cell.documentMedia->thumbnail()) {
-            SetPictureImage(cell.picture, thumb);
-          }
-          // Animated stickers stay with their thumbnail.
-          return !staticSticker;
-        }
-      }
-      break;
-    case PictureKind::Thumbnail: image = cell.documentMedia ? cell.documentMedia->thumbnail() : nullptr; break;
-    case PictureKind::Map:
-      if (!cell.mapView || cell.mapView->isNull()) return false;
-      SetPictureQImage(cell.picture, *cell.mapView);
-      cell.pictureFinal = true;
-      cell.mapView = nullptr;
-      cell.map = nullptr;
-      return true;
-    case PictureKind::None: break;
-  }
-  if (!image) {
-    return false;
-  }
-  SetPictureImage(cell.picture, image);
-  cell.pictureFinal = true;
-  // The texture holds what is shown: the decoded image (up to 2560 px) needn't stay in memory.
-  cell.photoMedia = nullptr;
-  cell.documentMedia = nullptr;
-  return true;
-}
-
-void MessageWidget::updateDocumentState(Cell &cell) {
-  const auto document = cell.document;
-  if (!document || !cell.documentStatus || cell.voiceProgress) {
+void MessageWidget::showPicture(Cell &cell, const Td::File &file) {
+  if (!cell.picture || cell.pictureFinal || !file.complete || file.path.empty()) {
     return;
   }
-  QString status;
-  const char *icon = DocumentIcon(document);
-  if (const auto upload = UploadProgress(cell.item)) {
-    status = Percent(*upload);
-    icon = "contrail-clock-symbolic";
-  } else if (document->loading()) {
-    status = DownloadText(document->loadOffset(), document->size);
-    icon = "process-stop-symbolic";
-  } else if (!document->filepath(true).isEmpty()) {
-    status = Ui::FormatSizeText(document->size);
-  } else {
-    status = Ui::FormatSizeText(document->size);
-    icon = "folder-download-symbolic";
-  }
-  gtk_label_set_text(GTK_LABEL(cell.documentStatus), U8(status).c_str());
-  if (cell.loadProgress) {
-    gtk_widget_set_visible(cell.loadProgress, document->loading());
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell.loadProgress), DownloadFraction(document->loadOffset(), document->size));
-  }
-  if (cell.documentButton) {
-    gtk_button_set_icon_name(GTK_BUTTON(cell.documentButton), icon);
+  if (file.id == cell.pictureFile) {
+    // The decode runs on, and what it gives lands in the picture whatever happens to the cell.
+    cell.pictureFinal = true;
+    LoadPicture(cell.picture, file.path, kQualityFull);
+  } else if (file.id == cell.thumbnailFile) {
+    LoadPicture(cell.picture, file.path, kQualityThumbnail);
   }
 }
 
-// Over a picture: how much of it is uploaded or downloaded; a video's length otherwise.
-bool MessageWidget::updateStatus(Cell &cell) {
-  const auto upload = UploadProgress(cell.item);
-  const auto downloading = cell.document && cell.document->loading();
-  const auto transfer = upload || downloading || (cell.photo && !cell.pictureFinal && cell.photo->displayLoading());
+void MessageWidget::fileChanged(const Td::File &file) {
+  for (const auto &cell : _cells) {
+    if (file.id == cell->pictureFile || file.id == cell->thumbnailFile) {
+      showPicture(*cell, file);
+    }
+    if (file.id == cell->documentFile) {
+      updateDocumentState(*cell, file);
+    }
+    updateStatus(*cell, file);
+  }
+}
+
+void MessageWidget::updateDocumentState(Cell &cell, const Td::File &file) {
+  if (!cell.documentStatus || file.id != cell.documentFile) {
+    return;
+  }
+  const auto downloading = file.downloading && !file.complete;
+  const auto sending = cell.item->data && Cast<api::messageSendingStatePending>(cell.item->data->sending_state_.get());
+  auto icon = static_cast<const char *>(g_object_get_data(G_OBJECT(cell.documentButton), kIconKey));
+  auto status = cell.voice ? FormatDuration(cell.duration) : FormatSize(file.size);
+  if (sending) {
+    icon = kClockIcon;
+  } else if (downloading) {
+    status = DownloadText(file.downloaded, file.size);
+    icon = "process-stop-symbolic";
+  } else if (!file.complete && !cell.voice) {
+    icon = "folder-download-symbolic";
+  }
+  gtk_label_set_text(GTK_LABEL(cell.documentStatus), status.c_str());
+  if (cell.loadProgress) {
+    gtk_widget_set_visible(cell.loadProgress, downloading);
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell.loadProgress), DownloadFraction(file.downloaded, file.size));
+  }
+  gtk_button_set_icon_name(GTK_BUTTON(cell.documentButton), icon);
+}
+
+// Over a picture: how much of it is downloaded; a video's length otherwise.
+void MessageWidget::updateStatus(Cell &cell, const Td::File &file) {
+  const auto video = cell.ring && file.id == cell.documentFile;
+  const auto photo = cell.kind == PictureKind::Photo && file.id == cell.pictureFile;
+  if (!video && !photo) {
+    return;
+  }
+  const auto downloading = file.downloading && !file.complete;
   if (cell.ring) {
     // A video downloading: how much of it came instead of the play button.
     gtk_widget_set_visible(cell.ring, downloading);
     if (cell.play) gtk_widget_set_visible(cell.play, !downloading);
-    if (downloading) SetRingFraction(cell.ring, DownloadFraction(cell.document->loadOffset(), cell.document->size));
+    if (downloading) SetRingFraction(cell.ring, DownloadFraction(file.downloaded, file.size));
   }
-  if (!cell.status) return transfer;
-  QString text;
-  if (upload) {
-    text = Percent(*upload);
-  } else if (const auto document = cell.document) {
+  if (!cell.status) return;
+  auto text = std::string();
+  if (video) {
+    text = cell.fallbackStatus;
     if (downloading) {
-      text = DownloadText(document->loadOffset(), document->size);
-      if (_chat->opensWhenLoaded(document)) {
-        text += u"\n"_q + Translated("Opens when downloaded", "Откроется после загрузки", "Відкриється після завантаження");
+      text = DownloadText(file.downloaded, file.size);
+      if (_chat.opensWhenLoaded(file.id)) {
+        text += "\n";
+        text += Translated("Opens when downloaded", "Откроется после загрузки", "Відкриється після завантаження");
       }
-    } else if (const auto duration = document->duration(); duration > 0) {
-      text = Ui::FormatDurationText(duration / 1000);
-    } else if (document->isAnimation()) {
-      text = u"GIF"_q;
     }
-  } else if (const auto photo = cell.photo; photo && !cell.pictureFinal && photo->displayLoading()) {
-    text = Percent(photo->progress());
+  } else if (downloading) {
+    text = Percent(DownloadFraction(file.downloaded, file.size));
   }
-  gtk_label_set_text(GTK_LABEL(cell.status), U8(text).c_str());
-  gtk_widget_set_visible(cell.status, !text.isEmpty());
-  return transfer;
-}
-
-void MessageWidget::updatePlayback(const Media::Player::TrackState &state) {
-  using namespace Media::Player;
-  for (const auto &cell : _cells) {
-    // While the finger or the mouse moves the position, the bar shows where it is.
-    if (!cell->voiceProgress || !cell->document || cell->seeking) {
-      continue;
-    }
-    const auto document = cell->document;
-    const auto mine = (state.id.audio() == document && state.id.contextId() == cell->item->fullId());
-    const auto playing = mine && ShowPauseIcon(state.state);
-    const auto range = GTK_RANGE(cell->voiceProgress);
-    gtk_button_set_icon_name(GTK_BUTTON(cell->documentButton), playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic");
-    // Started and not playing yet: the start of the file is being downloaded.
-    if (!mine || state.state != State::Stopped) cell->playRequested = false;
-    if (mine && !IsStoppedOrStopping(state.state) && state.length > 0) {
-      gtk_range_set_value(range, double(state.position) / state.length);
-      gtk_range_set_show_fill_level(range, state.receivedTill > 0);
-      gtk_range_set_fill_level(range, BufferedFraction(state.receivedTill, state.length));
-      const auto frequency = state.frequency ? state.frequency : kDefaultFrequency;
-      auto text = Ui::FormatDurationText(state.position / frequency) + u" / "_q + Ui::FormatDurationText(state.length / frequency);
-      if (!IsPausedOrPausing(state.state) && WaitingForData(state.position, state.receivedTill, state.length)) {
-        text = LoadingText() + u" "_q + text;
-      }
-      gtk_label_set_text(GTK_LABEL(cell->documentStatus), U8(text).c_str());
-    } else {
-      gtk_range_set_value(range, 0.);
-      gtk_range_set_show_fill_level(range, FALSE);
-      const auto text = cell->playRequested ? LoadingText() : Ui::FormatDurationText(document->duration() / 1000);
-      gtk_label_set_text(GTK_LABEL(cell->documentStatus), U8(text).c_str());
-    }
-  }
-}
-
-// A tap on the bar of a voice message or a song plays it from there, a drag along it moves the position
-// (the player pauses while it moves). A drag that starts vertically scrolls the chat.
-void MessageWidget::setupSeeking(Cell &cell) {
-  auto *bar = cell.voiceProgress;
-  const auto raw = &cell;
-  const auto id = AudioMsgId(cell.document, cell.item->fullId());
-  const auto current = [=] {
-    const auto state = Media::Player::instance()->getState(id.type());
-    return state.id.audio() == id.audio() && state.id.contextId() == id.contextId()
-           && !Media::Player::IsStoppedOrStopping(state.state);
-  };
-  const auto show = [=](double fraction) {
-    gtk_range_set_value(GTK_RANGE(bar), fraction);
-    if (const auto duration = raw->document->duration(); duration > 0) {
-      const auto text = Ui::FormatDurationText(int64(fraction * duration) / 1000) + u" / "_q
-                        + Ui::FormatDurationText(duration / 1000);
-      gtk_label_set_text(GTK_LABEL(raw->documentStatus), U8(text).c_str());
-    }
-  };
-  const auto seek = [=](double fraction) {
-    auto *player = Media::Player::instance().get();
-    if (!current()) {
-      raw->playRequested = true;
-      player->play(id);
-    }
-    player->finishSeeking(id.type(), fraction);
-  };
-  auto *click = gtk_gesture_click_new();
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(click, "released", [=](GtkGestureClick *, int, double x, double) {
-    if (!TapAllowed() || raw->seeking) return;
-    const auto fraction = SeekFraction(x, gtk_widget_get_width(bar));
-    show(fraction);
-    seek(fraction);
-  });
-  gtk_widget_add_controller(bar, GTK_EVENT_CONTROLLER(click));
-  auto *pan = gtk_gesture_pan_new(GTK_ORIENTATION_HORIZONTAL);
-  const auto position = [=](GtkGestureDrag *drag) {
-    double x = 0, y = 0, dx = 0, dy = 0;
-    gtk_gesture_drag_get_start_point(drag, &x, &y);
-    gtk_gesture_drag_get_offset(drag, &dx, &dy);
-    return SeekFraction(x + dx, gtk_widget_get_width(bar));
-  };
-  _signals.connect<void(GtkGesturePan *, GtkPanDirection, double)>(pan, "pan", [=](GtkGesturePan *gesture, GtkPanDirection, double) {
-    if (!raw->seeking) {
-      // Wins over the swipe to reply and the scrolling.
-      gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
-      raw->seeking = true;
-      if (current()) Media::Player::instance()->startSeeking(id.type());
-    }
-    show(position(GTK_GESTURE_DRAG(gesture)));
-  });
-  _signals.connect<void(GtkGestureDrag *, double, double)>(pan, "drag-end", [=](GtkGestureDrag *gesture, double, double) {
-    if (std::exchange(raw->seeking, false)) seek(position(gesture));
-  });
-  _signals.connect<void(GtkGesture *, GdkEventSequence *)>(pan, "cancel", [=](GtkGesture *, GdkEventSequence *) {
-    if (std::exchange(raw->seeking, false)) Media::Player::instance()->cancelSeeking(id.type());
-  });
-  gtk_widget_add_controller(bar, GTK_EVENT_CONTROLLER(pan));
-}
-
-// The message goes (or is rebuilt) while its bar is being dragged: the player mustn't stay paused for it.
-void MessageWidget::cancelSeeking() {
-  for (const auto &cell : _cells) {
-    if (std::exchange(cell->seeking, false)) {
-      Media::Player::instance()->cancelSeeking(AudioMsgId(cell->document, cell->item->fullId()).type());
-    }
-  }
+  gtk_label_set_text(GTK_LABEL(cell.status), text.c_str());
+  gtk_widget_set_visible(cell.status, !text.empty());
 }
 
 void MessageWidget::setFirstInGroup(bool first) {
@@ -1354,15 +1300,16 @@ void MessageWidget::setFirstInGroup(bool first) {
   if (_avatar) {
     gtk_widget_set_opacity(_avatar, first ? 1. : 0.);
   }
-  if (auto *line = _content; line && !_items.front()->isService()) {
+  if (auto *line = _content; line && !isService()) {
     gtk_widget_set_margin_top(line, first ? 6 : 1);
   }
 }
 
 // A reply or a link to one message of an album lights up its cell only.
-void MessageWidget::highlight(const HistoryItem *item) {
+void MessageWidget::highlight(const MessageItem *item) {
   if (_highlightTimeout) {
     g_source_remove(_highlightTimeout);
+    _highlightTimeout = 0;
     if (_highlighted) gtk_widget_remove_css_class(_highlighted, "highlighted");
   }
   _highlighted = (item && _items.size() > 1) ? widgetFor(item) : _row;
@@ -1376,22 +1323,46 @@ void MessageWidget::highlight(const HistoryItem *item) {
   }, this);
 }
 
+// A tap hands the file over. Pictures that aren't a document open as photos, whichever size of them this was.
+void MessageWidget::openOnTap(GtkWidget *widget, MessageItem *item, Td::FileId file) {
+  const auto open = [=, this] {
+    if (!TapAllowed()) return;
+    const auto document = std::any_of(_cells.begin(), _cells.end(),
+                                      [&](const auto &cell) { return cell->documentFile == file; });
+    if (document) {
+      _chat.openDocument(*item, file);
+    } else {
+      _chat.openPhoto(*item, file);
+    }
+  };
+  if (GTK_IS_BUTTON(widget)) {
+    _signals.clicked(widget, open);
+    return;
+  }
+  auto *click = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      click, "released", [=](GtkGestureClick *, int, double, double) { open(); });
+  gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(click));
+}
+
 // The menu belongs to the message under the finger: a cell of an album has its own, which wins over
 // the bubble's (the bubble's is for the album as a whole).
-void MessageWidget::setupGestures(GtkWidget *widget, not_null<HistoryItem *> item, bool swipe) {
+void MessageWidget::setupGestures(GtkWidget *widget, MessageItem *item, bool swipe) {
   auto *longPress = gtk_gesture_long_press_new();
   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(longPress), TRUE);
-  _signals.connect<void(GtkGestureLongPress *, double, double)>(longPress, "pressed", [=](GtkGestureLongPress *g, double x, double y) {
-    gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-    _chat->showMessageMenu(item, widget, x, y);
-  });
+  _signals.connect<void(GtkGestureLongPress *, double, double)>(
+      longPress, "pressed", [=, this](GtkGestureLongPress *gesture, double x, double y) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        _chat.showMessageMenu(*item, widget, x, y);
+      });
   gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(longPress));
   auto *rightClick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rightClick), GDK_BUTTON_SECONDARY);
-  _signals.connect<void(GtkGestureClick *, int, double, double)>(rightClick, "pressed", [=](GtkGestureClick *g, int, double x, double y) {
-    gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-    _chat->showMessageMenu(item, widget, x, y);
-  });
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      rightClick, "pressed", [=, this](GtkGestureClick *gesture, int, double x, double y) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        _chat.showMessageMenu(*item, widget, x, y);
+      });
   gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(rightClick));
   if (!swipe) return;
   // Swipe left to reply, as in the phone apps.
@@ -1399,11 +1370,12 @@ void MessageWidget::setupGestures(GtkWidget *widget, not_null<HistoryItem *> ite
   // vertical movement early, so touching message text still scrolls the conversation.
   auto *pan = gtk_gesture_pan_new(GTK_ORIENTATION_HORIZONTAL);
   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(pan), TRUE);
-  _signals.connect<void(GtkGestureDrag *, double, double)>(pan, "drag-end", [=](GtkGestureDrag *, double dx, double dy) {
-    if (dx < -80 && std::abs(dy) < 40) {
-      _chat->replyTo(item);
-    }
-  });
+  _signals.connect<void(GtkGestureDrag *, double, double)>(
+      pan, "drag-end", [=, this](GtkGestureDrag *, double dx, double dy) {
+        if (dx < -80 && std::abs(dy) < 40) {
+          _chat.replyTo(*item);
+        }
+      });
   gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(pan));
 }
 
