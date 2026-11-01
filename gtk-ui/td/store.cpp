@@ -1,5 +1,7 @@
 #include "td/store.hpp"
 
+#include "td/chat_row.hpp"
+
 #include <glib.h>
 
 #include <algorithm>
@@ -18,8 +20,93 @@ Object *As(api::Object *object) {
   return object && object->get_id() == Object::ID ? static_cast<Object *>(object) : nullptr;
 }
 
+template <typename Object>
+const Object *As(const api::Object *object) {
+  return object && object->get_id() == Object::ID ? static_cast<const Object *>(object) : nullptr;
+}
+
 FileId PhotoOf(const api::object_ptr<api::chatPhotoInfo> &photo) {
   return photo && photo->small_ ? photo->small_->id_ : 0;
+}
+
+int ScopeOf(ChatKind kind) {
+  return kind == ChatKind::Channel ? 2 : kind == ChatKind::Group ? 1 : 0;
+}
+
+// Messages people write, as opposed to what Telegram reports in a chat. New kinds count as reports.
+bool IsServiceContent(const api::MessageContent *content) {
+  if (!content) return false;
+  switch (content->get_id()) {
+    case api::messageText::ID:
+    case api::messageAnimation::ID:
+    case api::messageAudio::ID:
+    case api::messageDocument::ID:
+    case api::messagePhoto::ID:
+    case api::messageSticker::ID:
+    case api::messageVideo::ID:
+    case api::messageVideoNote::ID:
+    case api::messageVoiceNote::ID:
+    case api::messageExpiredPhoto::ID:
+    case api::messageExpiredVideo::ID:
+    case api::messageExpiredVideoNote::ID:
+    case api::messageExpiredVoiceNote::ID:
+    case api::messageLocation::ID:
+    case api::messageVenue::ID:
+    case api::messageContact::ID:
+    case api::messageAnimatedEmoji::ID:
+    case api::messageDice::ID:
+    case api::messageGame::ID:
+    case api::messagePoll::ID:
+    case api::messageStory::ID:
+    case api::messageInvoice::ID:
+    case api::messageUnsupported::ID:
+      return false;
+    default:
+      return true;
+  }
+}
+
+std::int64_t DraftReplyTo(const api::object_ptr<api::draftMessage> &draft) {
+  const auto reply = draft ? As<api::inputMessageReplyToMessage>(draft->reply_to_.get()) : nullptr;
+  return reply ? reply->message_id_ : 0;
+}
+
+std::int32_t LastSeen(api::UserStatus *status) {
+  if (const auto offline = As<api::userStatusOffline>(status)) return offline->was_online_;
+  if (As<api::userStatusRecently>(status)) return -1;
+  if (As<api::userStatusLastWeek>(status)) return -2;
+  if (As<api::userStatusLastMonth>(status)) return -3;
+  return 0;
+}
+
+// What this account may do, from its status in a group or a channel.
+void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool channel) {
+  group.member = true;
+  group.canPost = !channel;
+  if (!status) return;
+  switch (status->get_id()) {
+    case api::chatMemberStatusCreator::ID:
+      group.member = static_cast<const api::chatMemberStatusCreator &>(*status).is_member_;
+      group.canPost = true;
+      break;
+    case api::chatMemberStatusAdministrator::ID: {
+      const auto &rights = static_cast<const api::chatMemberStatusAdministrator &>(*status).rights_;
+      group.canPost = !channel || (rights && rights->can_post_messages_);
+      break;
+    }
+    case api::chatMemberStatusRestricted::ID: {
+      const auto &restricted = static_cast<const api::chatMemberStatusRestricted &>(*status);
+      group.member = restricted.is_member_;
+      group.canPost = restricted.permissions_ && restricted.permissions_->can_send_basic_messages_;
+      break;
+    }
+    case api::chatMemberStatusLeft::ID:
+    case api::chatMemberStatusBanned::ID:
+      group.member = false;
+      group.canPost = false;
+      break;
+    default: break;
+  }
 }
 
 std::string DraftText(const api::object_ptr<api::draftMessage> &draft) {
@@ -49,6 +136,34 @@ const Chat *Store::chat(ChatId id) const {
 const User *Store::user(UserId id) const {
   const auto it = _users.find(id);
   return it == _users.end() ? nullptr : &it->second;
+}
+
+std::string Store::username(const Chat &chat) const {
+  if (chat.kind == ChatKind::Private) {
+    const auto found = user(chat.peerId);
+    return found ? found->username : std::string();
+  }
+  const auto it = chat.supergroup ? _groupUsernames.find(chat.peerId) : _groupUsernames.end();
+  return it == _groupUsernames.end() ? std::string() : it->second;
+}
+
+const std::vector<ChatAction> *Store::actions(ChatId id) const {
+  const auto it = _actions.find(id);
+  return it == _actions.end() ? nullptr : &it->second;
+}
+
+const Group *Store::group(const Chat &chat) const {
+  if (chat.kind != ChatKind::Group && chat.kind != ChatKind::Channel) return nullptr;
+  const auto &groups = chat.supergroup ? _supergroups : _basicGroups;
+  const auto it = groups.find(chat.peerId);
+  return it == groups.end() ? nullptr : &it->second;
+}
+
+bool Store::canWrite(const Chat &chat) const {
+  if (chat.kind == ChatKind::Private || chat.kind == ChatKind::Secret) return true;
+  const auto known = group(chat);
+  if (chat.kind == ChatKind::Channel) return known && known->canPost;
+  return chat.canSendBasic && (!known || known->canPost);
 }
 
 const File *Store::file(FileId id) const {
@@ -103,7 +218,16 @@ void Store::loadMore(ListKind kind, int limit) {
 
 void Store::download(FileId id, int priority) {
   if (const auto known = file(id); known && known->complete) return;
-  _client.send(api::make_object<api::downloadFile>(id, priority, 0, 0, false), nullptr);
+  // A file already on disk gets no update: the answer is all there is.
+  _client.send(api::make_object<api::downloadFile>(id, priority, 0, 0, false),
+               [this](ObjectPtr object) {
+                 if (const auto file = As<api::file>(object.get())) addFile(*file);
+               },
+               _lifetime);
+}
+
+void Store::cancelDownload(FileId id) {
+  _client.send(api::make_object<api::cancelDownloadFile>(id, false), nullptr);
 }
 
 void Store::onChat(ChatHandler handler, const Lifetime &lifetime) {
@@ -138,6 +262,16 @@ void Store::notify(std::vector<Subscriber<Handler>> &subscribers, const Argument
   std::erase_if(subscribers, [](const Subscriber<Handler> &item) { return item.token.expired(); });
 }
 
+// The chat of a group doesn't know of its status: the header and the field ask the store again.
+void Store::groupChanged(std::int64_t peerId, bool supergroup) {
+  for (const auto &[id, chat] : _chats) {
+    if (chat.peerId != peerId || chat.supergroup != supergroup) continue;
+    if (chat.kind != ChatKind::Group && chat.kind != ChatKind::Channel) continue;
+    chatChanged(id);
+    return;
+  }
+}
+
 void Store::chatChanged(ChatId id) {
   notify(_chatHandlers, id);
 }
@@ -165,10 +299,46 @@ void Store::setPositions(Chat &chat, std::vector<api::object_ptr<api::chatPositi
 }
 
 void Store::setLastMessage(Chat &chat, api::message *message) {
-  chat.preview = message && _preview ? _preview(*message) : std::string();
+  chat.preview = message && _preview ? OneLine(_preview(*message)) : std::string();
   chat.lastDate = message ? message->date_ : 0;
   chat.lastMessageId = message ? message->id_ : 0;
   chat.lastOutgoing = message && message->is_outgoing_;
+  const auto state = message ? message->sending_state_.get() : nullptr;
+  chat.lastSending = state && state->get_id() == api::messageSendingStatePending::ID;
+  chat.lastFailed = state && state->get_id() == api::messageSendingStateFailed::ID;
+  chat.lastService = message && IsServiceContent(message->content_.get());
+  const auto sender = message ? message->sender_id_.get() : nullptr;
+  const auto user = As<api::messageSenderUser>(sender);
+  const auto group = As<api::messageSenderChat>(sender);
+  chat.lastSenderUser = user ? user->user_id_ : 0;
+  chat.lastSenderChat = group ? group->chat_id_ : 0;
+}
+
+void Store::setNotificationSettings(Chat &chat, const api::chatNotificationSettings &settings) {
+  chat.defaultMute = settings.use_default_mute_for_;
+  chat.muted = chat.defaultMute ? _scopeMuted[ScopeOf(chat.kind)] : IsMuted(settings);
+}
+
+void Store::setScopeMuted(int scope, bool muted) {
+  if (_scopeMuted[scope] == muted) return;
+  _scopeMuted[scope] = muted;
+  auto changed = std::vector<ChatId>();
+  for (auto &[id, chat] : _chats) {
+    if (!chat.defaultMute || ScopeOf(chat.kind) != scope) continue;
+    chat.muted = muted;
+    changed.push_back(id);
+  }
+  for (const auto id : changed) chatChanged(id);
+}
+
+void Store::setAction(api::updateChatAction &update) {
+  const auto user = As<api::messageSenderUser>(update.sender_id_.get());
+  if (!user || !update.action_ || !_chats.contains(update.chat_id_)) return;
+  auto &list = _actions[update.chat_id_];
+  std::erase_if(list, [&](const ChatAction &action) { return action.user == user->user_id_; });
+  if (update.action_->get_id() != api::chatActionCancel::ID) list.push_back({user->user_id_, update.action_->get_id()});
+  if (list.empty()) _actions.erase(update.chat_id_);
+  chatChanged(update.chat_id_);
 }
 
 void Store::addChat(api::chat &source) {
@@ -179,11 +349,13 @@ void Store::addChat(api::chat &source) {
   chat.accentColor = source.accent_color_id_;
   chat.unread = source.unread_count_;
   chat.unreadMentions = source.unread_mention_count_;
+  chat.unreadReactions = source.unread_reaction_count_;
   chat.markedUnread = source.is_marked_as_unread_;
   chat.readInbox = source.last_read_inbox_message_id_;
   chat.readOutbox = source.last_read_outbox_message_id_;
-  chat.muted = source.notification_settings_ && IsMuted(*source.notification_settings_);
   chat.draft = DraftText(source.draft_message_);
+  chat.draftReplyTo = DraftReplyTo(source.draft_message_);
+  chat.canSendBasic = !source.permissions_ || source.permissions_->can_send_basic_messages_;
   chat.forum = source.view_as_topics_;
   if (const auto type = source.type_.get()) {
     switch (type->get_id()) {
@@ -199,6 +371,7 @@ void Store::addChat(api::chat &source) {
         const auto group = static_cast<api::chatTypeSupergroup *>(type);
         chat.kind = group->is_channel_ ? ChatKind::Channel : ChatKind::Group;
         chat.peerId = group->supergroup_id_;
+        chat.supergroup = true;
         break;
       }
       case api::chatTypeSecret::ID:
@@ -208,6 +381,7 @@ void Store::addChat(api::chat &source) {
       default: break;
     }
   }
+  if (source.notification_settings_) setNotificationSettings(chat, *source.notification_settings_);
   setLastMessage(chat, source.last_message_.get());
   auto &stored = _chats.insert_or_assign(chat.id, std::move(chat)).first->second;
   setPositions(stored, source.positions_);
@@ -230,7 +404,7 @@ void Store::addUser(api::user &source) {
   user.onlineUntil = 0;
   user.lastSeen = 0;
   if (const auto online = As<api::userStatusOnline>(source.status_.get())) user.onlineUntil = online->expires_;
-  if (const auto offline = As<api::userStatusOffline>(source.status_.get())) user.lastSeen = offline->was_online_;
+  user.lastSeen = LastSeen(source.status_.get());
   notify(_userHandlers, user.id);
 }
 
@@ -285,6 +459,7 @@ void Store::updated(api::Update &update) {
       auto &data = static_cast<api::updateChatDraftMessage &>(update);
       withChat(data.chat_id_, [&](Chat &chat) {
         chat.draft = DraftText(data.draft_message_);
+        chat.draftReplyTo = DraftReplyTo(data.draft_message_);
         setPositions(chat, data.positions_);
       });
       break;
@@ -307,6 +482,52 @@ void Store::updated(api::Update &update) {
       withChat(data.chat_id_, [&](Chat &chat) { chat.unreadMentions = data.unread_mention_count_; });
       break;
     }
+    case api::updateChatUnreadReactionCount::ID: {
+      auto &data = static_cast<api::updateChatUnreadReactionCount &>(update);
+      withChat(data.chat_id_, [&](Chat &chat) { chat.unreadReactions = data.unread_reaction_count_; });
+      break;
+    }
+    case api::updateChatAction::ID:
+      setAction(static_cast<api::updateChatAction &>(update));
+      break;
+    case api::updateScopeNotificationSettings::ID: {
+      auto &data = static_cast<api::updateScopeNotificationSettings &>(update);
+      if (!data.scope_ || !data.notification_settings_) break;
+      const auto id = data.scope_->get_id();
+      setScopeMuted(id == api::notificationSettingsScopeChannelChats::ID ? 2
+                        : id == api::notificationSettingsScopeGroupChats::ID ? 1
+                                                                             : 0,
+                    data.notification_settings_->mute_for_ > 0);
+      break;
+    }
+    case api::updateSupergroup::ID: {
+      const auto &group = *static_cast<api::updateSupergroup &>(update).supergroup_;
+      if (group.usernames_ && !group.usernames_->active_usernames_.empty()) {
+        _groupUsernames[group.id_] = group.usernames_->active_usernames_.front();
+      } else {
+        _groupUsernames.erase(group.id_);
+      }
+      auto &known = _supergroups[group.id_];
+      known.members = group.member_count_;
+      SetGroupStatus(known, group.status_.get(), group.is_channel_);
+      groupChanged(group.id_, true);
+      break;
+    }
+    case api::updateBasicGroup::ID: {
+      const auto &group = *static_cast<api::updateBasicGroup &>(update).basic_group_;
+      auto &known = _basicGroups[group.id_];
+      known.members = group.member_count_;
+      SetGroupStatus(known, group.status_.get(), false);
+      groupChanged(group.id_, false);
+      break;
+    }
+    case api::updateChatPermissions::ID: {
+      auto &data = static_cast<api::updateChatPermissions &>(update);
+      withChat(data.chat_id_, [&](Chat &chat) {
+        chat.canSendBasic = !data.permissions_ || data.permissions_->can_send_basic_messages_;
+      });
+      break;
+    }
     case api::updateChatIsMarkedAsUnread::ID: {
       auto &data = static_cast<api::updateChatIsMarkedAsUnread &>(update);
       withChat(data.chat_id_, [&](Chat &chat) { chat.markedUnread = data.is_marked_as_unread_; });
@@ -314,7 +535,7 @@ void Store::updated(api::Update &update) {
     }
     case api::updateChatNotificationSettings::ID: {
       auto &data = static_cast<api::updateChatNotificationSettings &>(update);
-      withChat(data.chat_id_, [&](Chat &chat) { chat.muted = IsMuted(*data.notification_settings_); });
+      withChat(data.chat_id_, [&](Chat &chat) { setNotificationSettings(chat, *data.notification_settings_); });
       break;
     }
     case api::updateUser::ID:
@@ -327,7 +548,7 @@ void Store::updated(api::Update &update) {
       it->second.onlineUntil = 0;
       it->second.lastSeen = 0;
       if (const auto online = As<api::userStatusOnline>(data.status_.get())) it->second.onlineUntil = online->expires_;
-      if (const auto offline = As<api::userStatusOffline>(data.status_.get())) it->second.lastSeen = offline->was_online_;
+      it->second.lastSeen = LastSeen(data.status_.get());
       notify(_userHandlers, data.user_id_);
       break;
     }
@@ -346,6 +567,8 @@ void Store::updated(api::Update &update) {
       auto &data = static_cast<api::updateOption &>(update);
       if (data.name_ == "my_id") {
         if (const auto value = As<api::optionValueInteger>(data.value_.get())) _selfId = value->value_;
+      } else if (data.name_ == "replies_bot_chat_id") {
+        if (const auto value = As<api::optionValueInteger>(data.value_.get())) _repliesChatId = value->value_;
       }
       break;
     }

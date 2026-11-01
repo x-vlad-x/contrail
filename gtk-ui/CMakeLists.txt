@@ -55,13 +55,16 @@ target_link_libraries(tdlib INTERFACE
 
 # Everything but the entry point: the tests link it too.
 add_library(contrail_core STATIC
+  album_layout.cpp
   app.cpp
   chat_list.cpp
   chat_view.cpp
   debug.cpp
   login.cpp
   main_window.cpp
+  td/chat_row.cpp
   td/client.cpp
+  td/dates.cpp
   td/message_text.cpp
   td/scenario.cpp
   td/session.cpp
@@ -90,4 +93,8 @@ if (CONTRAIL_TESTS)
   target_link_libraries(td-client-test PRIVATE contrail_core)
   add_executable(td-store-test ${ROOT}/tests/td/store-test.cpp)
   target_link_libraries(td-store-test PRIVATE contrail_core)
+  add_executable(td-message-text-test ${ROOT}/tests/td/message-text-test.cpp)
+  target_link_libraries(td-message-text-test PRIVATE contrail_core)
+  target_compile_definitions(td-message-text-test PRIVATE
+    TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()

@@ -5,7 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 ${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer \
-  -Igtk-ui tests/gtk-signals.cpp $(pkg-config --cflags --libs gtk4 libadwaita-1 Qt6Core) -o "$work/gtk-signals"
+  -Igtk-ui tests/gtk-signals.cpp $(pkg-config --cflags --libs gtk4 libadwaita-1) -o "$work/gtk-signals"
 ASAN_OPTIONS=detect_leaks=0 "$work/gtk-signals"
 ${CXX:-g++} -std=c++20 -g -fPIC -Igtk-ui tests/qt-window-lifetime.cpp \
   $(pkg-config --cflags --libs Qt6Widgets) -o "$work/qt-window-lifetime"
@@ -34,8 +34,8 @@ ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -
 ${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/memory-pressure.cpp \
   -o "$work/memory-pressure"
 "$work/memory-pressure"
-${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/album-layout.cpp \
-  $(pkg-config --cflags --libs Qt6Core) -o "$work/album-layout"
+${CXX:-g++} -std=c++20 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/album-layout.cpp \
+  gtk-ui/album_layout.cpp -o "$work/album-layout"
 "$work/album-layout"
 ${CXX:-g++} -std=c++20 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -Igtk-ui tests/paste.cpp \
   $(pkg-config --cflags --libs gtk4 Qt6Core Qt6Gui) -o "$work/paste"

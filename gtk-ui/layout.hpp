@@ -129,12 +129,12 @@ inline GtkWidget *MakeHeightForWidthBin(GtkWidget *child) {
   return bin;
 }
 
-// An album: its cells placed as Ui::LayoutMediaGroup laid them out for `size`, scaled down together on
+// An album: its cells placed as LayoutAlbum() laid them out for `size`, scaled down together on
 // a screen narrower than that. The children are the cells, in the order of `cells`.
-inline GtkWidget *MakeAlbumGrid(const std::vector<GtkWidget *> &children, std::vector<QRect> cells, QSize size) {
+inline GtkWidget *MakeAlbumGrid(const std::vector<GtkWidget *> &children, std::vector<Rect> cells, Size size) {
   struct Grid {
-    std::vector<QRect> cells;
-    QSize size;
+    std::vector<Rect> cells;
+    Size size;
   };
   // A box only for disposing of its children: the layout is its own.
   auto *grid = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -146,23 +146,23 @@ inline GtkWidget *MakeAlbumGrid(const std::vector<GtkWidget *> &children, std::v
                 [](GtkWidget *widget, GtkOrientation orientation, int forSize, int *minimum, int *natural, int *, int *) {
                   const auto grid = static_cast<Grid *>(g_object_get_data(G_OBJECT(widget), "contrail-album"));
                   if (orientation == GTK_ORIENTATION_HORIZONTAL) {
-                    *minimum = std::min(grid->size.width(), kMediaMinWidth);
-                    *natural = grid->size.width();
+                    *minimum = std::min(grid->size.width, kMediaMinWidth);
+                    *natural = grid->size.width;
                   } else {
                     // As MakeMediaFrame: the height for no width is the largest one.
-                    *minimum = *natural = AlbumHeightForWidth(grid->size, forSize < 0 ? grid->size.width() : forSize);
+                    *minimum = *natural = AlbumHeightForWidth(grid->size, forSize < 0 ? grid->size.width : forSize);
                   }
                 },
                 [](GtkWidget *widget, int width, int height, int baseline) {
                   const auto grid = static_cast<Grid *>(g_object_get_data(G_OBJECT(widget), "contrail-album"));
-                  const auto shown = std::min(width, grid->size.width());
+                  const auto shown = std::min(width, grid->size.width);
                   const auto shownHeight = AlbumHeightForWidth(grid->size, shown);
                   auto i = 0;
                   for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
                     if (i >= int(grid->cells.size())) break;
                     const auto rect = ScaleAlbumCell(grid->cells[i++], grid->size, shown, shownHeight);
-                    const auto origin = graphene_point_t{float(rect.x()), float(rect.y())};
-                    gtk_widget_allocate(child, rect.width(), rect.height(), -1, gsk_transform_translate(nullptr, &origin));
+                    const auto origin = graphene_point_t{float(rect.x), float(rect.y)};
+                    gtk_widget_allocate(child, rect.width, rect.height, -1, gsk_transform_translate(nullptr, &origin));
                   }
                 }));
   for (auto *child : children) {

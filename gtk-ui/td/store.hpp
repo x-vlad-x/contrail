@@ -40,14 +40,37 @@ struct Chat {
   std::int32_t lastDate = 0;
   std::int64_t lastMessageId = 0;
   bool lastOutgoing = false;
+  bool lastSending = false;
+  bool lastFailed = false;
+  bool lastService = false;  // "Anna joined": no sender and no ticks in the list.
+  UserId lastSenderUser = 0;
+  ChatId lastSenderChat = 0;
   int unread = 0;
   int unreadMentions = 0;
+  int unreadReactions = 0;
   bool markedUnread = false;
   bool muted = false;
+  bool defaultMute = false;  // `muted` follows the setting for all chats of this kind.
   std::int64_t readInbox = 0;
   std::int64_t readOutbox = 0;
   std::string draft;
+  std::int64_t draftReplyTo = 0;
+  bool canSendBasic = true;  // The chat's permissions for everybody; a group's own status can narrow this.
   bool forum = false;
+  bool supergroup = false;
+};
+
+// This account in a group or a channel.
+struct Group {
+  int members = 0;
+  bool member = true;
+  bool canPost = true;   // In a channel: only some admins. In a group: unless restricted.
+};
+
+// Somebody is typing or sending something in a chat. `kind` is the ID of the api::ChatAction.
+struct ChatAction {
+  UserId user = 0;
+  std::int32_t kind = 0;
 };
 
 struct User {
@@ -60,7 +83,7 @@ struct User {
   bool bot = false;
   bool deleted = false;
   bool premium = false;
-  // Status: online until this time; 0 when offline, -1 for "recently" and the like.
+  // Status: online until this time; lastSeen: when, or -1 recently, -2 this week, -3 this month, 0 long ago.
   std::int32_t onlineUntil = 0;
   std::int32_t lastSeen = 0;
 };
@@ -89,7 +112,16 @@ class Store final {
   [[nodiscard]] const Chat *chat(ChatId id) const;
   [[nodiscard]] const User *user(UserId id) const;
   [[nodiscard]] const File *file(FileId id) const;
+  // Null until TDLib tells about it, and for a private chat.
+  [[nodiscard]] const Group *group(const Chat &chat) const;
+  // Whether a text can be sent here at all: "join" or "mute" go in the place of the field otherwise.
+  [[nodiscard]] bool canWrite(const Chat &chat) const;
   [[nodiscard]] UserId selfId() const { return _selfId; }
+  [[nodiscard]] ChatId repliesChatId() const { return _repliesChatId; }
+  // The public name of a user's chat or a supergroup, without the "@". Empty when there is none.
+  [[nodiscard]] std::string username(const Chat &chat) const;
+  // Null while nobody does anything in the chat.
+  [[nodiscard]] const std::vector<ChatAction> *actions(ChatId id) const;
   // In Telegram's order: pinned first, then newest first.
   [[nodiscard]] const std::vector<ChatId> &list(ListKind kind);
   [[nodiscard]] bool listComplete(ListKind kind) const { return _lists[int(kind)].complete; }
@@ -100,6 +132,7 @@ class Store final {
   void loadMore(ListKind kind, int limit = 50);
   // Asks for a file; progress comes through onFile. Priority 1 to 32, higher goes first.
   void download(FileId id, int priority = 1);
+  void cancelDownload(FileId id);
 
   void onChat(ChatHandler handler, const Lifetime &lifetime);
   void onList(ListHandler handler, const Lifetime &lifetime);
@@ -126,7 +159,11 @@ class Store final {
   void addUser(api::user &user);
   void setPositions(Chat &chat, std::vector<api::object_ptr<api::chatPosition>> &positions);
   void setPosition(Chat &chat, api::chatPosition &position);
+  void groupChanged(std::int64_t peerId, bool supergroup);
   void setLastMessage(Chat &chat, api::message *message);
+  void setNotificationSettings(Chat &chat, const api::chatNotificationSettings &settings);
+  void setScopeMuted(int scope, bool muted);
+  void setAction(api::updateChatAction &update);
   void addFile(const api::file &file);
   void chatChanged(ChatId id);
   void listChanged(ListKind kind);
@@ -139,8 +176,14 @@ class Store final {
   std::unordered_map<ChatId, Chat> _chats;
   std::unordered_map<UserId, User> _users;
   std::unordered_map<FileId, File> _files;
+  std::unordered_map<std::int64_t, Group> _basicGroups;
+  std::unordered_map<std::int64_t, Group> _supergroups;
   ListState _lists[2];
+  std::unordered_map<std::int64_t, std::string> _groupUsernames;  // Only the supergroups that have one.
+  std::unordered_map<ChatId, std::vector<ChatAction>> _actions;
+  bool _scopeMuted[3] = {};  // Private chats, groups, channels.
   UserId _selfId = 0;
+  ChatId _repliesChatId = 0;
   api::object_ptr<api::ConnectionState> _connection;
   std::vector<Subscriber<ChatHandler>> _chatHandlers;
   std::vector<Subscriber<ListHandler>> _listHandlers;
