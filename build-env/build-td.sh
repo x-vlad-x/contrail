@@ -19,3 +19,7 @@ fi
 cmake -S gtk-ui -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCONTRAIL_TD_DIR=/src/deps-td \
   -DTELEGRAM_API_ID="$TELEGRAM_API_ID" -DTELEGRAM_API_HASH="$TELEGRAM_API_HASH" "${ARGS[@]}" >/dev/null
 ninja -C "$BUILD"
+# What tools/phone.sh td-install puts on the phone.
+if [[ $ARCH == aarch64 ]]; then
+  aarch64-linux-gnu-strip -o "$BUILD/contrail.stripped" "$BUILD/contrail"
+fi
