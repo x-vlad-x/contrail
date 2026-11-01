@@ -1,52 +1,86 @@
-# Contrail: the GTK4 + libadwaita interface. Its sources are compiled into Telegram Desktop's own
-# executable target (the patch in patches/ adds this directory), so they can use the whole core.
+# Contrail on TDLib: the GTK4 + libadwaita interface, without Qt and without Telegram Desktop.
+#   cmake -S gtk-ui -B build-td/<architecture> -DCONTRAIL_TD_DIR=deps-td -DTELEGRAM_API_ID=... -DTELEGRAM_API_HASH=...
+# Only the files already moved to TDLib are listed; the others stay in this directory as the model for that work.
+cmake_minimum_required(VERSION 3.25)
+project(Contrail LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if (NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+
+set(CONTRAIL_TD_DIR "" CACHE PATH "deps-td from build-env/build-tdlib.sh")
+set(TELEGRAM_API_ID "" CACHE STRING "From my.telegram.org")
+set(TELEGRAM_API_HASH "" CACHE STRING "From my.telegram.org")
+if (NOT CONTRAIL_TD_DIR OR NOT TELEGRAM_API_ID OR NOT TELEGRAM_API_HASH)
+  message(FATAL_ERROR "CONTRAIL_TD_DIR, TELEGRAM_API_ID and TELEGRAM_API_HASH are required")
+endif()
+
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(CONTRAIL_GTK_DEPS REQUIRED IMPORTED_TARGET GLOBAL gtk4 libadwaita-1)
+find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
+pkg_check_modules(CONTRAIL_GTK_DEPS REQUIRED IMPORTED_TARGET gtk4 libadwaita-1)
+
+set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(GENERATED ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 # The stylesheet is compiled in.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/style.css)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/style.css ${ROOT}/VERSION)
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/style.css CONTRAIL_CSS)
-file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/style_css.h
+file(CONFIGURE OUTPUT ${GENERATED}/style_css.h
   CONTENT "#pragma once\ninline constexpr char kStyleCss[] = R\"contrail_css(@CONTRAIL_CSS@)contrail_css\";\n" @ONLY)
-
-# Contrail's own version (VERSION, independent of the core's), for About and the packages.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../VERSION)
-file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../VERSION CONTRAIL_VERSION LIMIT_COUNT 1)
-file(CONFIGURE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/contrail_version.h
+file(STRINGS ${ROOT}/VERSION CONTRAIL_VERSION LIMIT_COUNT 1)
+file(CONFIGURE OUTPUT ${GENERATED}/contrail_version.h
   CONTENT "#pragma once\ninline constexpr char kContrailVersion[] = \"@CONTRAIL_VERSION@\";\n" @ONLY)
+file(CONFIGURE OUTPUT ${GENERATED}/contrail_api.h
+  CONTENT "#pragma once\ninline constexpr int kApiId = @TELEGRAM_API_ID@;\ninline constexpr char kApiHash[] = \"@TELEGRAM_API_HASH@\";\n" @ONLY)
 
-file(GLOB CONTRAIL_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp)
-target_sources(Telegram PRIVATE ${CONTRAIL_SRC})
-target_include_directories(Telegram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
-target_compile_definitions(Telegram PRIVATE CONTRAIL_GTK)
-target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_GTK_DEPS)
-# Optional: an incoming call over the phone's lock screen. The library wraps libwayland-client's calls,
-# so the executable itself lists it (libwayland-client comes later, through GTK).
-pkg_check_modules(CONTRAIL_LAYER_SHELL IMPORTED_TARGET GLOBAL gtk4-layer-shell-0)
-if (CONTRAIL_LAYER_SHELL_FOUND)
-  target_compile_definitions(Telegram PRIVATE CONTRAIL_LAYER_SHELL)
-  target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_LAYER_SHELL)
+# TDLib's libraries, in link order.
+if (CMAKE_CROSSCOMPILING)
+  set(TD_BUILD ${CONTRAIL_TD_DIR}/aarch64)
+else()
+  set(TD_BUILD ${CONTRAIL_TD_DIR}/${CMAKE_SYSTEM_PROCESSOR})
 endif()
-# Optional: maps for locations (picking a place, following a live location). Without it a location opens in
-# the system's map application.
-pkg_check_modules(CONTRAIL_SHUMATE IMPORTED_TARGET GLOBAL shumate-1.0)
-if (CONTRAIL_SHUMATE_FOUND)
-  target_compile_definitions(Telegram PRIVATE CONTRAIL_SHUMATE)
-  target_link_libraries(Telegram PRIVATE PkgConfig::CONTRAIL_SHUMATE)
-endif()
-# GTK and libadwaita versions of FuriOS 14: warn about anything newer. Telegram Desktop limits GLib to 2.56
-# for its own code, the interface needs newer.
-set_source_files_properties(${CONTRAIL_SRC} PROPERTIES
-  COMPILE_OPTIONS "-UGLIB_VERSION_MIN_REQUIRED;-UGLIB_VERSION_MAX_ALLOWED;-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_84;-DGLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_84;-DGDK_VERSION_MIN_REQUIRED=GDK_VERSION_4_12;-DGDK_VERSION_MAX_ALLOWED=GDK_VERSION_4_22;-DADW_VERSION_MIN_REQUIRED=ADW_VERSION_1_6;-DADW_VERSION_MAX_ALLOWED=ADW_VERSION_1_9;-Wno-missing-field-initializers;-Wno-unused-parameter")
+add_library(tdlib INTERFACE)
+target_include_directories(tdlib SYSTEM INTERFACE ${CONTRAIL_TD_DIR}/src ${TD_BUILD} ${CONTRAIL_TD_DIR}/src/td/generate/auto
+  ${CONTRAIL_TD_DIR}/src/tdutils ${TD_BUILD}/tdutils)
+target_link_libraries(tdlib INTERFACE
+  ${TD_BUILD}/libtdclient.a ${TD_BUILD}/libtdcore.a ${TD_BUILD}/libtdapi.a ${TD_BUILD}/libtdmtproto.a
+  ${TD_BUILD}/tde2e/libtde2e.a ${TD_BUILD}/tddb/libtddb.a ${TD_BUILD}/sqlite/libtdsqlite.a ${TD_BUILD}/tdnet/libtdnet.a
+  ${TD_BUILD}/tdactor/libtdactor.a ${TD_BUILD}/tdutils/libtdutils.a ${TD_BUILD}/libmemprof.a
+  OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS})
 
-# The release packages carry their libraries in <prefix>/lib (tools/bundle.py). A DT_RPATH (not RUNPATH) on the
-# executable also applies to the libraries it loads, so the bundled ones are used without editing them.
-option(CONTRAIL_BUNDLE_RPATH "Look for libraries in ../../lib next to the installed program" OFF)
-if (CONTRAIL_BUNDLE_RPATH)
-  target_link_options(Telegram PRIVATE "LINKER:-rpath,$ORIGIN/../../lib" "LINKER:--disable-new-dtags")
-  # No build-tree path next to it (shared libraries built by build-deps.sh would add one): editing it out later
-  # would turn the RPATH into a RUNPATH, which the libraries the program loads don't use.
-  set_target_properties(Telegram PROPERTIES SKIP_BUILD_RPATH ON)
+# Everything but the entry point: the tests link it too.
+add_library(contrail_core STATIC
+  app.cpp
+  debug.cpp
+  login.cpp
+  main_window.cpp
+  td/client.cpp
+  td/session.cpp
+  td/strings.cpp)
+target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
+target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS)
+# GTK and libadwaita versions of FuriOS 14: warn about anything newer. The x86_64 test container has older headers,
+# which don't know these macros.
+if (CMAKE_CROSSCOMPILING)
+  target_compile_definitions(contrail_core PUBLIC GLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_84
+    GLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_84 GDK_VERSION_MIN_REQUIRED=GDK_VERSION_4_12
+    GDK_VERSION_MAX_ALLOWED=GDK_VERSION_4_22 ADW_VERSION_MIN_REQUIRED=ADW_VERSION_1_6
+    ADW_VERSION_MAX_ALLOWED=ADW_VERSION_1_9)
 endif()
+target_compile_options(contrail_core PUBLIC -Wall -Wno-missing-field-initializers -Wno-unused-parameter
+  -ffunction-sections -fdata-sections)
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../packaging/install.cmake)
+add_executable(contrail main.cpp)
+target_link_libraries(contrail PRIVATE contrail_core)
+target_link_options(contrail PRIVATE LINKER:--gc-sections LINKER:--as-needed)
+
+option(CONTRAIL_TESTS "Build the tests of the scripted transport" OFF)
+if (CONTRAIL_TESTS)
+  add_executable(td-client-test ${ROOT}/tests/td/client-test.cpp)
+  target_link_libraries(td-client-test PRIVATE contrail_core)
+endif()

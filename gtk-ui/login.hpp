@@ -1,80 +1,77 @@
 #pragma once
 
 #include "app.hpp"
-
-#include "core/core_cloud_password.h"
-#include "mtproto/sender.h"
-
-#include <rpl/lifetime.h>
-
-namespace Main {
-class Account;
-} // namespace Main
+#include "td/client.hpp"
 
 namespace Contrail {
 
-// Sign-in: phone number -> code -> cloud password (if set) -> name (for a new account).
-// Follows Telegram Desktop's intro steps (Telegram/SourceFiles/intro/), finishing the same way:
-// the account gets a session and the main window switches to the chats.
+// Sign-in: phone number -> code -> cloud password (if set) -> name (for a new account). TDLib leads: its
+// authorization state decides the page, a page only sends the answer.
 class LoginView final {
-public:
-  explicit LoginView(not_null<Main::Account *> account);
+ public:
+  explicit LoginView(Td::Session &session);
   ~LoginView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
-  // Testing: fills a step ("phone", "code", "name First Last") and submits it.
-  void debugSubmit(const QString &step, const QString &value);
+  // A state that needs an answer from the user.
+  void show(Td::api::AuthorizationState &state);
+  // Testing: fills a step ("phone", "code", "password", "name First Last") and submits it.
+  void debugSubmit(const std::string &step, const std::string &value);
 
-private:
+ private:
   struct Page {
     AdwNavigationPage *page = nullptr;
+    GtkWidget *title = nullptr;
     GtkWidget *description = nullptr;
     GtkWidget *error = nullptr;
     GtkWidget *button = nullptr;
-    GtkWidget *spinner = nullptr;
   };
 
-  Page makePage(const QString &title, const QString &description, GtkWidget *group, std::function<void()> submit);
+  Page makePage(const std::string &title, const std::string &description, GtkWidget *group,
+                std::function<void()> submit);
   void setBusy(Page &page, bool busy);
-  void showError(Page &page, const QString &text);
+  void showError(Page &page, const std::string &text);
+  void showFailure(Page &page, Td::api::error &error);
+  // Shows a page, leaving only the phone page under it, so that Back always leads there.
+  void open(Page &page, GtkWidget *focus);
+  void send(Page &page, Td::FunctionPtr request);
 
   void buildPhonePage();
   void buildCodePage();
+  void buildEmailPage();
+  void buildEmailCodePage();
   void buildPasswordPage();
   void buildSignupPage();
+  void prefillCallingCode();
 
   void submitPhone();
   void submitCode();
+  void submitEmail();
+  void submitEmailCode();
   void submitPassword();
   void submitSignup();
 
-  void sentCode(const MTPauth_SentCode &result);
-  void requestPassword();
-  void finish(const MTPauth_Authorization &auth);
-  void finish(const MTPUser &user);
-  void createSession(const MTPUser &user, const QVector<MTPDialogFilter> &filters, bool tagsEnabled);
-
-  const not_null<Main::Account *> _account;
-  std::optional<MTP::Sender> _api;
-  mtpRequestId _request = 0;
+  Td::Session &_session;
+  Td::Lifetime _lifetime;
 
   GtkWidget *_root = nullptr;
   AdwNavigationView *_nav = nullptr;
 
   Page _phonePage;
   Page _codePage;
+  Page _emailPage;
+  Page _emailCodePage;
   Page _passwordPage;
   Page _signupPage;
   GtkWidget *_phone = nullptr;
   GtkWidget *_code = nullptr;
+  GtkWidget *_email = nullptr;
+  GtkWidget *_emailCode = nullptr;
   GtkWidget *_password = nullptr;
   GtkWidget *_firstName = nullptr;
   GtkWidget *_lastName = nullptr;
-
-  QString _sentPhone;
-  QByteArray _phoneHash;
-  Core::CloudPasswordState _passwordState;
-  rpl::lifetime _lifetime;
+  bool _phoneEdited = false;
+  bool _busy = false;
 };
 
 }  // namespace Contrail

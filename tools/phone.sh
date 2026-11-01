@@ -5,6 +5,11 @@
 #   tools/phone.sh cmd 'chat 0'   a debug command (see gtk-ui/debug.cpp)
 #   tools/phone.sh shot [file]    screenshot (needs grim: tools/phone.sh get-grim once)
 #   tools/phone.sh log            the end of the log
+#   tools/phone.sh td-install     put the TDLib version (build-td/aarch64) into ~/.local/share/contrail-td-app
+#   tools/phone.sh td-run         start it next to the stable one (log: /tmp/contrail-td.log on the phone)
+#   tools/phone.sh td-stop
+#   tools/phone.sh td-log
+#   tools/phone.sh td-cmd 'tree'  a debug command (see gtk-ui/debug.cpp)
 set -euo pipefail
 PHONE="${PHONE:-furios}"
 APP_ID=io.github.x_vlad_x.Contrail
@@ -17,5 +22,16 @@ case "${1:-}" in
   shot) rsh "$ENV; ~/.cache/contrail-tools/root/usr/bin/grim -s 1 /tmp/contrail-shot.png" && scp -q "$PHONE:/tmp/contrail-shot.png" "${2:-shot.png}" ;;
   get-grim) rsh 'set -e; mkdir -p ~/.cache/contrail-tools && cd ~/.cache/contrail-tools && apt-get download grim >/dev/null && dpkg-deb -x grim_*.deb root' ;;
   log) rsh "tail -n ${2:-40} /tmp/contrail.log" ;;
-  *) sed -n '2,8p' "$0"; exit 1 ;;
+  td-install)
+    rsh 'mkdir -p ~/.local/share/contrail-td-app'
+    scp -q "$(dirname "$0")/../build-td/aarch64/contrail.stripped" "$PHONE:.local/share/contrail-td-app/contrail.new"
+    rsh 'mv ~/.local/share/contrail-td-app/contrail.new ~/.local/share/contrail-td-app/contrail' ;;
+  td-run)
+    rsh "pkill -f '[c]ontrail-td-app/contrail'; true"  # On its own: the command below contains the same path.
+    sleep 1
+    rsh "$ENV; CONTRAIL_DEBUG=1 nohup ~/.local/share/contrail-td-app/contrail > /tmp/contrail-td.log 2>&1 &" ;;
+  td-stop) rsh "pkill -f '[c]ontrail-td-app/contrail'; true" ;;
+  td-cmd) rsh "$ENV; gdbus call --session --dest $APP_ID.Devel --object-path /io/github/x_vlad_x/Contrail/Devel --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
+  td-log) rsh "tail -n ${2:-40} /tmp/contrail-td.log" ;;
+  *) sed -n '2,13p' "$0"; exit 1 ;;
 esac

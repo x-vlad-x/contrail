@@ -1,72 +1,46 @@
-// Contrail: an unofficial GTK4 + libadwaita interface for Telegram Desktop.
+// Contrail: an unofficial GTK4 + libadwaita Telegram client on TDLib.
 #pragma once
 
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
-#include <QtCore/QString>
-#include <QtGui/QImage>
-
 #include <functional>
 #include <memory>
-#include <type_traits>
 #include <string>
 #include <vector>
 
-namespace Main {
-class Session;
-class Account;
-} // namespace Main
-
 namespace Contrail {
 
-// Application ID: D-Bus name, desktop file and icon name.
-inline constexpr char kAppId[] = "io.github.x_vlad_x.Contrail";
+// Application ID: D-Bus name, desktop file and icon name. The version on TDLib runs next to the stable one.
+inline constexpr char kAppId[] = "io.github.x_vlad_x.Contrail.Devel";
 inline constexpr char kProjectUrl[] = "https://github.com/x-vlad-x/contrail";
 
 class MainWindow;
+namespace Td {
+class Session;
+}  // namespace Td
 
-// Global application state. Everything here lives on the main thread, which runs both the
-// GLib main loop (GTK) and Qt's event loop (Telegram Desktop's core): Qt uses GLib's dispatcher.
+// Global application state. Everything here lives on the main thread.
 struct App {
   MainWindow *window = nullptr;
+  Td::Session *session = nullptr;  // Replaced when Telegram ends a session: TDLib can't reopen a closed client.
 };
 
 App &GetApp();
 
-// Hides Telegram Desktop's own (offscreen) window, so it doesn't paint in the background.
-void HideCoreWindow();
-
-// QString <-> UTF-8.
-inline std::string U8(const QString &s) {
-  return s.toStdString();
-}
-inline QString Q(const char *s) {
-  return QString::fromUtf8(s);
-}
-std::string Escape(const QString &s);  // For Pango markup.
-
-// QImage -> GdkTexture (nullptr for a null image). The caller owns the reference.
-GdkTexture *ToTexture(const QImage &image);
+std::string Escape(const std::string &s);  // For Pango markup.
 
 // Small helpers around the plain GTK C API.
 GtkWidget *MakeIconButton(const char *iconName, const char *tooltip, const char *cssClass = nullptr);
 void SetMarginAll(GtkWidget *w, int margin);
 void ClearBox(GtkWidget *box);
-void ShowToast(const QString &text);
+void ShowToast(const std::string &text);
 void OpenUri(const std::string &uri);
-void CopyToClipboard(const QString &text);
+void CopyToClipboard(const std::string &text);
 // Haptic/sound feedback through feedbackd (Phosh), if it runs: "button-pressed" and the like.
 void TriggerFeedback(const char *event);
-
-// GTK uses GLib's native dispatch, outside QApplication::notify(). The Telegram core requires
-// a registered event context before it can postpone widget/media updates.
-using CoreEventDispatcher = void (*)(const std::function<void()> &);
-inline CoreEventDispatcher coreEventDispatcher = nullptr;
-inline void RunCoreEvent(const std::function<void()> &fn) {
-  if (coreEventDispatcher) coreEventDispatcher(fn);
-  else fn(); // Standalone GTK tests, before the core is started.
-}
+// The stylesheet and icons, once a display exists.
+void LoadApplicationStyle();
 
 // Connects a lambda to a GObject signal with no extra arguments besides the instance.
 template <typename Fn>
@@ -76,7 +50,7 @@ void OnClicked(GtkWidget *button, Fn &&fn) {
       button, "clicked",
       G_CALLBACK(+[](GtkWidget *, gpointer data) {
         auto fn = *static_cast<std::function<void()> *>(data);
-        RunCoreEvent(fn);
+        fn();
       }), heap,
       [](gpointer data, GClosure *) { delete static_cast<std::function<void()> *>(data); }, GConnectFlags(0));
 }
@@ -89,13 +63,7 @@ struct SignalThunk {
     // A handler can remove its own widget (opening another chat, for example).
     // Keep the callable alive until it returns, even if GTK destroys its closure.
     auto fn = *static_cast<std::function<R(Args...)> *>(data);
-    if constexpr (std::is_void_v<R>) {
-      RunCoreEvent([&] { fn(args...); });
-    } else {
-      R result{};
-      RunCoreEvent([&] { result = fn(args...); });
-      return result;
-    }
+    return fn(args...);
   }
 };
 

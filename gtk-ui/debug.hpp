@@ -5,6 +5,6 @@
 namespace Contrail {
 
 // Remote control over D-Bus for testing on the phone (CONTRAIL_DEBUG=1), see debug.cpp.
-void RegisterDebugActions(MainWindow &window);
+void RegisterDebugActions(GApplication *application, MainWindow &window);
 
 }  // namespace Contrail
