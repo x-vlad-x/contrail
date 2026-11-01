@@ -5,7 +5,8 @@
 #   tools/phone.sh cmd 'chat 0'   a debug command (see gtk-ui/debug.cpp)
 #   tools/phone.sh shot [file]    screenshot (needs grim: tools/phone.sh get-grim once)
 #   tools/phone.sh log            the end of the log
-#   tools/phone.sh td-install     put the TDLib version (build-td/aarch64) into ~/.local/share/contrail-td-app
+#   tools/phone.sh td-install     put the TDLib version (build-td/aarch64) into ~/.local/share/contrail-td-app,
+#                                 with an icon among the apps ("Contrail TDLib", log: /tmp/contrail-td.log)
 #   tools/phone.sh td-run         start it next to the stable one (log: /tmp/contrail-td.log on the phone)
 #   tools/phone.sh td-stop
 #   tools/phone.sh td-log
@@ -25,7 +26,27 @@ case "${1:-}" in
   td-install)
     rsh 'mkdir -p ~/.local/share/contrail-td-app'
     scp -q "$(dirname "$0")/../build-td/aarch64/contrail.stripped" "$PHONE:.local/share/contrail-td-app/contrail.new"
-    rsh 'mv ~/.local/share/contrail-td-app/contrail.new ~/.local/share/contrail-td-app/contrail' ;;
+    rsh 'mv ~/.local/share/contrail-td-app/contrail.new ~/.local/share/contrail-td-app/contrail'
+    scp -q "$(dirname "$0")/contrail-td-icon.svg" "$PHONE:.local/share/contrail-td-app/icon.svg"
+    rsh 'cat > ~/.local/share/contrail-td-app/start' <<'SCRIPT'
+#!/bin/sh
+exec "$(dirname "$(readlink -f "$0")")/contrail" "$@" >> /tmp/contrail-td.log 2>&1
+SCRIPT
+    # Named after the application ID: that is how the shell ties the window to this icon.
+    rsh 'chmod +x ~/.local/share/contrail-td-app/start
+      cat > ~/.local/share/applications/io.github.x_vlad_x.Contrail.Devel.desktop <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Contrail TDLib
+Comment=Contrail on TDLib, a test version next to the stable one
+Exec=$HOME/.local/share/contrail-td-app/start
+Icon=$HOME/.local/share/contrail-td-app/icon.svg
+Terminal=false
+StartupNotify=true
+Categories=Network;InstantMessaging;
+X-Purism-FormFactor=Workstation;Mobile;
+DESKTOP
+      update-desktop-database ~/.local/share/applications' ;;
   td-run)
     rsh "pkill -f '[c]ontrail-td-app/contrail'; true"  # On its own: the command below contains the same path.
     sleep 1
@@ -33,5 +54,5 @@ case "${1:-}" in
   td-stop) rsh "pkill -f '[c]ontrail-td-app/contrail'; true" ;;
   td-cmd) rsh "$ENV; gdbus call --session --dest $APP_ID.Devel --object-path /io/github/x_vlad_x/Contrail/Devel --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
   td-log) rsh "tail -n ${2:-40} /tmp/contrail-td.log" ;;
-  *) sed -n '2,13p' "$0"; exit 1 ;;
+  *) sed -n '2,14p' "$0"; exit 1 ;;
 esac
