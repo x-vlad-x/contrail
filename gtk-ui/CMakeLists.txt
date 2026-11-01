@@ -61,6 +61,7 @@ add_library(contrail_core STATIC
   main_window.cpp
   td/client.cpp
   td/session.cpp
+  td/store.cpp
   td/strings.cpp)
 target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
 target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS)
@@ -83,4 +84,6 @@ option(CONTRAIL_TESTS "Build the tests of the scripted transport" OFF)
 if (CONTRAIL_TESTS)
   add_executable(td-client-test ${ROOT}/tests/td/client-test.cpp)
   target_link_libraries(td-client-test PRIVATE contrail_core)
+  add_executable(td-store-test ${ROOT}/tests/td/store-test.cpp)
+  target_link_libraries(td-store-test PRIVATE contrail_core)
 endif()
