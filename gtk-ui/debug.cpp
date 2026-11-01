@@ -1,8 +1,14 @@
 // Remote control for testing on the phone without touching it (only with CONTRAIL_DEBUG=1):
 //   tools/phone.sh td-cmd 'tree'
 // Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
+//   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | reply | edit TEXT | delete
+//   search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
+//   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
+//   question, saved)
 #include "debug.hpp"
 
+#include "chat_list.hpp"
+#include "chat_view.hpp"
 #include "main_window.hpp"
 
 #include <string>
@@ -38,6 +44,12 @@ void Print(GtkWidget *widget, int depth, std::string &out) {
   }
 }
 
+// "N ACTION" for a row of a list.
+void ListAction(ChatList *list, const std::string &rest) {
+  const auto gap = rest.find(' ');
+  if (list && gap != std::string::npos) list->debugAction(std::atoi(rest.c_str()), rest.substr(gap + 1));
+}
+
 void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
@@ -50,6 +62,32 @@ void Run(MainWindow &window, const std::string &command) {
     window.debugOpenChat(std::atoi(rest.c_str()));
   } else if (name == "back") {
     window.debugBack();
+  } else if (name == "search") {
+    if (auto *list = window.chatList()) list->startSearch(rest);
+  } else if (name == "archive") {
+    window.openArchive();
+  } else if (name == "list-state") {
+    if (auto *list = window.chatList()) list->debugState();
+  } else if (name == "list-scroll") {
+    if (auto *list = window.chatList()) list->debugScroll(rest);
+  } else if (name == "list-menu") {
+    if (auto *list = window.chatList()) list->debugMenu(std::atoi(rest.c_str()));
+  } else if (name == "list-do") {
+    ListAction(window.chatList(), rest);
+  } else if (name == "archive-do") {
+    ListAction(window.chatList(true), rest);
+  } else if (name == "state" && window.chatView()) {
+    window.chatView()->debugState();
+  } else if (name == "scroll" && window.chatView()) {
+    window.chatView()->debugScroll(rest);
+  } else if (name == "send" && window.chatView()) {
+    window.chatView()->debugSend(rest);
+  } else if (name == "reply" && window.chatView()) {
+    window.chatView()->debugReply();
+  } else if (name == "edit" && window.chatView()) {
+    window.chatView()->debugEdit(rest);
+  } else if (name == "delete" && window.chatView()) {
+    window.chatView()->debugDelete();
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));

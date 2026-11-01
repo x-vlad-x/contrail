@@ -133,6 +133,11 @@ class Store final {
   // Asks for a file; progress comes through onFile. Priority 1 to 32, higher goes first.
   void download(FileId id, int priority = 1);
   void cancelDownload(FileId id);
+  // `failed` as in Client::request: without it the error goes to the client's handler.
+  using Failed = std::function<void(api::error &)>;
+  void setMuted(ChatId id, bool muted, Failed failed = nullptr);
+  // Reads everything in the chat, closed or open, and takes away the "unread" mark.
+  void markRead(ChatId id, Failed failed = nullptr);
 
   void onChat(ChatHandler handler, const Lifetime &lifetime);
   void onList(ListHandler handler, const Lifetime &lifetime);

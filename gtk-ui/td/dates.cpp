@@ -7,6 +7,8 @@
 #include <langinfo.h>
 
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
@@ -49,6 +51,27 @@ std::string FormatDay(std::int32_t date) {
   const auto day = std::to_string(local.tm_mday);
   if (local.tm_year == thisYear) return Tr("lng_month_day", {{"month", month}, {"day", day}});
   return Tr("lng_month_day_year", {{"month", month}, {"day", day}, {"year", std::to_string(local.tm_year + 1900)}});
+}
+
+std::string FormatListDate(std::int32_t date) {
+  static const char *const kWeekdays[] = {"lng_weekday7", "lng_weekday1", "lng_weekday2", "lng_weekday3",
+                                          "lng_weekday4", "lng_weekday5", "lng_weekday6"};
+  constexpr auto kRecentSeconds = 20 * 3600;
+  const auto now = Now();
+  const auto local = Local(date);
+  const auto today = Local(now);
+  const auto sameDay = local.tm_year == today.tm_year && local.tm_yday == today.tm_yday;
+  if (sameDay || std::abs(now - date) < kRecentSeconds) return FormatTime(date);
+  // Whole days between the two local dates; DST makes plain seconds off by an hour.
+  auto first = local;
+  auto second = today;
+  first.tm_hour = second.tm_hour = 12;
+  first.tm_min = second.tm_min = first.tm_sec = second.tm_sec = 0;
+  const auto days = std::llround(std::difftime(mktime(&second), mktime(&first)) / 86400.);
+  if (std::llabs(days) < 7) return Tr(kWeekdays[local.tm_wday]);
+  auto buffer = std::array<char, 32>();
+  std::strftime(buffer.data(), buffer.size(), "%x", &local);
+  return buffer.data();
 }
 
 std::int64_t DayNumber(std::int32_t date) {

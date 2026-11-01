@@ -38,7 +38,8 @@ void SessionClosed(bool lost) {
 void StartSession() {
   auto &program = Instance();
   const auto language = SystemLanguage();
-  // The window's store goes with the client it listens to.
+  // The window's store and open chat go with the client they talk to, while it is still there.
+  program.window->detach();
   GetApp().session = nullptr;
   program.session.reset();
   program.session = std::make_unique<Td::Session>(
@@ -65,6 +66,7 @@ void Shutdown(GApplication *) {
   auto &program = Instance();
   program.quitting = true;
   // Closes TDLib properly: its database must not be left in the middle of a write.
+  if (program.window) program.window->detach();
   GetApp().session = nullptr;
   program.session.reset();
   GetApp().window = nullptr;

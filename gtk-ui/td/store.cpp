@@ -5,6 +5,7 @@
 #include <glib.h>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace Contrail::Td {
@@ -28,6 +29,9 @@ const Object *As(const api::Object *object) {
 FileId PhotoOf(const api::object_ptr<api::chatPhotoInfo> &photo) {
   return photo && photo->small_ ? photo->small_->id_ : 0;
 }
+
+// Past a year TDLib takes any value as "until it's turned back on".
+constexpr auto kMuteForever = std::numeric_limits<std::int32_t>::max();
 
 int ScopeOf(ChatKind kind) {
   return kind == ChatKind::Channel ? 2 : kind == ChatKind::Group ? 1 : 0;
@@ -228,6 +232,36 @@ void Store::download(FileId id, int priority) {
 
 void Store::cancelDownload(FileId id) {
   _client.send(api::make_object<api::cancelDownloadFile>(id, false), nullptr);
+}
+
+void Store::setMuted(ChatId id, bool muted, Failed failed) {
+  // The settings also hold the sound and the previews, which the store doesn't keep: only the mute may change.
+  _client.request<api::chat>(
+      api::make_object<api::getChat>(id), _lifetime,
+      [this, id, muted, failed](api::chat &chat) {
+        if (!chat.notification_settings_) return;
+        auto settings = std::move(chat.notification_settings_);
+        settings->use_default_mute_for_ = false;
+        settings->mute_for_ = muted ? kMuteForever : 0;
+        _client.request<api::ok>(api::make_object<api::setChatNotificationSettings>(id, std::move(settings)), _lifetime,
+                                 [](api::ok &) {}, failed);
+      },
+      failed);
+}
+
+void Store::markRead(ChatId id, Failed failed) {
+  const auto found = chat(id);
+  if (!found) return;
+  const auto send = [&](FunctionPtr function) {
+    _client.request<api::ok>(std::move(function), _lifetime, [](api::ok &) {}, failed);
+  };
+  if (found->lastMessageId) {
+    auto messages = std::vector<std::int64_t>{found->lastMessageId};
+    send(api::make_object<api::viewMessages>(id, std::move(messages), api::make_object<api::messageSourceChatList>(), true));
+  }
+  if (found->unreadMentions > 0) send(api::make_object<api::readAllChatMentions>(id));
+  if (found->unreadReactions > 0) send(api::make_object<api::readAllChatReactions>(id));
+  if (found->markedUnread) send(api::make_object<api::toggleChatIsMarkedAsUnread>(id, false));
 }
 
 void Store::onChat(ChatHandler handler, const Lifetime &lifetime) {
@@ -559,8 +593,11 @@ void Store::updated(api::Update &update) {
       auto &data = static_cast<api::updateUnreadChatCount &>(update);
       if (!data.chat_list_) break;
       const auto id = data.chat_list_->get_id();
-      if (id == api::chatListMain::ID) _lists[int(ListKind::Main)].unreadChats = data.unread_count_;
-      if (id == api::chatListArchive::ID) _lists[int(ListKind::Archive)].unreadChats = data.unread_count_;
+      if (id != api::chatListMain::ID && id != api::chatListArchive::ID) break;
+      const auto kind = id == api::chatListMain::ID ? ListKind::Main : ListKind::Archive;
+      _lists[int(kind)].unreadChats = data.unread_count_;
+      // The order is the same, so nothing to sort: the archive's row only shows this number.
+      notify(_listHandlers, kind);
       break;
     }
     case api::updateOption::ID: {

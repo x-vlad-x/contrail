@@ -25,6 +25,8 @@ class MainWindow final {
 
   // Follows a new TDLib client: a lost session starts one with an empty database.
   void attach(Td::Session &session, const std::string &language);
+  // Lets go of the client before it is destroyed.
+  void detach();
   // Telegram ended the session: says why instead of just showing the login again.
   void showSessionLost();
 
@@ -35,6 +37,7 @@ class MainWindow final {
   [[nodiscard]] Td::ChatId currentChat() const;
   [[nodiscard]] Td::Store *store() const { return _store.get(); }
   [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
+  [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);

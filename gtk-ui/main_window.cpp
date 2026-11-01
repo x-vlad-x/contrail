@@ -1,5 +1,7 @@
 #include "main_window.hpp"
 
+#include "scroll_helpers.hpp"
+
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "login.hpp"
@@ -35,6 +37,14 @@ void AlertInWindow(GtkWidget *window, const std::string &heading, const std::str
 
 MainWindow::MainWindow(GtkApplication *application) {
   _window = adw_application_window_new(application);
+  // Every press, motion and release passes here before the widgets under the finger: see TrackTap.
+  auto *taps = gtk_event_controller_legacy_new();
+  gtk_event_controller_set_propagation_phase(taps, GTK_PHASE_CAPTURE);
+  g_signal_connect(taps, "event", G_CALLBACK(+[](GtkEventControllerLegacy *, GdkEvent *event, gpointer) -> gboolean {
+    TrackTap(event);
+    return FALSE;
+  }), nullptr);
+  gtk_widget_add_controller(_window, taps);
   gtk_window_set_title(GTK_WINDOW(_window), "Contrail TD");
   gtk_window_set_default_size(GTK_WINDOW(_window), 900, 700);
   gtk_widget_set_size_request(_window, 320, 294);
@@ -119,6 +129,12 @@ void MainWindow::present() {
 
 void MainWindow::showToast(const std::string &text) {
   adw_toast_overlay_add_toast(_toasts, adw_toast_new(text.c_str()));
+}
+
+void MainWindow::detach() {
+  clearChats();
+  _sessionLifetime.reset();
+  _session = nullptr;
 }
 
 void MainWindow::attach(Td::Session &session, const std::string &language) {

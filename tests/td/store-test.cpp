@@ -1,4 +1,5 @@
 // The store on scripted updates: no network, no account.
+#include "td/dates.hpp"
 #include "td/store.hpp"
 
 #include <glib.h>
@@ -17,6 +18,11 @@ class ScriptedTransport final : public Td::Transport {
     _sent.push_back(function->get_id());
     _ids.push_back(id);
     last = id;
+    _last = std::move(function);
+  }
+  [[nodiscard]] const api::chatNotificationSettings *lastSettings() const {
+    if (!_last || _last->get_id() != api::setChatNotificationSettings::ID) return nullptr;
+    return static_cast<const api::setChatNotificationSettings &>(*_last).notification_settings_.get();
   }
   std::uint64_t last = 0;
 
@@ -24,6 +30,7 @@ class ScriptedTransport final : public Td::Transport {
   Sink &_sink;
   std::vector<std::int32_t> &_sent;
   std::vector<std::uint64_t> _ids;
+  Td::FunctionPtr _last;
 };
 
 struct Fixture {
@@ -170,6 +177,60 @@ void CompleteFilesAreNotAskedAgain() {
   g_assert_true(f.sent.empty());
 }
 
+void MuteKeepsTheOtherSettings() {
+  auto f = Fixture();
+  f.addChat(1, 100);
+  f.store.setMuted(1, true);
+  g_assert_cmpint(f.sent.back(), ==, api::getChat::ID);
+  auto chat = api::make_object<api::chat>();
+  chat->id_ = 1;
+  chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+  chat->notification_settings_->use_default_mute_for_ = true;
+  chat->notification_settings_->sound_id_ = 42;
+  f.sink(f.transport->last, std::move(chat));
+  g_assert_cmpint(f.sent.back(), ==, api::setChatNotificationSettings::ID);
+  const auto settings = f.transport->lastSettings();
+  g_assert_nonnull(settings);
+  g_assert_false(settings->use_default_mute_for_);
+  g_assert_cmpint(settings->mute_for_, >, 366 * 86400);
+  g_assert_cmpint(settings->sound_id_, ==, 42);
+}
+
+void MarkReadClearsEverythingThatShows() {
+  auto f = Fixture();
+  f.addChat(1, 100);
+  auto message = api::make_object<api::message>();
+  message->id_ = 77;
+  f.update(api::make_object<api::updateChatLastMessage>(1, std::move(message),
+                                                        std::vector<api::object_ptr<api::chatPosition>>()));
+  f.update(api::make_object<api::updateChatUnreadMentionCount>(1, 1));
+  f.update(api::make_object<api::updateChatUnreadReactionCount>(1, 1));
+  f.update(api::make_object<api::updateChatIsMarkedAsUnread>(1, true));
+  f.store.markRead(1);
+  g_assert_true((f.sent == std::vector<std::int32_t>{api::viewMessages::ID, api::readAllChatMentions::ID,
+                                                     api::readAllChatReactions::ID,
+                                                     api::toggleChatIsMarkedAsUnread::ID}));
+}
+
+void UnreadChatsReachTheList() {
+  auto f = Fixture();
+  auto told = std::vector<ListKind>();
+  auto lifetime = Td::Lifetime();
+  f.store.onList([&](ListKind kind) { told.push_back(kind); }, lifetime);
+  f.update(api::make_object<api::updateUnreadChatCount>(api::make_object<api::chatListArchive>(), 9, 4, 0, 0, 0));
+  g_assert_cmpint(f.store.unreadChats(ListKind::Archive), ==, 4);
+  g_assert_true((told == std::vector<ListKind>{ListKind::Archive}));
+}
+
+void ListDates() {
+  const auto now = Td::Now();
+  g_assert_cmpstr(Td::FormatListDate(now).c_str(), ==, Td::FormatTime(now).c_str());
+  // Three days back it is a weekday, a month back a date with digits.
+  const auto weekday = Td::FormatListDate(now - 3 * 86400);
+  g_assert_cmpuint(weekday.size(), ==, 3);
+  g_assert_true(Td::FormatListDate(now - 30 * 86400).find_first_of("0123456789") != std::string::npos);
+}
+
 }  // namespace
 }  // namespace Contrail
 
@@ -186,5 +247,9 @@ int main(int argc, char **argv) {
   g_test_add_func("/store/subscribers", SubscribersEndWithTheirLifetime);
   g_test_add_func("/store/load-end", LoadStopsAtTheEndOfTheList);
   g_test_add_func("/store/complete-file", CompleteFilesAreNotAskedAgain);
+  g_test_add_func("/store/mute", MuteKeepsTheOtherSettings);
+  g_test_add_func("/store/mark-read", MarkReadClearsEverythingThatShows);
+  g_test_add_func("/store/unread-chats", UnreadChatsReachTheList);
+  g_test_add_func("/store/list-dates", ListDates);
   return g_test_run();
 }
