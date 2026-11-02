@@ -15,12 +15,15 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numbers>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace Contrail {
 namespace {
@@ -47,8 +50,9 @@ constexpr auto kQualityKey = "contrail-media-quality";
 constexpr auto kGenerationKey = "contrail-media-generation";
 constexpr auto kMiniKey = "contrail-media-mini";  // The blurred thumbnail, what a picture far off shows.
 constexpr auto kCancelKey = "contrail-media-cancel";  // Cancels the picture's decodes not started yet.
-// Pictures are decoded two at a time. GLib's pool behind g_task_run_in_thread grows to ten threads under a page of
-// photos, and they all take the cores the drawing needs; two keep up with a fling (25–50 ms a photo on the FLX1s).
+// Pictures are decoded two at a time, plus the large lane (FeedDecodes()). GLib's pool behind g_task_run_in_thread
+// grows to ten threads under a page of photos, and they all take the cores the drawing needs; two keep up with a
+// fling (25–50 ms a photo on the FLX1s).
 constexpr auto kDecodeThreads = 2;
 
 // What a picture shows. A slower decode of something worse must not replace something better.
@@ -265,20 +269,96 @@ struct PictureDecode {
   int width = 0;
   int height = 0;
   int generation = 0;
+  // Found to be a large picture whose turn hadn't come: it waits for the large lane. Written by the decode thread
+  // before the task comes back to the main thread.
+  bool large = false;
 };
 
+// The decodes waiting, on the main thread, each holding its task. They are handed to the threads a few at a time,
+// the nearest to the screen first, as it is when a thread gets free: a fling's later pictures don't wait behind the
+// ones it has left. Large progressive JPEGs (most of Telegram's photos) take turns in a lane of their own, so they
+// don't keep both threads waiting for each other.
+std::vector<GTask *> PendingDecodes;
+std::atomic<int> DecodesInPool = 0;   // Handed to DecodePool(), not finished.
+std::atomic<int> DecodesInLarge = 0;  // Handed to LargePool(), not finished.
+guint FeedSource = 0;
+
+void FeedDecodes();
+
+[[nodiscard]] PictureDecode &DecodeOf(GTask *task) {
+  return *static_cast<PictureDecode *>(g_task_get_task_data(task));
+}
+
+// The main thread only: one feeding for everything asked in this pass (a row's pictures, a viewport's rows).
+void ScheduleFeed() {
+  if (FeedSource) return;
+  FeedSource = g_idle_add(+[](gpointer) -> gboolean {
+    FeedSource = 0;
+    FeedDecodes();
+    return G_SOURCE_REMOVE;
+  }, nullptr);
+}
+
+// From a decode thread. The task holds its picture (the source object): its last reference must go on the main
+// thread, where the widget may be finalized, never here. Holding this one until then keeps GTask's own references
+// from being the last.
+// At the default priority, above GTK's drawing: a free thread doesn't wait for a fling's frames to leave time.
+void ReleaseOnMain(GTask *task) {
+  g_idle_add_full(G_PRIORITY_DEFAULT, +[](gpointer data) -> gboolean {
+    g_object_unref(data);
+    FeedDecodes();
+    return G_SOURCE_REMOVE;
+  }, task, nullptr);
+}
+
 // A texture as large as the picture on the screen: drawing a downscaled full-size photo costs time on every frame
-// while scrolling, and the memory of all the loaded photos.
-void DecodePicture(GTask *task, gpointer, gpointer data, GCancellable *) {
-  const auto &decode = *static_cast<PictureDecode *>(data);
-  static const auto debug = g_getenv("CONTRAIL_DEBUG") != nullptr;
-  const auto start = debug ? g_get_monotonic_time() : 0;
-  auto *pixbuf = DecodePictureFile(decode.path.c_str(), decode.width, decode.height);
-  if (debug && pixbuf) {
-    g_debug("Picture: %dx%d in %.1f ms, %s", gdk_pixbuf_get_width(pixbuf), gdk_pixbuf_get_height(pixbuf),
-            (g_get_monotonic_time() - start) / 1000., decode.path.c_str());
+// while scrolling, and the memory of all the loaded photos. `lane` is non-null in the large lane, which waits for
+// its turn; the other threads leave a large picture whose turn hasn't come to it.
+void DecodeInPool(gpointer data, gpointer lane) {
+  auto *task = G_TASK(data);
+  const auto inLarge = (lane != nullptr);
+  auto &counter = inLarge ? DecodesInLarge : DecodesInPool;
+  if (!g_task_return_error_if_cancelled(task)) {
+    auto &decode = DecodeOf(task);
+    static const auto debug = g_getenv("CONTRAIL_DEBUG") != nullptr;
+    const auto start = debug ? g_get_monotonic_time() : 0;
+    auto deferred = false;
+    auto *pixbuf = DecodePictureFile(decode.path.c_str(), decode.width, decode.height,
+                                     {.waitForLarge = inLarge, .deferred = &deferred,
+                                      .cancellable = g_task_get_cancellable(task)});
+    if (deferred) {
+      decode.large = true;
+      --counter;
+      // Back to the main thread's queue, with its reference.
+      g_idle_add_full(G_PRIORITY_DEFAULT, +[](gpointer data) -> gboolean {
+        PendingDecodes.push_back(G_TASK(data));
+        FeedDecodes();
+        return G_SOURCE_REMOVE;
+      }, task, nullptr);
+      return;
+    }
+    if (debug && pixbuf) {
+      g_debug("Picture: %dx%d in %.1f ms, %s", gdk_pixbuf_get_width(pixbuf), gdk_pixbuf_get_height(pixbuf),
+              (g_get_monotonic_time() - start) / 1000., decode.path.c_str());
+    }
+    if (!pixbuf && g_task_return_error_if_cancelled(task)) {
+      // Cancelled while it waited for its turn.
+    } else {
+      g_task_return_pointer(task, pixbuf, pixbuf ? g_object_unref : nullptr);
+    }
   }
-  g_task_return_pointer(task, pixbuf, pixbuf ? g_object_unref : nullptr);
+  --counter;
+  ReleaseOnMain(task);
+}
+
+[[nodiscard]] GThreadPool *DecodePool() {
+  static auto *pool = g_thread_pool_new(DecodeInPool, nullptr, kDecodeThreads, FALSE, nullptr);
+  return pool;
+}
+
+[[nodiscard]] GThreadPool *LargePool() {
+  static auto *pool = g_thread_pool_new(DecodeInPool, GINT_TO_POINTER(1), 1, FALSE, nullptr);
+  return pool;
 }
 
 void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
@@ -288,9 +368,8 @@ void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
   auto *pixbuf = static_cast<GdkPixbuf *>(g_task_propagate_pointer(task, nullptr));
   if (!pixbuf) return;
   const auto quality = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(task), kQualityKey));
-  const auto &decode = *static_cast<PictureDecode *>(g_task_get_task_data(task));
   if (GPOINTER_TO_INT(g_object_get_data(source, kQualityKey)) > quality
-      || GPOINTER_TO_INT(g_object_get_data(source, kGenerationKey)) != decode.generation
+      || GPOINTER_TO_INT(g_object_get_data(source, kGenerationKey)) != DecodeOf(task).generation
       || gdk_pixbuf_get_bits_per_sample(pixbuf) != 8) {
     g_object_unref(pixbuf);
     return;
@@ -299,6 +378,66 @@ void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
   auto *texture = TextureFromPixbuf(pixbuf);
   gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
   g_object_unref(texture);
+}
+
+// How far the picture is from the visible part of the list it scrolls in, 0 on the screen.
+[[nodiscard]] double ScreenDistance(GtkWidget *picture) {
+  auto *scroll = gtk_widget_get_ancestor(picture, GTK_TYPE_SCROLLED_WINDOW);
+  graphene_rect_t bounds;
+  if (!scroll || !gtk_widget_compute_bounds(picture, scroll, &bounds)) return std::numeric_limits<double>::max();
+  const auto top = double(bounds.origin.y), bottom = top + bounds.size.height;
+  return (bottom < 0) ? -bottom : std::max(top - gtk_widget_get_height(scroll), 0.);
+}
+
+void FeedDecodes() {
+  // The cancelled ones end here, and let their pictures go.
+  std::erase_if(PendingDecodes, [](GTask *task) {
+    if (!g_task_return_error_if_cancelled(task)) return false;
+    g_object_unref(task);
+    return true;
+  });
+  // One more than the threads in each lane: none waits for work (the second large one waits for the turn).
+  auto freePool = kDecodeThreads + 1 - DecodesInPool.load();
+  auto freeLarge = 2 - DecodesInLarge.load();
+  const auto anyLarge = std::ranges::any_of(PendingDecodes, [](GTask *task) { return DecodeOf(task).large; });
+  const auto anySmall = std::ranges::any_of(PendingDecodes, [](GTask *task) { return !DecodeOf(task).large; });
+  if (!(freePool > 0 && anySmall) && !(freeLarge > 0 && anyLarge)) return;
+  // The distances are measured once a feeding; only the few nearest are put in order.
+  auto order = std::vector<std::pair<double, std::size_t>>();
+  order.reserve(PendingDecodes.size());
+  for (auto i = std::size_t(0); i < PendingDecodes.size(); ++i) {
+    order.emplace_back(ScreenDistance(GTK_WIDGET(g_task_get_source_object(PendingDecodes[i]))), i);
+  }
+  // By distance, then in the order asked. At most this many are handed out of each lane's kind.
+  const auto wanted = std::min(order.size(), std::size_t(std::max(freePool, 0) + std::max(freeLarge, 0)));
+  if (anyLarge && anySmall) {
+    std::ranges::sort(order);  // Mixed: the nearest of each kind can be anywhere.
+  } else {
+    std::ranges::partial_sort(order, order.begin() + std::ptrdiff_t(wanted));
+    order.resize(wanted);
+  }
+  auto handed = std::vector<bool>(PendingDecodes.size());
+  for (const auto &[distance, i] : order) {
+    auto *task = PendingDecodes[i];
+    if (DecodeOf(task).large) {
+      if (freeLarge <= 0) continue;
+      --freeLarge;
+      ++DecodesInLarge;
+      g_thread_pool_push(LargePool(), task, nullptr);
+    } else {
+      if (freePool <= 0) continue;
+      --freePool;
+      ++DecodesInPool;
+      g_thread_pool_push(DecodePool(), task, nullptr);
+    }
+    handed[i] = true;
+    if (freePool <= 0 && freeLarge <= 0) break;
+  }
+  auto kept = std::size_t(0);
+  for (auto i = std::size_t(0); i < PendingDecodes.size(); ++i) {
+    if (!handed[i]) PendingDecodes[kept++] = PendingDecodes[i];
+  }
+  PendingDecodes.resize(kept);
 }
 
 [[nodiscard]] GCancellable *PictureCancellable(GtkWidget *picture) {
@@ -310,25 +449,14 @@ void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
   return cancellable;
 }
 
-// The picture's decodes still waiting don't run; the next ones get a new cancellable.
+// The picture's decodes still waiting don't run (a large one waiting for its turn stops there); the next ones get a
+// new cancellable.
 void CancelPictureDecodes(GtkWidget *picture) {
   if (auto *cancellable = g_object_get_data(G_OBJECT(picture), kCancelKey)) {
     g_cancellable_cancel(G_CANCELLABLE(cancellable));
     g_object_set_data(G_OBJECT(picture), kCancelKey, nullptr);
+    ScheduleFeed();  // Lets the queue drop them, and the picture.
   }
-}
-
-[[nodiscard]] GThreadPool *DecodePool() {
-  static auto *pool = g_thread_pool_new(
-      [](gpointer data, gpointer) {
-        auto *task = G_TASK(data);
-        if (!g_task_return_error_if_cancelled(task)) {
-          DecodePicture(task, g_task_get_source_object(task), g_task_get_task_data(task), nullptr);
-        }
-        g_object_unref(task);
-      },
-      nullptr, kDecodeThreads, FALSE, nullptr);
-  return pool;
 }
 
 void LoadPicture(GtkWidget *picture, const std::string &path, PictureQuality quality) {
@@ -340,7 +468,8 @@ void LoadPicture(GtkWidget *picture, const std::string &path, PictureQuality qua
   auto *task = g_task_new(picture, PictureCancellable(picture), PictureDecoded, nullptr);
   g_task_set_task_data(task, decode, [](gpointer data) { delete static_cast<PictureDecode *>(data); });
   g_object_set_data(G_OBJECT(task), kQualityKey, GINT_TO_POINTER(int(quality)));
-  g_thread_pool_push(DecodePool(), task, nullptr);  // The pool's function drops the reference.
+  PendingDecodes.push_back(task);  // The queue holds the reference.
+  ScheduleFeed();
 }
 
 // The blurred picture a message carries in itself, a JPEG of a few hundred bytes: small enough to decode right here.

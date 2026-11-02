@@ -73,11 +73,15 @@ class Cache final {
     g_object_set_data(G_OBJECT(avatar), kFileKey, GINT_TO_POINTER(file));
     auto &cached = _cached[file];
     const auto known = _store.file(file);
-    auto *texture = (known && known->complete) ? textureFor(cached, *known, AvatarPixels(avatar)) : nullptr;
+    const auto pixels = AvatarPixels(avatar);
+    // A texture kept is shown even if the file has gone from the disk since (TDLib's storage cleanup).
+    auto *texture = keptTexture(cached, pixels);
+    if (!texture && known && known->complete) texture = textureFor(cached, *known, pixels);
     adw_avatar_set_custom_image(avatar, texture ? GDK_PAINTABLE(texture) : nullptr);
     if (!texture && !cached.broken) {
       wait(cached, avatar);
-      if (!cached.requested) {
+      // Asked again when the file went away after it was asked for and nothing is downloading it.
+      if (!cached.requested || (known && !known->complete && !known->downloading)) {
         cached.requested = true;
         _store.download(file);  // Can answer before this returns, so `cached` isn't used after it.
       }
@@ -105,15 +109,21 @@ class Cache final {
     cached.waiting.push_back(ref);
   }
 
-  // The file's texture at that size, read from the downloaded file if it isn't kept.
-  GdkTexture *textureFor(Cached &cached, const Td::File &file, int pixels) {
-    if (cached.broken) return nullptr;
+  // The file's texture at that size if it is kept.
+  GdkTexture *keptTexture(Cached &cached, int pixels) {
     for (auto &sized : cached.sizes) {
       if (sized.pixels == pixels) {
         sized.used = ++_clock;
         return sized.texture;
       }
     }
+    return nullptr;
+  }
+
+  // The file's texture at that size, read from the downloaded file if it isn't kept.
+  GdkTexture *textureFor(Cached &cached, const Td::File &file, int pixels) {
+    if (cached.broken) return nullptr;
+    if (auto *kept = keptTexture(cached, pixels)) return kept;
     auto *texture = load(file.path, pixels);
     if (!texture) {
       cached.broken = true;
@@ -126,8 +136,10 @@ class Cache final {
 
   // Small enough to read right here, before the avatar is drawn: the chat list shows no initials for a moment.
   static GdkTexture *load(const std::string &path, int pixels) {
-    if (auto *pixbuf = DecodePictureFile(path.c_str(), pixels, pixels, false)) return TextureFromPixbuf(pixbuf);
-    // Neither JPEG nor PNG: GTK reads the rest, whole.
+    // Never waits here for a large photo being decoded on a thread (an avatar file is at most 640 px anyway).
+    const auto options = DecodeOptions{.pixbufFallback = false, .waitForLarge = false};
+    if (auto *pixbuf = DecodePictureFile(path.c_str(), pixels, pixels, options)) return TextureFromPixbuf(pixbuf);
+    // Neither JPEG nor PNG, or a large one whose turn hasn't come: GTK reads it, whole.
     auto *error = static_cast<GError *>(nullptr);
     auto *texture = gdk_texture_new_from_filename(path.c_str(), &error);
     if (error) {
@@ -141,6 +153,7 @@ class Cache final {
     const auto it = _cached.find(file.id);
     if (it == _cached.end() || !file.complete) return;
     auto &cached = it->second;
+    cached.broken = false;  // Downloaded again: what failed to read before may read now.
     for (auto *ref : cached.waiting) {
       auto *avatar = g_weak_ref_get(ref);
       if (!avatar) continue;

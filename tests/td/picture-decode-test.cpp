@@ -322,6 +322,58 @@ void LargeProgressiveOnesTakeTurns() {
     g_assert_cmpint(sizes[i].first, ==, 400);
     g_assert_cmpint(sizes[i].second, ==, 300);
   }
+  g_assert_cmpint(LargeDecodesAtOnce(), ==, 1);
+}
+
+// One that doesn't wait gives nothing while a large one is decoded, and says so; a small one still goes on.
+void LargeOnesCanBeDeferred() {
+  const auto huge = SaveProgressiveJpeg("huge-progressive.jpg", 6000, 4000);
+  const auto large = SaveProgressiveJpeg("large-progressive-2.jpg", 2560, 1920);
+  const auto small = SaveProgressiveJpeg("small-progressive-2.jpg", 640, 480);
+  GdkPixbuf *first = nullptr;
+  auto thread = std::thread([&] { first = DecodePictureFile(huge.c_str(), 0, 0); });
+  const auto deadline = g_get_monotonic_time() + 20 * G_TIME_SPAN_SECOND;
+  while (LargeDecodesNow() == 0) {
+    if (g_get_monotonic_time() > deadline) g_error("the large decode never took its turn");
+    g_usleep(100);
+  }
+  auto deferred = false;
+  const auto options = DecodeOptions{.waitForLarge = false, .deferred = &deferred};
+  g_assert_null(DecodePictureFile(large.c_str(), 300, 300, options));
+  g_assert_true(deferred);
+  deferred = false;
+  auto *beside = DecodePictureFile(small.c_str(), 300, 300, options);
+  g_assert_nonnull(beside);
+  g_assert_false(deferred);
+  g_object_unref(beside);
+  thread.join();
+  g_assert_nonnull(first);
+  g_assert_cmpint(gdk_pixbuf_get_width(first), ==, 6000);
+  g_object_unref(first);
+}
+
+// Cancelled: nothing, and no other decoder tries it either.
+void CancelledGivesNothing() {
+  auto *cancellable = g_cancellable_new();
+  g_cancellable_cancel(cancellable);
+  const auto options = DecodeOptions{.cancellable = cancellable};
+  g_assert_null(DecodePictureFile(SaveJpeg("cancelled.jpg", 64, 48).c_str(), 0, 0, options));
+  g_object_unref(cancellable);
+}
+
+// Sizes round up to cover (1279 at a half is 640, not 639), and libjpeg's n/8 size one pixel over that is kept, not
+// resampled: 1280 for 639 is decoded at a half, 640.
+void OnePixelOverIsKept() {
+  const auto check = [](const char *name, int width, int height, int targetWidth, int targetHeight) {
+    const auto path = SaveJpeg(name, width, height);
+    auto *decoded = DecodePictureFile(path.c_str(), targetWidth, targetHeight);
+    g_assert_nonnull(decoded);
+    g_assert_cmpint(gdk_pixbuf_get_width(decoded), ==, 640);
+    g_assert_cmpint(gdk_pixbuf_get_height(decoded), ==, 480);
+    g_object_unref(decoded);
+  };
+  check("odd.jpg", 1279, 960, 100, 480);
+  check("over.jpg", 1280, 960, 639, 100);
 }
 
 void BadFilesGiveNothing() {
@@ -358,6 +410,9 @@ int main(int argc, char **argv) {
   g_test_add_func("/picture/png", PngKeepsTransparency);
   g_test_add_func("/picture/png-wide", WidePngsBecomeEightBits);
   g_test_add_func("/picture/progressive", LargeProgressiveOnesTakeTurns);
+  g_test_add_func("/picture/deferred", LargeOnesCanBeDeferred);
+  g_test_add_func("/picture/cancelled", CancelledGivesNothing);
+  g_test_add_func("/picture/one-pixel-over", OnePixelOverIsKept);
   g_test_add_func("/picture/bad", BadFilesGiveNothing);
   g_test_add_func("/picture/truncated", TruncatedJpegStillShows);
   return g_test_run();

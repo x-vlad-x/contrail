@@ -23,6 +23,7 @@ double DeviceScale(GtkWidget *widget) {
 }
 
 int DevicePixels(GtkWidget *widget, int size) {
+  if (size <= 0) return 0;  // No size: the whole picture.
   // A hair below a whole number is that number: 32 × 1.75 is 56, not 57 from float rounding.
   return std::max(int(std::ceil(size * DeviceScale(widget) - 0.01)), 1);
 }

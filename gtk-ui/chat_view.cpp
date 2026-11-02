@@ -147,6 +147,7 @@ void DescribeSender(const Td::Store &store, const api::message &message, std::st
 // leaves its header out, and gtk_list_box_get_row_at_y finds nothing there) or above the first row. Null below the
 // last one.
 [[nodiscard]] GtkListBoxRow *RowFrom(GtkWidget *list, double y) {
+  if (y >= gtk_widget_get_height(list)) return nullptr;
   if (y > 0) {
     if (auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(list), int(y))) return row;
   }
