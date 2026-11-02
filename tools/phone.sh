@@ -11,6 +11,7 @@
 #   tools/phone.sh td-stop
 #   tools/phone.sh td-log
 #   tools/phone.sh td-cmd 'tree'  a debug command (see gtk-ui/debug.cpp)
+#   tools/phone.sh td-mem         its memory, threads and CPU, the same way 0.3.1 was measured (PSS, anonymous + swap)
 set -euo pipefail
 PHONE="${PHONE:-furios}"
 APP_ID=io.github.x_vlad_x.Contrail
@@ -54,5 +55,10 @@ DESKTOP
   td-stop) rsh "pkill -f '[c]ontrail-td-app/contrail'; true" ;;
   td-cmd) rsh "$ENV; gdbus call --session --dest $APP_ID.Devel --object-path /io/github/x_vlad_x/Contrail/Devel --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
   td-log) rsh "tail -n ${2:-40} /tmp/contrail-td.log" ;;
-  *) sed -n '2,14p' "$0"; exit 1 ;;
+  td-mem) rsh 'P=$(pgrep -f "[c]ontrail-td-app/contrail" | head -1); [ -n "$P" ] || { echo "not running"; exit 1; }
+    awk "/^(Pss|Pss_Anon|Pss_File|Anonymous|Swap|SwapPss):/ {printf \"%s %.1f MiB\n\", \$1, \$2/1024}" /proc/$P/smaps_rollup
+    grep -E "^(VmHWM|VmRSS|Threads):" /proc/$P/status
+    ps -o times=,etimes= -p $P | awk "{print \"CPU\", \$1, \"s over\", \$2, \"s\"}"
+    du -sh ~/.local/share/contrail-td/app | cut -f1 | sed "s/^/Data /"' ;;
+  *) sed -n '2,15p' "$0"; exit 1 ;;
 esac
