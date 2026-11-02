@@ -63,7 +63,7 @@ DESKTOP
     point() {
       echo "## $1"
       "$0" td-mem > /tmp/phone-td-mem.txt || { echo "  not running any more"; rsh 'tail -5 /tmp/contrail-td.log'; exit 1; }
-      grep -E '^(Pss|Anonymous|Swap|Threads|CPU|System)' /tmp/phone-td-mem.txt | tr '\n' ' ' | tr -s ' \t' ' '
+      grep -E '^(Pss|Anonymous|Swap|Threads|CPU|System|VmHWM)' /tmp/phone-td-mem.txt | tr '\n' ' ' | tr -s ' \t' ' '
       echo
       local before
       before=$(rsh 'grep -c "mem:" /tmp/contrail-td.log || true')
