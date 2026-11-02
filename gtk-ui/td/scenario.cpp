@@ -1,6 +1,8 @@
 #include "td/scenario.hpp"
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -63,6 +65,94 @@ api::object_ptr<api::message> MakeMessage(std::int64_t chatId, std::int64_t id, 
   content->text_ = Formatted(text);
   message->content_ = std::move(content);
   return message;
+}
+
+// CONTRAIL_SCENARIO_PHOTOS=1: every fourth message is a photo, as large as Telegram sends them, to measure
+// what pictures cost (tools/mem-scenario.sh). Eight pictures in ~/.cache/contrail-scenario, made once; every
+// message still has file ids of its own, so each one is decoded as a different photo would be.
+constexpr auto kScenarioPictures = 8;
+
+bool WithPhotos() {
+  static const auto result = g_getenv("CONTRAIL_SCENARIO_PHOTOS") != nullptr;
+  return result;
+}
+
+std::string PhotoFile(int picture, int width, int height) {
+  auto *name = g_strdup_printf("%d-%dx%d.jpg", picture, width, height);
+  auto *path = g_build_filename(g_get_user_cache_dir(), "contrail-scenario", name, nullptr);
+  auto result = std::string(path);
+  g_free(path);
+  g_free(name);
+  if (g_file_test(result.c_str(), G_FILE_TEST_EXISTS)) return result;
+  auto *directory = g_path_get_dirname(result.c_str());
+  g_mkdir_with_parents(directory, 0700);
+  g_free(directory);
+  auto *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, width, height);
+  if (!pixbuf) {
+    g_warning("Scenario: no memory for a %dx%d picture", width, height);
+    return result;
+  }
+  auto *pixels = gdk_pixbuf_get_pixels(pixbuf);
+  const auto stride = gdk_pixbuf_get_rowstride(pixbuf);
+  for (auto y = 0; y < height; ++y) {
+    for (auto x = 0; x < width; ++x) {
+      auto *pixel = pixels + y * stride + x * 3;
+      pixel[0] = guchar(x * 255 / width);
+      pixel[1] = guchar(y * 255 / height);
+      pixel[2] = guchar((picture * 40 + (x ^ y)) & 0xff);  // Some detail, so the JPEG is not tiny.
+    }
+  }
+  gchar *buffer = nullptr;
+  gsize length = 0;
+  GError *error = nullptr;
+  // Written whole or not at all: two scenarios may start at once, and one may be killed while writing.
+  if (!gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &length, "jpeg", &error, "quality", "85", nullptr)
+      || !g_file_set_contents(result.c_str(), buffer, gssize(length), &error)) {
+    g_warning("Scenario: picture %s not made: %s", result.c_str(), error ? error->message : "?");
+    g_clear_error(&error);
+  }
+  g_free(buffer);
+  g_object_unref(pixbuf);
+  return result;
+}
+
+// Made before anything is shown, so that measurements don't include encoding them.
+void MakePhotoFiles() {
+  for (auto picture = 0; picture < kScenarioPictures; ++picture) {
+    PhotoFile(picture, 320, 240);
+    PhotoFile(picture, 2560, 1920);
+  }
+}
+
+api::object_ptr<api::photoSize> PhotoSize(int index, const char *type, int width, int height) {
+  const auto path = PhotoFile(index % kScenarioPictures, width, height);
+  GStatBuf info;
+  const auto length = g_stat(path.c_str(), &info) == 0 ? std::int64_t(info.st_size) : std::int64_t(0);
+  auto local = api::make_object<api::localFile>();
+  local->path_ = path;
+  local->is_downloading_completed_ = length > 0;
+  local->downloaded_size_ = length;
+  auto file = api::make_object<api::file>();
+  file->id_ = 1000000 + index * 10 + (width > 1000 ? 1 : 0);
+  file->size_ = std::int64_t(length);
+  file->local_ = std::move(local);
+  file->remote_ = api::make_object<api::remoteFile>();
+  auto size = api::make_object<api::photoSize>();
+  size->type_ = type;
+  size->photo_ = std::move(file);
+  size->width_ = width;
+  size->height_ = height;
+  return size;
+}
+
+api::object_ptr<api::MessageContent> PhotoContent(int index) {
+  auto photo = api::make_object<api::photo>();
+  photo->sizes_.push_back(PhotoSize(index, "m", 320, 240));
+  photo->sizes_.push_back(PhotoSize(index, "w", 2560, 1920));
+  auto content = api::make_object<api::messagePhoto>();
+  content->photo_ = std::move(photo);
+  content->caption_ = Formatted(std::string());
+  return content;
 }
 
 std::string MessageText(int index) {
@@ -245,6 +335,7 @@ class ScenarioTransport final : public Transport {
   }
 
   void fill() {
+    if (WithPhotos()) MakePhotoFiles();
     update(api::make_object<api::updateOption>("my_id", api::make_object<api::optionValueInteger>(kSelfId)));
     update(api::make_object<api::updateUser>(MakeUser(kSelfId, "Vlad", "")));
     for (auto i = 1; i <= kChatCount; ++i) {
@@ -430,6 +521,7 @@ class ScenarioTransport final : public Transport {
   api::object_ptr<api::message> messageAt(std::int64_t chatId, int index) {
     const auto sender = index % 3 == 0 ? kSelfId : chatId;
     auto message = MakeMessage(chatId, index * kIdStep, sender, kNow - (MessagesInChat() - index) * 600, MessageText(index));
+    if (WithPhotos() && index % 4 == 1) message->content_ = PhotoContent(index);
     // Every seventh message answers the one before it.
     if (index % 7 == 0) {
       message->reply_to_ = api::make_object<api::messageReplyToMessage>(

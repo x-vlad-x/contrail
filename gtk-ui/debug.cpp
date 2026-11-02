@@ -2,7 +2,7 @@
 //   tools/phone.sh td-cmd 'tree'
 // Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
 //   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | reply | edit TEXT | delete
-//   close | search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
+//   mem | trim | close | search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
 //   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
 //   question, saved)
 #include "debug.hpp"
@@ -10,6 +10,8 @@
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "main_window.hpp"
+
+#include <malloc.h>
 
 #include <string>
 
@@ -54,7 +56,17 @@ void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
-  if (name == "close") {
+  if (name == "mem") {
+    // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
+    // is the main arena's only.
+    const auto info = mallinfo2();
+    g_message("mem: in use %.1f MiB (arenas %.1f, mmap %.1f), free in the arenas %.1f MiB, releasable top %.1f MiB",
+              (info.uordblks + info.hblkhd) / 1048576., info.uordblks / 1048576., info.hblkhd / 1048576.,
+              info.fordblks / 1048576., info.keepcost / 1048576.);
+  } else if (name == "trim") {
+    malloc_trim(0);
+    g_message("trim: done");
+  } else if (name == "close") {
     // As the close button does: the window goes first, the program quits after it.
     gtk_window_close(GTK_WINDOW(window.widget()));
   } else if (name == "tree") {
