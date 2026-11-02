@@ -2,7 +2,9 @@
 
 #include "chat_view.hpp"
 #include "layout.hpp"
+#include "device_scale.hpp"
 #include "media_progress.hpp"
+#include "picture_decode.hpp"
 #include "scroll_helpers.hpp"
 #include "td/dates.hpp"
 #include "td/message_text.hpp"
@@ -41,6 +43,13 @@ constexpr auto kImageIcon = "image-x-generic-symbolic";
 constexpr auto kClockIcon = "contrail-clock-symbolic";
 constexpr auto kIconKey = "contrail-icon";
 constexpr auto kQualityKey = "contrail-media-quality";
+// Bumped when a picture gives its texture back: a decode started before then is dropped when it ends.
+constexpr auto kGenerationKey = "contrail-media-generation";
+constexpr auto kMiniKey = "contrail-media-mini";  // The blurred thumbnail, what a picture far off shows.
+constexpr auto kCancelKey = "contrail-media-cancel";  // Cancels the picture's decodes not started yet.
+// Pictures are decoded two at a time. GLib's pool behind g_task_run_in_thread grows to ten threads under a page of
+// photos, and they all take the cores the drawing needs; two keep up with a fling (25–50 ms a photo on the FLX1s).
+constexpr auto kDecodeThreads = 2;
 
 // What a picture shows. A slower decode of something worse must not replace something better.
 enum PictureQuality { kQualityThumbnail = 1, kQualityFull = 2 };
@@ -255,28 +264,19 @@ struct PictureDecode {
   std::string path;
   int width = 0;
   int height = 0;
+  int generation = 0;
 };
 
 // A texture as large as the picture on the screen: drawing a downscaled full-size photo costs time on every frame
 // while scrolling, and the memory of all the loaded photos.
 void DecodePicture(GTask *task, gpointer, gpointer data, GCancellable *) {
   const auto &decode = *static_cast<PictureDecode *>(data);
-  auto original = 0, originalHeight = 0;
-  GdkPixbuf *pixbuf = nullptr;
-  if (gdk_pixbuf_get_file_info(decode.path.c_str(), &original, &originalHeight)) {
-    if (decode.width > 0 && decode.height > 0 && original > decode.width && originalHeight > decode.height) {
-      const auto scale = std::max(double(decode.width) / original, double(decode.height) / originalHeight);
-      pixbuf = gdk_pixbuf_new_from_file_at_scale(decode.path.c_str(), std::max(int(original * scale), 1),
-                                                 std::max(int(originalHeight * scale), 1), TRUE, nullptr);
-    } else {
-      pixbuf = gdk_pixbuf_new_from_file(decode.path.c_str(), nullptr);
-    }
-  }
-  if (pixbuf) {
-    // Files keep their camera's rotation; Telegram's own photos have none and this returns the same picture.
-    auto *turned = gdk_pixbuf_apply_embedded_orientation(pixbuf);
-    g_object_unref(pixbuf);
-    pixbuf = turned;
+  static const auto debug = g_getenv("CONTRAIL_DEBUG") != nullptr;
+  const auto start = debug ? g_get_monotonic_time() : 0;
+  auto *pixbuf = DecodePictureFile(decode.path.c_str(), decode.width, decode.height);
+  if (debug && pixbuf) {
+    g_debug("Picture: %dx%d in %.1f ms, %s", gdk_pixbuf_get_width(pixbuf), gdk_pixbuf_get_height(pixbuf),
+            (g_get_monotonic_time() - start) / 1000., decode.path.c_str());
   }
   g_task_return_pointer(task, pixbuf, pixbuf ? g_object_unref : nullptr);
 }
@@ -288,33 +288,59 @@ void PictureDecoded(GObject *source, GAsyncResult *result, gpointer) {
   auto *pixbuf = static_cast<GdkPixbuf *>(g_task_propagate_pointer(task, nullptr));
   if (!pixbuf) return;
   const auto quality = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(task), kQualityKey));
+  const auto &decode = *static_cast<PictureDecode *>(g_task_get_task_data(task));
   if (GPOINTER_TO_INT(g_object_get_data(source, kQualityKey)) > quality
+      || GPOINTER_TO_INT(g_object_get_data(source, kGenerationKey)) != decode.generation
       || gdk_pixbuf_get_bits_per_sample(pixbuf) != 8) {
     g_object_unref(pixbuf);
     return;
   }
   g_object_set_data(source, kQualityKey, GINT_TO_POINTER(quality));
-  const auto width = gdk_pixbuf_get_width(pixbuf), height = gdk_pixbuf_get_height(pixbuf);
-  const auto stride = gdk_pixbuf_get_rowstride(pixbuf);
-  auto *bytes = g_bytes_new_with_free_func(gdk_pixbuf_read_pixels(pixbuf), gdk_pixbuf_get_byte_length(pixbuf),
-                                           g_object_unref, pixbuf);
-  const auto format = gdk_pixbuf_get_has_alpha(pixbuf) ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8;
-  auto *texture = gdk_memory_texture_new(width, height, format, bytes, stride);
+  auto *texture = TextureFromPixbuf(pixbuf);
   gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
   g_object_unref(texture);
-  g_bytes_unref(bytes);
+}
+
+[[nodiscard]] GCancellable *PictureCancellable(GtkWidget *picture) {
+  auto *cancellable = static_cast<GCancellable *>(g_object_get_data(G_OBJECT(picture), kCancelKey));
+  if (!cancellable) {
+    cancellable = g_cancellable_new();
+    g_object_set_data_full(G_OBJECT(picture), kCancelKey, cancellable, g_object_unref);
+  }
+  return cancellable;
+}
+
+// The picture's decodes still waiting don't run; the next ones get a new cancellable.
+void CancelPictureDecodes(GtkWidget *picture) {
+  if (auto *cancellable = g_object_get_data(G_OBJECT(picture), kCancelKey)) {
+    g_cancellable_cancel(G_CANCELLABLE(cancellable));
+    g_object_set_data(G_OBJECT(picture), kCancelKey, nullptr);
+  }
+}
+
+[[nodiscard]] GThreadPool *DecodePool() {
+  static auto *pool = g_thread_pool_new(
+      [](gpointer data, gpointer) {
+        auto *task = G_TASK(data);
+        if (!g_task_return_error_if_cancelled(task)) {
+          DecodePicture(task, g_task_get_source_object(task), g_task_get_task_data(task), nullptr);
+        }
+        g_object_unref(task);
+      },
+      nullptr, kDecodeThreads, FALSE, nullptr);
+  return pool;
 }
 
 void LoadPicture(GtkWidget *picture, const std::string &path, PictureQuality quality) {
-  const auto scale = std::max(gtk_widget_get_scale_factor(picture), 1);
-  auto *decode = new PictureDecode{
-      path, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-width")) * scale,
-      GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), "contrail-media-height")) * scale};
-  auto *task = g_task_new(picture, nullptr, PictureDecoded, nullptr);
+  const auto pixels = [&](const char *key) {
+    return DevicePixels(picture, GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), key)));
+  };
+  auto *decode = new PictureDecode{path, pixels("contrail-media-width"), pixels("contrail-media-height"),
+                                   GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), kGenerationKey))};
+  auto *task = g_task_new(picture, PictureCancellable(picture), PictureDecoded, nullptr);
   g_task_set_task_data(task, decode, [](gpointer data) { delete static_cast<PictureDecode *>(data); });
   g_object_set_data(G_OBJECT(task), kQualityKey, GINT_TO_POINTER(int(quality)));
-  g_task_run_in_thread(task, DecodePicture);
-  g_object_unref(task);
+  g_thread_pool_push(DecodePool(), task, nullptr);  // The pool's function drops the reference.
 }
 
 // The blurred picture a message carries in itself, a JPEG of a few hundred bytes: small enough to decode right here.
@@ -323,9 +349,20 @@ void SetMiniThumbnail(GtkWidget *picture, const api::minithumbnail *mini) {
   auto *bytes = g_bytes_new(mini->data_.data(), mini->data_.size());
   if (auto *texture = gdk_texture_new_from_bytes(bytes, nullptr)) {
     gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
-    g_object_unref(texture);
+    g_object_set_data_full(G_OBJECT(picture), kMiniKey, texture, g_object_unref);
   }
   g_bytes_unref(bytes);
+}
+
+// The picture gives back its decoded texture (and the memory it holds, here and in the GPU) and shows its blurred
+// thumbnail, or nothing; a decode still running is dropped. Its size stays: the list doesn't move.
+void DropPicture(GtkWidget *picture) {
+  CancelPictureDecodes(picture);
+  const auto generation = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(picture), kGenerationKey));
+  g_object_set_data(G_OBJECT(picture), kGenerationKey, GINT_TO_POINTER(generation + 1));
+  g_object_set_data(G_OBJECT(picture), kQualityKey, nullptr);
+  gtk_picture_set_paintable(GTK_PICTURE(picture),
+                            static_cast<GdkPaintable *>(g_object_get_data(G_OBJECT(picture), kMiniKey)));
 }
 
 [[nodiscard]] std::string Percent(double value) {
@@ -501,6 +538,8 @@ void MessageWidget::clearFiles() {
   for (const auto &cell : _cells) {
     ReleasePicture(store, cell->pictureFile);
     ReleasePicture(store, cell->thumbnailFile);
+    // The cell's widgets go: a decode not started yet would be for nothing.
+    if (cell->picture) CancelPictureDecodes(cell->picture);
   }
   _cells.clear();
 }
@@ -1216,12 +1255,30 @@ void MessageWidget::showPicture(Cell &cell, const Td::File &file) {
   if (!cell.picture || cell.pictureFinal || !file.complete || file.path.empty()) {
     return;
   }
-  if (file.id == cell.pictureFile) {
-    // The decode runs on, and what it gives lands in the picture whatever happens to the cell.
-    cell.pictureFinal = true;
-    LoadPicture(cell.picture, file.path, kQualityFull);
-  } else if (file.id == cell.thumbnailFile) {
-    LoadPicture(cell.picture, file.path, kQualityThumbnail);
+  const auto quality = (file.id == cell.pictureFile) ? kQualityFull
+                       : (file.id == cell.thumbnailFile) ? kQualityThumbnail
+                                                         : PictureQuality(0);
+  if (!quality || quality < cell.sourceQuality) return;
+  // The same file again (TDLib tells about a complete file more than once): it is shown already.
+  if (quality == cell.sourceQuality && file.path == cell.sourcePath) return;
+  cell.pictureFinal = (quality == kQualityFull);
+  cell.sourcePath = file.path;
+  cell.sourceQuality = quality;
+  // A decode already running lands in the picture whatever happens to the cell.
+  if (_picturesNear) LoadPicture(cell.picture, file.path, quality);
+}
+
+void MessageWidget::setPicturesNear(bool near) {
+  if (near == _picturesNear) return;
+  _picturesNear = near;
+  for (const auto &cell : _cells) {
+    if (!cell->picture || cell->sourcePath.empty()) continue;
+    if (near) {
+      LoadPicture(cell->picture, cell->sourcePath, PictureQuality(cell->sourceQuality));
+    } else {
+      if (g_getenv("CONTRAIL_DEBUG")) g_debug("Picture: dropped %s", cell->sourcePath.c_str());
+      DropPicture(cell->picture);
+    }
   }
 }
 

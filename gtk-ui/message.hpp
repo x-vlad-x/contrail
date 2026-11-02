@@ -60,6 +60,10 @@ class MessageWidget final {
   // In a run of messages from the same sender only the first shows the name and the avatar.
   void setFirstInGroup(bool first);
   void highlight(const MessageItem *item = nullptr);
+  // Only the rows near the screen keep their pictures decoded: far off they show the blurred thumbnail, and the
+  // texture and its memory go. The downloads and the sizes stay. A new row of a chat has its pictures decoded
+  // once the chat finds it near.
+  void setPicturesNear(bool near);
 
  private:
   enum class PictureKind { None, Photo, Sticker, Thumbnail };
@@ -74,6 +78,8 @@ class MessageWidget final {
     Td::FileId pictureFile = 0;
     Td::FileId thumbnailFile = 0;  // A sticker's, until the sticker itself comes.
     bool pictureFinal = false;
+    std::string sourcePath;  // The downloaded file the picture shows, decoded again when it comes near.
+    int sourceQuality = 0;
     Td::FileId documentFile = 0;
     GtkWidget *documentButton = nullptr;
     GtkWidget *documentStatus = nullptr;
@@ -126,6 +132,7 @@ class MessageWidget final {
   GtkWidget *_footerTime = nullptr;
   GtkWidget *_footerStatus = nullptr;
   bool _replyPending = false;
+  bool _picturesNear = false;
   std::vector<std::unique_ptr<Cell>> _cells;
   GtkWidget *_highlighted = nullptr;
   guint _highlightTimeout = 0;

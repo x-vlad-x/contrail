@@ -14,6 +14,7 @@
 #include <limits>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace Contrail {
 namespace {
@@ -32,6 +33,11 @@ constexpr auto kTopReserveHigh = 300000;  // Rows removed above the screen leave
 // loaded, so the two don't take turns), and only when there are more rows than this.
 constexpr auto kKeepHeight = 2.5 * kPreloadHeight;
 constexpr auto kMaxRows = 300;
+// Pictures are decoded in the rows this close to the screen, about four phone screens each way: a fling finds them
+// ready (a photo takes 25–50 ms). Beyond the farther distance they give their textures back; between the two a row
+// keeps what it has, so one at the edge doesn't take turns.
+constexpr auto kPictureNearHeight = 3000.;
+constexpr auto kPictureFarHeight = 4500.;
 // A fling or a drag of the scroll bar that stops this far above the rows doesn't walk there page by page: the
 // messages where it stopped are loaded at once (jumpUp()).
 constexpr auto kJumpGap = kPreloadHeight;
@@ -656,6 +662,7 @@ void ChatView::unload() {
   setTopReserve(0, 0);
   _unreadRow = nullptr;
   _itemRows.clear();
+  _nearRows.clear();
   _rows.clear();
   _items.clear();
   _viewed.clear();
@@ -852,6 +859,7 @@ void ChatView::setRowItems(MessageWidget *row, Items items) {
 }
 
 void ChatView::forgetRow(MessageWidget *row) {
+  _nearRows.erase(row);
   for (const auto item : row->items()) {
     if (const auto i = _itemRows.find(item); i != _itemRows.end() && i->second == row) _itemRows.erase(i);
   }
@@ -1131,7 +1139,50 @@ void ChatView::updateViewport() {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   gtk_widget_set_visible(_toBottom, !atBottom() && upper > page);
   preloadVisibleEdges();
+  updateNearPictures();
   if (!_readTimer.active()) _readTimer.callOnce(300);
+}
+
+void ChatView::updateNearPictures() {
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
+  graphene_point_t top;
+  if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return;
+  // A fling past the first message, into the room reserved above, comes back to it: the rows at the edge of the list
+  // stay as near as if the screen stood there.
+  top.y = std::clamp(double(top.y), 0., std::max(double(gtk_widget_get_height(_list)) - page, 0.));
+  // The rows move by the shift still to come: until it lands nothing is far.
+  for (auto i = _nearRows.begin(); _pendingShift == 0. && i != _nearRows.end();) {
+    graphene_rect_t bounds;
+    if (!gtk_widget_compute_bounds((*i)->row(), _list, &bounds)
+        || bounds.origin.y + bounds.size.height < top.y - kPictureFarHeight
+        || bounds.origin.y > top.y + page + kPictureFarHeight) {
+      (*i)->setPicturesNear(false);
+      i = _nearRows.erase(i);
+    } else {
+      ++i;
+    }
+  }
+  // Rows from the first one reaching the near distance above the screen, in their order down. The decodes go one
+  // after another: those on the screen first, then outwards.
+  auto coming = std::vector<std::pair<double, MessageWidget *>>();
+  for (auto *row = RowFrom(_list, top.y - kPictureNearHeight); row; row = NextRow(row)) {
+    graphene_rect_t bounds;
+    if (!gtk_widget_get_visible(GTK_WIDGET(row)) || !gtk_widget_compute_bounds(GTK_WIDGET(row), _list, &bounds)) {
+      continue;
+    }
+    if (bounds.origin.y > top.y + page + kPictureNearHeight) break;
+    if (auto *message = RowMessage(row); message && !_nearRows.contains(message)) {
+      const auto bottom = bounds.origin.y + bounds.size.height;
+      const auto distance = (bottom < top.y) ? top.y - bottom : std::max(bounds.origin.y - top.y - page, 0.);
+      coming.emplace_back(distance, message);
+    }
+  }
+  std::ranges::stable_sort(coming, {}, &std::pair<double, MessageWidget *>::first);
+  for (const auto &[distance, message] : coming) {
+    _nearRows.insert(message);
+    message->setPicturesNear(true);
+  }
 }
 
 void ChatView::preloadVisibleEdges() {
@@ -1668,9 +1719,9 @@ void ChatView::debugState() const {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto oldest = oldestId(), newest = newestId();
-  g_message("chat state: messages=%zu rows=%zu oldest=%lld newest=%lld top=%d bottom=%d stick=%d reserve=%d value=%.0f "
+  g_message("chat state: messages=%zu rows=%zu nearRows=%zu oldest=%lld newest=%lld top=%d bottom=%d stick=%d reserve=%d value=%.0f "
             "page=%.0f upper=%.0f toBottom=%d replyTo=%lld editing=%lld draft=\"%s\"",
-            _items.size(), _rows.size(), (long long)(oldest >> 20), (long long)(newest >> 20), int(_reachedTop),
+            _items.size(), _rows.size(), _nearRows.size(), (long long)(oldest >> 20), (long long)(newest >> 20), int(_reachedTop),
             int(_reachedBottom), int(_stickToBottom), _topReserve, value, page, upper,
             int(gtk_widget_get_visible(_toBottom)), (long long)(_replyToId >> 20), (long long)(_editing >> 20),
             _savedDraft.c_str());

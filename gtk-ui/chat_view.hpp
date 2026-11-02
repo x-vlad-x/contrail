@@ -10,6 +10,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Contrail {
@@ -118,6 +119,7 @@ class ChatView final {
   void scheduleViewportUpdate();
   void updateViewport();
   void preloadVisibleEdges();
+  void updateNearPictures();
   [[nodiscard]] int listHeight() const;
   void setTopReserve(int reserve, double shift);
   void maintainTopReserve();
@@ -168,6 +170,7 @@ class ChatView final {
   std::vector<std::unique_ptr<MessageItem>> _items;
   std::unordered_map<MessageWidget *, std::unique_ptr<MessageWidget>> _rows;
   std::unordered_map<const MessageItem *, MessageWidget *> _itemRows;
+  std::unordered_set<MessageWidget *> _nearRows;  // Those with their pictures decoded (updateNearPictures).
   // The messages replies point to, when they aren't near the screen. Null: there is no such message any more.
   std::unordered_map<std::int64_t, Td::api::object_ptr<Td::api::message>> _replied;
   mutable std::set<std::int64_t> _repliedAsked;
