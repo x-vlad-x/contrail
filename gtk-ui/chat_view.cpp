@@ -137,6 +137,29 @@ void DescribeSender(const Td::Store &store, const api::message &message, std::st
   return row ? static_cast<MessageWidget *>(g_object_get_data(G_OBJECT(row), "contrail-message")) : nullptr;
 }
 
+// The row at `y` in the list, or the first shown one below when `y` falls on a date header (a row's allocation
+// leaves its header out, and gtk_list_box_get_row_at_y finds nothing there) or above the first row. Null below the
+// last one.
+[[nodiscard]] GtkListBoxRow *RowFrom(GtkWidget *list, double y) {
+  if (y > 0) {
+    if (auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(list), int(y))) return row;
+  }
+  GtkListBoxRow *row = nullptr;
+  for (auto i = 0; (row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), i)); ++i) {
+    graphene_rect_t bounds;
+    if (gtk_widget_get_visible(GTK_WIDGET(row)) && gtk_widget_compute_bounds(GTK_WIDGET(row), list, &bounds)
+        && bounds.origin.y + bounds.size.height > y) {
+      return row;
+    }
+  }
+  return nullptr;
+}
+
+[[nodiscard]] GtkListBoxRow *NextRow(GtkListBoxRow *row) {
+  return gtk_list_box_get_row_at_index(GTK_LIST_BOX(gtk_widget_get_parent(GTK_WIDGET(row))),
+                                       gtk_list_box_row_get_index(row) + 1);
+}
+
 }  // namespace
 
 void ChatView::Timer::callOnce(guint ms) {
@@ -858,7 +881,6 @@ void ChatView::trimRows() {
   const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
   graphene_point_t top;
   if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return;
-  const auto list = GTK_LIST_BOX(_list);
   auto removed = std::vector<std::unique_ptr<MessageItem>>();
   const auto drop = [&](auto condition) {
     for (auto i = _items.begin(); i != _items.end();) {
@@ -870,7 +892,7 @@ void ChatView::trimRows() {
       }
     }
   };
-  const auto keptBelow = RowMessage(gtk_list_box_get_row_at_y(list, int(top.y + page + kKeepHeight)));
+  const auto keptBelow = RowMessage(RowFrom(_list, top.y + page + kKeepHeight));
   if (keptBelow && !_stickToBottom
       && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptBelow->row())) < int(_rows.size()) - 1) {
     const auto newest = keptBelow->lastItem()->id();
@@ -879,7 +901,7 @@ void ChatView::trimRows() {
     sync();
   }
   const auto aboveY = int(top.y - kKeepHeight);
-  const auto keptAbove = (aboveY > 0) ? RowMessage(gtk_list_box_get_row_at_y(list, aboveY)) : nullptr;
+  const auto keptAbove = (aboveY > 0) ? RowMessage(RowFrom(_list, aboveY)) : nullptr;
   if (keptAbove && gtk_list_box_row_get_index(GTK_LIST_BOX_ROW(keptAbove->row())) > 0) {
     const auto oldest = keptAbove->item()->id();
     const auto heightBefore = listHeight();
@@ -1011,8 +1033,9 @@ void ChatView::scrolled() {
   const auto bottom = atBottom();
   // GTK also changes the adjustment while allocating newly inserted rows. Those changes do not
   // represent a user drag and must not drop the bottom/anchor/target requested before layout.
-  // Only input events opt out of bottom following.
-  if (!_viewportSource && !_scrollTarget && bottom) _stickToBottom = true;
+  // Only input events opt out of bottom following. Nor is a reserve shrinking at the start of the chat a way to
+  // the bottom: GTK clamps the position to the smaller list before the shift waiting for it puts it back.
+  if (!_viewportSource && !_scrollTarget && bottom && _pendingShift == 0.) _stickToBottom = true;
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
   if (!_viewportSource) scheduleViewportUpdate();
   if (!_readTimer.active()) _readTimer.callOnce(300);
@@ -1076,7 +1099,11 @@ void ChatView::updateViewport() {
   if (_applyingPage || !_initialLoaded) return;
   if (!gtk_widget_get_mapped(_root)) return;
   if (gtk_adjustment_get_page_size(_adjustment) <= 0
-      || std::ranges::any_of(_rows, [](const auto &pair) { return gtk_widget_get_height(pair.second->row()) <= 0; })) {
+      || std::ranges::any_of(_rows, [](const auto &pair) {
+           // A hidden row (an empty service message) has no height and never gets one.
+           auto *row = pair.second->row();
+           return gtk_widget_get_visible(row) && gtk_widget_get_height(row) <= 0;
+         })) {
     scheduleViewportUpdate();
     return;
   }
@@ -1134,11 +1161,11 @@ std::vector<MessageWidget *> ChatView::visibleRows() const {
   const graphene_point_t zero = GRAPHENE_POINT_INIT_ZERO;
   graphene_point_t top;
   if (page <= 0 || !gtk_widget_compute_point(_scroll, _list, &zero, &top)) return result;
-  // Above the first message (the room for older pages): the list starts lower on the screen.
-  auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(_list), std::max(int(top.y), 0));
-  if (!row && top.y < 0) row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), 0);
-  for (; row; row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), gtk_list_box_row_get_index(row) + 1)) {
+  // Above the first message (the room for older pages) the list starts lower on the screen; a date header at the
+  // top belongs to the row below it.
+  for (auto *row = RowFrom(_list, top.y); row; row = NextRow(row)) {
     graphene_rect_t bounds;
+    if (!gtk_widget_get_visible(GTK_WIDGET(row))) continue;
     if (!gtk_widget_compute_bounds(GTK_WIDGET(row), _list, &bounds)) break;
     if (bounds.origin.y >= top.y + page) break;
     if (auto *message = RowMessage(row)) result.push_back(message);
