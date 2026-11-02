@@ -12,6 +12,9 @@
 #   tools/phone.sh td-log
 #   tools/phone.sh td-cmd 'tree'  a debug command (see gtk-ui/debug.cpp)
 #   tools/phone.sh td-mem         its memory, threads and CPU, the same way 0.3.1 was measured (PSS, anonymous + swap)
+#   tools/phone.sh td-mem-run [ENV=VALUE...]  restart it with that environment and measure: start, Saved Messages
+#                                 scrolled to the top, closed, a minute later (only Saved Messages: nothing is marked read).
+#                                 The values go into a shell on the phone as they are: no spaces or quotes in them.
 set -euo pipefail
 PHONE="${PHONE:-furios}"
 APP_ID=io.github.x_vlad_x.Contrail
@@ -52,6 +55,37 @@ DESKTOP
     rsh "pkill -f '[c]ontrail-td-app/contrail'; true"  # On its own: the command below contains the same path.
     sleep 1
     rsh "$ENV; CONTRAIL_DEBUG=1 nohup ~/.local/share/contrail-td-app/contrail > /tmp/contrail-td.log 2>&1 &" ;;
+  td-mem-run)
+    shift
+    rsh "pkill -f '[c]ontrail-td-app/contrail'; true"
+    sleep 1
+    rsh "$ENV; CONTRAIL_DEBUG=1 G_MESSAGES_DEBUG=all $* nohup ~/.local/share/contrail-td-app/contrail > /tmp/contrail-td.log 2>&1 &"
+    point() {
+      echo "## $1"
+      "$0" td-mem > /tmp/phone-td-mem.txt || { echo "  not running any more"; rsh 'tail -5 /tmp/contrail-td.log'; exit 1; }
+      grep -E '^(Pss|Anonymous|Swap|Threads|CPU)' /tmp/phone-td-mem.txt | tr '\n' ' ' | tr -s ' \t' ' '
+      echo
+      local before
+      before=$(rsh 'grep -c "mem:" /tmp/contrail-td.log || true')
+      "$0" td-cmd mem > /dev/null
+      rsh "for i in \$(seq 1 20); do [ \$(grep -c 'mem:' /tmp/contrail-td.log) -gt $before ] && break; sleep 0.1; done
+        grep 'mem:' /tmp/contrail-td.log | tail -1 | sed 's/^.*mem:/  malloc:/'"
+    }
+    sleep 25
+    point start
+    "$0" td-cmd 'list-do 0 saved' > /dev/null
+    sleep 3
+    for _ in $(seq 1 60); do "$0" td-cmd 'scroll -3000' > /dev/null; sleep 0.6; done
+    sleep 2
+    point 'Saved Messages scrolled to the top'
+    "$0" td-cmd back > /dev/null
+    sleep 1
+    point 'closed, 1 s'
+    sleep 4
+    point 'closed, 5 s'
+    sleep 55
+    point 'closed, 60 s'
+    rsh 'grep -E "trimmed in|CRITICAL" /tmp/contrail-td.log | tail -3' ;;
   td-stop) rsh "pkill -f '[c]ontrail-td-app/contrail'; true" ;;
   td-cmd) rsh "$ENV; gdbus call --session --dest $APP_ID.Devel --object-path /io/github/x_vlad_x/Contrail/Devel --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
   td-log) rsh "tail -n ${2:-40} /tmp/contrail-td.log" ;;
@@ -60,5 +94,5 @@ DESKTOP
     grep -E "^(VmHWM|VmRSS|Threads):" /proc/$P/status
     ps -o times=,etimes= -p $P | awk "{print \"CPU\", \$1, \"s over\", \$2, \"s\"}"
     du -sh ~/.local/share/contrail-td/app | cut -f1 | sed "s/^/Data /"' ;;
-  *) sed -n '2,15p' "$0"; exit 1 ;;
+  *) sed -n '2,17p' "$0"; exit 1 ;;
 esac
