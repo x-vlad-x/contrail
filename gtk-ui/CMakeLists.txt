@@ -94,6 +94,13 @@ target_compile_options(contrail_core PUBLIC -Wall -Wno-missing-field-initializer
 add_executable(contrail main.cpp)
 target_link_libraries(contrail PRIVATE contrail_core)
 target_link_options(contrail PRIVATE LINKER:--gc-sections LINKER:--as-needed)
+# The relative relocations packed (DT_RELR): 2 MB of them read and applied at every start otherwise. glibc 2.36
+# reads them; the binary already needs 2.38.
+include(CheckLinkerFlag)
+check_linker_flag(CXX "LINKER:-z,pack-relative-relocs" CONTRAIL_PACK_RELOCS)
+if (CONTRAIL_PACK_RELOCS)
+  target_link_options(contrail PRIVATE LINKER:-z,pack-relative-relocs)
+endif()
 
 option(CONTRAIL_TESTS "Build the tests of the scripted transport" OFF)
 if (CONTRAIL_TESTS)
