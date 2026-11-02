@@ -69,6 +69,8 @@ void MainWindow::buildChats() {
   adw_navigation_split_view_set_min_sidebar_width(_split, 300);
   adw_navigation_split_view_set_max_sidebar_width(_split, 400);
   _sidebarNav = ADW_NAVIGATION_VIEW(adw_navigation_view_new());
+  // On quitting the window can go before the chats it shows: then they have nowhere to be removed from.
+  g_object_add_weak_pointer(G_OBJECT(_sidebarNav), reinterpret_cast<gpointer *>(&_sidebarNav));
   adw_navigation_split_view_set_sidebar(_split, adw_navigation_page_new(GTK_WIDGET(_sidebarNav), "Contrail"));
 
   auto *placeholderView = adw_toolbar_view_new();
@@ -110,15 +112,16 @@ void MainWindow::buildChats() {
 MainWindow::~MainWindow() {
   if (_stringsTimeout) g_source_remove(_stringsTimeout);
   clearChats();
+  if (_sidebarNav) g_object_remove_weak_pointer(G_OBJECT(_sidebarNav), reinterpret_cast<gpointer *>(&_sidebarNav));
   g_object_unref(_placeholder);
 }
 
 void MainWindow::clearChats() {
   if (_chat) adw_navigation_page_set_child(_contentPage, _placeholder);
   _chat = nullptr;
-  if (_archive) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
+  if (_archive && _sidebarNav) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
   _archive = nullptr;
-  if (_chatList) adw_navigation_view_remove(_sidebarNav, _chatList->page());
+  if (_chatList && _sidebarNav) adw_navigation_view_remove(_sidebarNav, _chatList->page());
   _chatList = nullptr;
   _store = nullptr;
 }

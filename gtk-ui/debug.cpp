@@ -2,7 +2,7 @@
 //   tools/phone.sh td-cmd 'tree'
 // Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
 //   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | reply | edit TEXT | delete
-//   search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
+//   close | search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
 //   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
 //   question, saved)
 #include "debug.hpp"
@@ -54,7 +54,10 @@ void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
-  if (name == "tree") {
+  if (name == "close") {
+    // As the close button does: the window goes first, the program quits after it.
+    gtk_window_close(GTK_WINDOW(window.widget()));
+  } else if (name == "tree") {
     auto out = std::string();
     Print(window.widget(), 0, out);
     g_message("tree\n%s", out.c_str());
