@@ -4,7 +4,9 @@
 #include "main_window.hpp"
 #include "style_css.h"
 
+#include <cerrno>
 #include <malloc.h>
+#include <sys/prctl.h>
 
 
 namespace Contrail {
@@ -14,9 +16,16 @@ namespace {
 // its mmap threshold as large blocks are freed, after which they come from the heap and stay with the
 // process when freed. A fixed threshold keeps every large block in its own mapping, given back to the
 // system as soon as it is freed; fewer arenas keep the threads' freed memory from piling up. Set before
-// main(), so TDLib's threads get these too.
+// main(), so TDLib's threads get these too. 64 KiB, not 256: blocks in between left holes in the heap that
+// nothing reused. A chat with photos scrolled through and closed, by tools/mem-scenario.sh: 77 MiB at the peak
+// instead of 91, 61 after it instead of 69; 32 KiB gave no more.
+//
+// Transparent huge pages off: with them on "always" (as FuriOS has them) the first touch of a
+// thread's stack, a malloc arena or the end of the heap takes 2 MiB where a few KiB are used. On the FLX1s
+// 30 MiB of the process were huge pages right after the start. Programs it starts inherit this.
 [[maybe_unused]] const auto kMallocTuning = [] {
-  mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+  if (prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0) != 0) g_debug("Memory: huge pages stay on: %s", g_strerror(errno));
+  mallopt(M_MMAP_THRESHOLD, 64 * 1024);
   mallopt(M_TRIM_THRESHOLD, 4 * 1024 * 1024);
   mallopt(M_ARENA_MAX, 4);
   return 0;

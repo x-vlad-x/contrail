@@ -1,6 +1,7 @@
 #include "chat_view.hpp"
 
 #include "main_window.hpp"
+#include "memory_trim.hpp"
 #include "message.hpp"
 #include "scroll_helpers.hpp"
 #include "td/chat_row.hpp"
@@ -476,6 +477,7 @@ void ChatView::buildList() {
   _adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
   _signals.connect<void(GtkAdjustment *)>(_adjustment, "value-changed", [this](GtkAdjustment *) {
     if (!_adjustingScroll) NoteListMotion();
+    PostponeMemoryTrim();
     scrolled();
   });
   _signals.connect<void(GObject *, GParamSpec *)>(_adjustment, "notify::upper", [this](GObject *, GParamSpec *) {

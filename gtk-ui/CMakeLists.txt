@@ -62,6 +62,7 @@ add_library(contrail_core STATIC
   debug.cpp
   login.cpp
   main_window.cpp
+  memory_trim.cpp
   message.cpp
   td/chat_row.cpp
   td/client.cpp

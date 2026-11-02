@@ -5,6 +5,7 @@
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "login.hpp"
+#include "memory_trim.hpp"
 #include "td/message_text.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
@@ -16,6 +17,8 @@ namespace api = Td::api;
 
 // The first start without a network gets no language pack: the built-in English comes up after this long.
 constexpr auto kStringsTimeoutMs = 4000;
+// Gives memory back once the start is over (see showChats).
+constexpr auto kTrimAfterStartMs = 8000;
 
 GtkWidget *MakeLoadingPage() {
   auto *page = adw_toolbar_view_new();
@@ -60,6 +63,8 @@ MainWindow::MainWindow(GtkApplication *application) {
   // Telegram shows the account as online while the window is in front, and only then.
   Connect<void(GObject *, GParamSpec *)>(_window, "notify::is-active", [this](GObject *, GParamSpec *) {
     if (_session) _session->setOnline(gtk_window_is_active(GTK_WINDOW(_window)));
+    // Out of sight it may stay for days: let it hold no more than it uses.
+    if (!gtk_window_is_active(GTK_WINDOW(_window))) TrimMemorySoon();
   });
 }
 
@@ -226,6 +231,9 @@ void MainWindow::showChats() {
     _chatList = std::make_unique<ChatList>(*_store, Td::ListKind::Main, *this);
     adw_navigation_view_add(_sidebarNav, _chatList->page());
     _store->loadMore(Td::ListKind::Main);
+    // Starting, TDLib reads its database and frees most of what it read: 14 MiB on the phone. The first page of
+    // chats is there within seconds; this waits for the rest of the start to be over.
+    TrimMemorySoon(kTrimAfterStartMs);
   }
   gtk_stack_set_visible_child_name(_stack, "chats");
   if (_login) {
@@ -256,7 +264,10 @@ void MainWindow::openChat(Td::ChatId chat, std::int64_t showAt) {
     _chat = std::make_unique<ChatView>(*_store, chat, *this, showAt);
     adw_navigation_page_set_child(_contentPage, _chat->widget());
     adw_navigation_page_set_title(_contentPage, _store->chat(chat)->title.c_str());
-    old = nullptr;
+    if (old) {
+      old = nullptr;
+      TrimMemorySoon();
+    }
   }
   setCurrent(chat);
   adw_navigation_split_view_set_show_content(_split, TRUE);
@@ -268,6 +279,7 @@ void MainWindow::closeChat() {
   adw_navigation_page_set_title(_contentPage, "Contrail");
   _chat = nullptr;
   setCurrent(0);
+  TrimMemorySoon();
 }
 
 void MainWindow::openArchive() {
