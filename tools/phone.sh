@@ -5,7 +5,7 @@
 #   tools/phone.sh cmd 'chat 0'   a debug command (see gtk-ui/debug.cpp)
 #   tools/phone.sh shot [file]    screenshot (needs grim: tools/phone.sh get-grim once)
 #   tools/phone.sh log            the end of the log
-#   tools/phone.sh td-install     put the TDLib version (build-td/aarch64) into ~/.local/share/contrail-td-app,
+#   tools/phone.sh td-install     put the TDLib version (build-td/aarch64, or TD_BINARY=file) into ~/.local/share/contrail-td-app,
 #                                 with an icon among the apps ("Contrail TDLib", log: /tmp/contrail-td.log)
 #   tools/phone.sh td-run         start it next to the stable one (log: /tmp/contrail-td.log on the phone)
 #   tools/phone.sh td-stop
@@ -29,7 +29,7 @@ case "${1:-}" in
   log) rsh "tail -n ${2:-40} /tmp/contrail.log" ;;
   td-install)
     rsh 'mkdir -p ~/.local/share/contrail-td-app'
-    scp -q "$(dirname "$0")/../build-td/aarch64/contrail.stripped" "$PHONE:.local/share/contrail-td-app/contrail.new"
+    scp -q "${TD_BINARY:-$(dirname "$0")/../build-td/aarch64/contrail.stripped}" "$PHONE:.local/share/contrail-td-app/contrail.new"
     rsh 'mv ~/.local/share/contrail-td-app/contrail.new ~/.local/share/contrail-td-app/contrail'
     scp -q "$(dirname "$0")/contrail-td-icon.svg" "$PHONE:.local/share/contrail-td-app/icon.svg"
     rsh 'cat > ~/.local/share/contrail-td-app/start' <<'SCRIPT'
@@ -63,13 +63,17 @@ DESKTOP
     point() {
       echo "## $1"
       "$0" td-mem > /tmp/phone-td-mem.txt || { echo "  not running any more"; rsh 'tail -5 /tmp/contrail-td.log'; exit 1; }
-      grep -E '^(Pss|Anonymous|Swap|Threads|CPU)' /tmp/phone-td-mem.txt | tr '\n' ' ' | tr -s ' \t' ' '
+      grep -E '^(Pss|Anonymous|Swap|Threads|CPU|System)' /tmp/phone-td-mem.txt | tr '\n' ' ' | tr -s ' \t' ' '
       echo
       local before
       before=$(rsh 'grep -c "mem:" /tmp/contrail-td.log || true')
       "$0" td-cmd mem > /dev/null
       rsh "for i in \$(seq 1 20); do [ \$(grep -c 'mem:' /tmp/contrail-td.log) -gt $before ] && break; sleep 0.1; done
         grep 'mem:' /tmp/contrail-td.log | tail -1 | sed 's/^.*mem:/  malloc:/'"
+      before=$(rsh 'grep -c "mem-arenas:" /tmp/contrail-td.log || true')
+      "$0" td-cmd mem-arenas > /dev/null
+      rsh "for i in \$(seq 1 20); do [ \$(grep -c 'mem-arenas:' /tmp/contrail-td.log) -gt $before ] && break; sleep 0.1; done
+        grep 'mem-arenas:' /tmp/contrail-td.log | tail -1 | sed 's/^.*mem-arenas:/  arenas:/'"
     }
     sleep 25
     point start
@@ -90,9 +94,11 @@ DESKTOP
   td-cmd) rsh "$ENV; gdbus call --session --dest $APP_ID.Devel --object-path /io/github/x_vlad_x/Contrail/Devel --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
   td-log) rsh "tail -n ${2:-40} /tmp/contrail-td.log" ;;
   td-mem) rsh 'P=$(pgrep -f "[c]ontrail-td-app/contrail" | head -1); [ -n "$P" ] || { echo "not running"; exit 1; }
-    awk "/^(Pss|Pss_Anon|Pss_File|Anonymous|Swap|SwapPss):/ {printf \"%s %.1f MiB\n\", \$1, \$2/1024}" /proc/$P/smaps_rollup
+    awk "/^(Pss|Pss_Anon|Pss_File|Pss_Shmem|Anonymous|Swap|SwapPss):/ {printf \"%s %.1f MiB\n\", \$1, \$2/1024}" /proc/$P/smaps_rollup
     grep -E "^(VmHWM|VmRSS|Threads):" /proc/$P/status
     ps -o times=,etimes= -p $P | awk "{print \"CPU\", \$1, \"s over\", \$2, \"s\"}"
+    # All processes since boot, glycin loaders and the compositor included: compare it between two points.
+    awk "/^cpu /{printf \"System CPU %.1f s\n\", (\$2+\$3+\$4+\$7+\$8+\$9)/100}" /proc/stat
     du -sh ~/.local/share/contrail-td/app | cut -f1 | sed "s/^/Data /"' ;;
   *) sed -n '2,17p' "$0"; exit 1 ;;
 esac

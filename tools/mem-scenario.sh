@@ -11,6 +11,18 @@ shift || true
 for a in "$@"; do
   [[ $a == *=* ]] || { echo "not VAR=value: $a" >&2; exit 2; }
 done
+# Built in the Debian container: a library named otherwise here (libjpeg.so.62 is libjpeg.so.8 on Arch) comes from
+# that container, into ~/.cache/contrail-scenario/libs.
+missing=$(ldd "$BIN" | awk '/not found/{print $1}')
+if [[ -n $missing ]]; then
+  LIBS=~/.cache/contrail-scenario/libs
+  mkdir -p "$LIBS"
+  for lib in $missing; do
+    [[ -e $LIBS/$lib ]] || podman run --rm -v "$LIBS":/out:z localhost/contrail-desktop \
+      sh -c "cp -L /usr/lib/x86_64-linux-gnu/$lib /out/" || { echo "no $lib in localhost/contrail-desktop" >&2; exit 1; }
+  done
+  export LD_LIBRARY_PATH=$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+fi
 if [[ -z ${CONTRAIL_MEM_INNER:-} ]]; then
   exec env CONTRAIL_MEM_INNER=1 dbus-run-session -- xvfb-run -a -s '-screen 0 420x900x24' "$0" "$BIN" "$@"
 fi

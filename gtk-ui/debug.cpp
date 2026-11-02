@@ -10,8 +10,12 @@
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "main_window.hpp"
+#include "userpics.hpp"
 
 #include <malloc.h>
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <string>
 
@@ -60,9 +64,39 @@ void Run(MainWindow &window, const std::string &command) {
     // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
     // is the main arena's only.
     const auto info = mallinfo2();
-    g_message("mem: in use %.1f MiB (arenas %.1f, mmap %.1f), free in the arenas %.1f MiB, releasable top %.1f MiB",
+    g_message("mem: in use %.1f MiB (arenas %.1f, mmap %.1f), free in the arenas %.1f MiB, releasable top %.1f MiB, "
+              "avatars %.1f MiB",
               (info.uordblks + info.hblkhd) / 1048576., info.uordblks / 1048576., info.hblkhd / 1048576.,
-              info.fordblks / 1048576., info.keepcost / 1048576.);
+              info.fordblks / 1048576., info.keepcost / 1048576., AvatarCacheBytes() / 1048576.);
+  } else if (name == "mem-arenas") {
+    // Each malloc arena: what it took from the system and how much of it is free. Arena 0 is the main thread's
+    // (GTK and the interface), the others TDLib's threads and the decoders.
+    char *xml = nullptr;
+    size_t size = 0;
+    if (auto *stream = open_memstream(&xml, &size)) {
+      malloc_info(0, stream);
+      std::fclose(stream);
+      const auto text = std::string(xml, size);
+      std::free(xml);
+      const auto value = [&](std::size_t from, std::size_t to, const std::string &tag) {
+        const auto at = text.find(tag, from);
+        if (at == std::string::npos || at > to) return 0.;
+        const auto quote = text.find("size=\"", at);
+        return (quote == std::string::npos || quote > to) ? 0. : std::atof(text.c_str() + quote + 6) / 1048576.;
+      };
+      auto line = std::string("mem-arenas:");
+      for (auto at = text.find("<heap nr="); at != std::string::npos;) {
+        const auto next = text.find("<heap nr=", at + 1);
+        const auto end = (next == std::string::npos) ? text.size() : next;
+        const auto system = value(at, end, "<system type=\"current\"");
+        const auto free = value(at, end, "<total type=\"fast\"") + value(at, end, "<total type=\"rest\"");
+        char part[96];
+        std::snprintf(part, sizeof(part), " [%d] %.1f/%.1f", std::atoi(text.c_str() + at + 10), system - free, system);
+        line += part;
+        at = next;
+      }
+      g_message("%s MiB used/taken", line.c_str());
+    }
   } else if (name == "trim") {
     malloc_trim(0);
     g_message("trim: done");
