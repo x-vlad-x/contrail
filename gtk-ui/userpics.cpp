@@ -1,5 +1,8 @@
 #include "userpics.hpp"
 
+#include "device_scale.hpp"
+#include "picture_decode.hpp"
+
 #include <algorithm>
 #include <memory>
 #include <unordered_map>
@@ -9,22 +12,35 @@ namespace Contrail {
 namespace {
 
 // The textures kept for the chats on the screen and the ones seen recently. Avatars still showing an evicted texture
-// keep it until they go; the next one reads the file TDLib keeps on disk again.
-constexpr auto kBudget = std::int64_t(8 * 1024 * 1024);
+// keep it until they go; the next one reads the file TDLib keeps on disk again. Each texture is as large as its avatar
+// on the screen (84 px for the chat list on the FLX1s, against the file's 160): about 140 of them fit.
+constexpr auto kBudget = std::int64_t(3 * 1024 * 1024);
 constexpr auto kFileKey = "contrail-avatar-file";
 
-// One texture per file, plus the avatars waiting for the download (weak: an avatar that goes away before its picture
-// comes leaves nothing behind).
-struct Cached {
+// The picture of one file at one size in device pixels.
+struct Sized {
+  int pixels = 0;
   GdkTexture *texture = nullptr;
-  std::vector<GWeakRef *> waiting;
   std::uint64_t used = 0;
+};
+
+// The textures of one file, plus the avatars waiting for the download (weak: an avatar that goes away before its
+// picture comes leaves nothing behind).
+struct Cached {
+  std::vector<Sized> sizes;
+  std::vector<GWeakRef *> waiting;
   bool requested = false;
   bool broken = false;  // The file isn't a picture: initials stay.
 };
 
 std::int64_t TextureBytes(GdkTexture *texture) {
-  return texture ? std::int64_t(gdk_texture_get_width(texture)) * gdk_texture_get_height(texture) * 4 : 0;
+  if (!texture) return 0;
+  const auto bytes = (gdk_texture_get_format(texture) == GDK_MEMORY_R8G8B8) ? 3 : 4;
+  return std::int64_t(gdk_texture_get_width(texture)) * gdk_texture_get_height(texture) * bytes;
+}
+
+[[nodiscard]] int AvatarPixels(AdwAvatar *avatar) {
+  return DevicePixels(GTK_WIDGET(avatar), adw_avatar_get_size(avatar));
 }
 
 void FreeWeak(GWeakRef *ref) {
@@ -45,7 +61,7 @@ class Cache final {
 
   ~Cache() {
     for (auto &[file, cached] : _cached) {
-      setTexture(cached, nullptr);
+      for (auto &sized : cached.sizes) g_clear_object(&sized.texture);
       ClearWaiting(cached);
     }
   }
@@ -56,10 +72,10 @@ class Cache final {
   void bind(AdwAvatar *avatar, Td::FileId file) {
     g_object_set_data(G_OBJECT(avatar), kFileKey, GINT_TO_POINTER(file));
     auto &cached = _cached[file];
-    cached.used = ++_clock;
-    if (const auto known = _store.file(file); !cached.texture && known && known->complete) load(cached, *known);
-    adw_avatar_set_custom_image(avatar, cached.texture ? GDK_PAINTABLE(cached.texture) : nullptr);
-    if (!cached.texture && !cached.broken) {
+    const auto known = _store.file(file);
+    auto *texture = (known && known->complete) ? textureFor(cached, *known, AvatarPixels(avatar)) : nullptr;
+    adw_avatar_set_custom_image(avatar, texture ? GDK_PAINTABLE(texture) : nullptr);
+    if (!texture && !cached.broken) {
       wait(cached, avatar);
       if (!cached.requested) {
         cached.requested = true;
@@ -89,28 +105,50 @@ class Cache final {
     cached.waiting.push_back(ref);
   }
 
-  void load(Cached &cached, const Td::File &file) {
+  // The file's texture at that size, read from the downloaded file if it isn't kept.
+  GdkTexture *textureFor(Cached &cached, const Td::File &file, int pixels) {
+    if (cached.broken) return nullptr;
+    for (auto &sized : cached.sizes) {
+      if (sized.pixels == pixels) {
+        sized.used = ++_clock;
+        return sized.texture;
+      }
+    }
+    auto *texture = load(file.path, pixels);
+    if (!texture) {
+      cached.broken = true;
+      return nullptr;
+    }
+    cached.sizes.push_back({pixels, texture, ++_clock});
+    _bytes += TextureBytes(texture);
+    return texture;
+  }
+
+  // Small enough to read right here, before the avatar is drawn: the chat list shows no initials for a moment.
+  static GdkTexture *load(const std::string &path, int pixels) {
+    if (auto *pixbuf = DecodePictureFile(path.c_str(), pixels, pixels, false)) return TextureFromPixbuf(pixbuf);
+    // Neither JPEG nor PNG: GTK reads the rest, whole.
     auto *error = static_cast<GError *>(nullptr);
-    auto *texture = gdk_texture_new_from_filename(file.path.c_str(), &error);
+    auto *texture = gdk_texture_new_from_filename(path.c_str(), &error);
     if (error) {
       g_warning("Couldn't read a picture: %s", error->message);
       g_error_free(error);
-      cached.broken = true;
     }
-    setTexture(cached, texture);
+    return texture;
   }
 
   void fileChanged(const Td::File &file) {
     const auto it = _cached.find(file.id);
     if (it == _cached.end() || !file.complete) return;
     auto &cached = it->second;
-    if (!cached.texture) load(cached, file);
     for (auto *ref : cached.waiting) {
       auto *avatar = g_weak_ref_get(ref);
       if (!avatar) continue;
       // A recycled avatar may be showing another chat by now.
-      if (cached.texture && GPOINTER_TO_INT(g_object_get_data(G_OBJECT(avatar), kFileKey)) == file.id) {
-        adw_avatar_set_custom_image(ADW_AVATAR(avatar), GDK_PAINTABLE(cached.texture));
+      if (GPOINTER_TO_INT(g_object_get_data(G_OBJECT(avatar), kFileKey)) == file.id) {
+        if (auto *texture = textureFor(cached, file, AvatarPixels(ADW_AVATAR(avatar)))) {
+          adw_avatar_set_custom_image(ADW_AVATAR(avatar), GDK_PAINTABLE(texture));
+        }
       }
       g_object_unref(avatar);
     }
@@ -118,22 +156,28 @@ class Cache final {
     trim();
   }
 
-  void setTexture(Cached &cached, GdkTexture *texture) {
-    _bytes += TextureBytes(texture) - TextureBytes(cached.texture);
-    if (cached.texture) g_object_unref(cached.texture);
-    cached.texture = texture;
-  }
-
+  // The textures used longest ago go first; a file left with none is forgotten.
   void trim() {
     while (_bytes > kBudget) {
       auto oldest = _cached.end();
+      auto oldestSize = std::size_t(0);
       for (auto i = _cached.begin(); i != _cached.end(); ++i) {
-        if (i->second.texture && (oldest == _cached.end() || i->second.used < oldest->second.used)) oldest = i;
+        for (auto k = std::size_t(0); k < i->second.sizes.size(); ++k) {
+          if (oldest == _cached.end() || i->second.sizes[k].used < oldest->second.sizes[oldestSize].used) {
+            oldest = i;
+            oldestSize = k;
+          }
+        }
       }
       if (oldest == _cached.end()) break;
-      setTexture(oldest->second, nullptr);
-      ClearWaiting(oldest->second);
-      _cached.erase(oldest);
+      auto &sizes = oldest->second.sizes;
+      _bytes -= TextureBytes(sizes[oldestSize].texture);
+      g_object_unref(sizes[oldestSize].texture);
+      sizes.erase(sizes.begin() + std::ptrdiff_t(oldestSize));
+      if (sizes.empty()) {
+        ClearWaiting(oldest->second);
+        _cached.erase(oldest);
+      }
     }
   }
 
