@@ -17,6 +17,11 @@ namespace {
 // whatever the scale (6 bytes a pixel), a PNG is decoded whole: 40 Mpx is ~240 MiB, and two decodes run at once.
 // Telegram's photos are at most 2560 px on a side.
 constexpr auto kMaxPixels = std::uint64_t(40) << 20;
+// A progressive JPEG keeps all its coefficients while it is decoded, whatever the scale: 15 MB for a 2560×1920
+// photo, and nine in ten of Telegram's photos are progressive. Those over 2 Mpx are decoded one at a time, so a
+// fling over a page of them doesn't stack these up; the smaller ones go on beside.
+constexpr auto kLargeProgressivePixels = std::uint64_t(2) << 20;
+GMutex LargeDecode;
 
 struct Target {
   int width = 0;
@@ -93,6 +98,7 @@ struct Jpeg {
   int orientation = 1;
   int width = 0;  // Of the whole picture, as stored.
   int height = 0;
+  bool large = false;  // LargeDecode is held.
 };
 
 [[nodiscard]] bool ReadJpeg(Jpeg &jpeg, Target target) {
@@ -125,6 +131,10 @@ struct Jpeg {
   jpeg.info.scale_num = std::clamp(unsigned(std::ceil(scale * 8 - 1e-9)), 1u, 8u);
   jpeg.info.scale_denom = 8;
   jpeg.info.out_color_space = JCS_EXT_RGB;
+  if (jpeg.info.progressive_mode && std::uint64_t(width) * height > kLargeProgressivePixels) {
+    g_mutex_lock(&LargeDecode);
+    jpeg.large = true;
+  }
   jpeg_start_decompress(&jpeg.info);
   jpeg.pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, int(jpeg.info.output_width),
                                int(jpeg.info.output_height));
@@ -144,7 +154,8 @@ struct Jpeg {
   jpeg.file = std::fopen(path, "rbe");
   if (!jpeg.file) return nullptr;
   const auto read = ReadJpeg(jpeg, target);
-  jpeg_destroy_decompress(&jpeg.info);
+  jpeg_destroy_decompress(&jpeg.info);  // Its memory goes before the next large one starts.
+  if (jpeg.large) g_mutex_unlock(&LargeDecode);
   std::fclose(jpeg.file);
   if (!read) {
     g_clear_object(&jpeg.pixbuf);

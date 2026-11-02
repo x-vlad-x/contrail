@@ -5,6 +5,11 @@
 #include <glib/gstdio.h>
 #include <png.h>
 
+#include <cstdio>
+#include <jpeglib.h>
+#include <thread>
+#include <vector>
+
 #include <cstdlib>
 #include <string>
 #include <utility>
@@ -268,6 +273,57 @@ void WidePngsBecomeEightBits() {
   g_object_unref(decoded);
 }
 
+// A progressive JPEG, as nine in ten of Telegram's photos are.
+std::string SaveProgressiveJpeg(const char *name, int width, int height) {
+  auto *sample = Sample(width, height, false);
+  const auto path = TempPath(name);
+  auto *file = std::fopen(path.c_str(), "wb");
+  g_assert_nonnull(file);
+  jpeg_compress_struct info{};
+  jpeg_error_mgr error{};
+  info.err = jpeg_std_error(&error);
+  jpeg_create_compress(&info);
+  jpeg_stdio_dest(&info, file);
+  info.image_width = width;
+  info.image_height = height;
+  info.input_components = 3;
+  info.in_color_space = JCS_RGB;
+  jpeg_set_defaults(&info);
+  jpeg_set_quality(&info, 90, TRUE);
+  jpeg_simple_progression(&info);
+  jpeg_start_compress(&info, TRUE);
+  while (info.next_scanline < info.image_height) {
+    JSAMPROW row = gdk_pixbuf_get_pixels(sample) + std::size_t(info.next_scanline) * gdk_pixbuf_get_rowstride(sample);
+    jpeg_write_scanlines(&info, &row, 1);
+  }
+  jpeg_finish_compress(&info);
+  jpeg_destroy_compress(&info);
+  std::fclose(file);
+  g_object_unref(sample);
+  return path;
+}
+
+void LargeProgressiveOnesTakeTurns() {
+  const auto large = SaveProgressiveJpeg("large-progressive.jpg", 2560, 1920);
+  const auto small = SaveProgressiveJpeg("small-progressive.jpg", 640, 480);
+  auto sizes = std::vector<std::pair<int, int>>(6);
+  auto threads = std::vector<std::thread>();
+  for (auto i = 0; i < 6; ++i) {
+    threads.emplace_back([&, i] {
+      auto *decoded = DecodePictureFile((i % 2 ? small : large).c_str(), 300, 300);
+      if (decoded) {
+        sizes[i] = {gdk_pixbuf_get_width(decoded), gdk_pixbuf_get_height(decoded)};
+        g_object_unref(decoded);
+      }
+    });
+  }
+  for (auto &thread : threads) thread.join();
+  for (auto i = 0; i < 6; ++i) {
+    g_assert_cmpint(sizes[i].first, ==, 400);
+    g_assert_cmpint(sizes[i].second, ==, 300);
+  }
+}
+
 void BadFilesGiveNothing() {
   g_assert_null(DecodePictureFile(TempPath("missing.jpg").c_str(), 100, 100));
   const auto garbage = TempPath("garbage.jpg");
@@ -301,6 +357,7 @@ int main(int argc, char **argv) {
   g_test_add_func("/picture/exif-broken", BrokenExifIsIgnored);
   g_test_add_func("/picture/png", PngKeepsTransparency);
   g_test_add_func("/picture/png-wide", WidePngsBecomeEightBits);
+  g_test_add_func("/picture/progressive", LargeProgressiveOnesTakeTurns);
   g_test_add_func("/picture/bad", BadFilesGiveNothing);
   g_test_add_func("/picture/truncated", TruncatedJpegStillShows);
   return g_test_run();
