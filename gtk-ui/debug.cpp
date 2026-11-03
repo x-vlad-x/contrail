@@ -25,6 +25,8 @@
 //   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
 //   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
 //   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop
+//   voice-state | voice-start (locked, as the keyboard) | voice-hold | voice-drag DX DY | voice-release | voice-send
+//   voice-delete (a voice message recorded from the open chat's composer)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -32,6 +34,8 @@
 #include "forward.hpp"
 #include "main_window.hpp"
 #include "media/audio_player.hpp"
+#include "media/voice_recorder.hpp"
+#include "voice_record_bar.hpp"
 #include "photo_viewer.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
@@ -272,6 +276,12 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name.starts_with("voice-")) {
+    if (window.chatView() && window.chatView()->recordBar()) {
+      window.chatView()->recordBar()->debug(name.substr(6) + (rest.empty() ? "" : " " + rest));
+    } else if (const auto recorder = window.recorder(); recorder && name == "voice-state") {
+      g_message("voice: no chat %s", recorder->debugState().c_str());
+    }
   } else if (name == "player-state") {
     if (const auto player = window.player()) g_message("player: %s", player->debugState().c_str());
   } else if (name.starts_with("player-") && window.chatView()) {

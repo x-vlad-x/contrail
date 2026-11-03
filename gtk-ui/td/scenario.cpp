@@ -92,6 +92,7 @@ constexpr auto kMediaSongFile = 4000003;
 constexpr auto kMediaSong2File = 4000004;
 constexpr auto kMediaStep = std::int64_t(8 * 1024);
 constexpr auto kMediaStepMs = 200u;
+constexpr auto kSentVoiceFiles = 4100000;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -883,6 +884,10 @@ class ScenarioTransport final : public Transport {
         && request.input_message_content_->get_id() == api::inputMessageText::ID) {
       text = static_cast<api::inputMessageText &>(*request.input_message_content_).text_->text_;
     }
+    if (request.input_message_content_
+        && request.input_message_content_->get_id() == api::inputMessageVoiceNote::ID) {
+      return outgoing(request.chat_id_, voiceEntry(static_cast<api::inputMessageVoiceNote &>(*request.input_message_content_)));
+    }
     if (text.starts_with("/fail ")) return failing(request.chat_id_, text.substr(6));
     if (text.starts_with("/slow ")) return outgoing(request.chat_id_, Entry{.text = text.substr(6)}, kSlowSendMs);
     return outgoing(request.chat_id_, Entry{.text = text});
@@ -958,6 +963,10 @@ class ScenarioTransport final : public Transport {
     int photo = -1;  // The scenario's photo of this index, with `text` as its caption.
     bool forwarded = false;
     Origin origin;
+    // Section media-view: a voice message recorded here, the file as it was sent.
+    std::string voice;
+    int voiceDuration = 0;
+    std::string waveform;
   };
 
   // A message sent or forwarded here: it stays as sent when the chat is opened again.
@@ -969,7 +978,9 @@ class ScenarioTransport final : public Transport {
     message.is_outgoing_ = true;
     message.date_ = kNow;
     message.reply_to_ = nullptr;
-    if (entry.photo >= 0) {
+    if (!entry.voice.empty()) {
+      message.content_ = sentVoice(message.id_ / kIdStep, entry);
+    } else if (entry.photo >= 0) {
       auto content = api::move_object_as<api::messagePhoto>(PhotoContent(entry.photo));
       content->caption_ = Formatted(entry.text);
       message.content_ = std::move(content);
@@ -1514,6 +1525,12 @@ class ScenarioTransport final : public Transport {
   }
 
   api::object_ptr<api::message> mediaMessage(int index) {
+    if (index > kMediaMessages) {
+      // Sent here.
+      auto message = MakeMessage(kMediaId, index * kIdStep, kSelfId, kNow, "");
+      applyEntry(*message);
+      return message;
+    }
     const auto outgoing = index == 3;
     auto message = MakeMessage(kMediaId, index * kIdStep, outgoing ? kSelfId : kMediaId,
                                kNow - (kMediaMessages - index) * 600, "");
@@ -1543,6 +1560,54 @@ class ScenarioTransport final : public Transport {
       default: message->content_ = TextContent(Formatted("That's all")); break;
     }
     return message;
+  }
+
+  // A voice message this account recorded: its file is where the recorder left it, uploaded at once.
+  Entry voiceEntry(api::inputMessageVoiceNote &content) {
+    auto entry = Entry();
+    const auto &note = content.voice_note_;
+    if (note && note->voice_note_ && note->voice_note_->get_id() == api::inputFileLocal::ID) {
+      entry.voice = static_cast<const api::inputFileLocal &>(*note->voice_note_).path_;
+      entry.voiceDuration = note->duration_;
+      entry.waveform = note->waveform_;
+    }
+    auto size = std::int64_t(0);
+    GStatBuf info;
+    if (!entry.voice.empty() && g_stat(entry.voice.c_str(), &info) == 0) size = info.st_size;
+    g_message("Scenario: voice message sent: duration=%d waveform=%zu size=%lld", entry.voiceDuration,
+              entry.waveform.size(), (long long)size);
+    return entry;
+  }
+
+  api::object_ptr<api::MessageContent> sentVoice(std::int64_t index, const Entry &entry) {
+    const auto id = kSentVoiceFiles + std::int32_t(index);
+    _sentVoices[id] = entry.voice;
+    auto note = api::make_object<api::voiceNote>();
+    note->duration_ = entry.voiceDuration;
+    note->waveform_ = entry.waveform;
+    note->mime_type_ = "audio/ogg";
+    note->voice_ = sentVoiceFile(id);
+    return api::make_object<api::messageVoiceNote>(std::move(note), Formatted(""), false);
+  }
+
+  api::object_ptr<api::file> sentVoiceFile(std::int32_t id) {
+    const auto &path = _sentVoices[id];
+    GStatBuf info;
+    const auto size = g_stat(path.c_str(), &info) == 0 ? std::int64_t(info.st_size) : 0;
+    auto local = api::make_object<api::localFile>();
+    local->path_ = path;
+    local->is_downloading_completed_ = true;
+    local->downloaded_prefix_size_ = size;
+    local->downloaded_size_ = size;
+    auto remote = api::make_object<api::remoteFile>();
+    remote->is_uploading_completed_ = true;
+    remote->uploaded_size_ = size;
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->size_ = size;
+    file->local_ = std::move(local);
+    file->remote_ = std::move(remote);
+    return file;
   }
 
   void mediaTick() {
@@ -1583,6 +1648,10 @@ class ScenarioTransport final : public Transport {
       case api::downloadFile::ID: {
         const auto &request = static_cast<api::downloadFile &>(function);
         const auto file = request.file_id_;
+        if (_sentVoices.contains(file)) {
+          answer(id, sentVoiceFile(file));
+          return true;
+        }
         if (file < kMediaVoiceFile || file > kMediaSong2File) return false;
         auto &download = _mediaDownloads[file];
         download.offset = request.offset_;
@@ -2336,6 +2405,7 @@ class ScenarioTransport final : public Transport {
     bool active = false;
   };
   std::map<std::int32_t, MediaDownload> _mediaDownloads;
+  std::map<std::int32_t, std::string> _sentVoices;  // The voice messages recorded here, by their file ids.
   guint _mediaTicker = 0;
 };
 

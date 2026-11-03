@@ -23,6 +23,9 @@
 #   M2. the player: a voice message downloading plays, pauses, plays on, the next voice message follows by itself; a
 #      song downloaded slower than it plays waits for its data, a seek far ahead moves the download there, the next
 #      song follows; a drag along the bar; it plays on with the chat closed; stopped, its thread is gone.
+#   M3. recording a voice message: the microphone only with an empty field, held and let go it is sent as Ogg Opus
+#      with its waveform and plays; a tap only says to hold, slid left it is deleted, slid up it records on with the
+#      chat closed and is sent from it opened again; another chat ends it; it pauses what plays.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -598,4 +601,72 @@ section_media_view_player() {
   echo "   ok"
 }
 section_media_view_player
+
+# Section media-view: recording a voice message. The microphone is the scenario's tone.
+voice() { asked 'voice:' voice-state; }
+section_media_view_recording() {
+  echo "M3. Recording a voice message"
+  export ALSOFT_DRIVERS=null CONTRAIL_SCENARIO_MICROPHONE=1
+  start 150
+  local line sent
+  c 'chat 43' 3
+  [[ $(voice) == *'recording=0 '*'mic=1 bar=0 '* ]] || fail "the microphone with an empty field: $(voice)"
+  c 'type Hello' 0.3
+  [[ $(voice) == *'mic=0 '* ]] || fail "the microphone with a text: $(voice)"
+  c 'type' 0.3
+  [[ $(voice) == *'mic=1 '* ]] || fail "the microphone after the text went: $(voice)"
+  # Held: the bar, the lock above; let go, it is sent.
+  c voice-hold 1.6
+  line=$(voice)
+  [[ $line == *'recording=1 holding=1 locked=0 '*'bar=1 time=0:01'*' lock=1 active=1 '*'thread=1'* ]] \
+    || fail "recording while held: $line"
+  c 'voice-drag -60 -10' 0.3
+  [[ $(voice) == *'recording=1 '*' hint=0.6'* ]] || fail "slide to cancel doesn't follow the finger: $(voice)"
+  c voice-release 1
+  line=$(voice)
+  [[ $line == *'recording=0 '*'mic=1 bar=0 '*'active=0 '*'thread=0 sent=2s waveform=63'* ]] || fail "sent: $line"
+  grep -q 'Scenario: voice message sent: duration=2 waveform=63 size=[1-9]' "$WORK/log.txt" || fail "nothing sent"
+  # It is Ogg Opus that plays, as long as it was recorded.
+  c 'player-play 7' 0.3
+  player_until '*status=playing message=7 *length=1.[5-9]*' 5
+  c player-stop 0.3
+  # A tap only says to hold the button.
+  c voice-hold 0.1
+  c voice-release 0.5
+  grep -q 'toast: Please hold' "$WORK/log.txt" || fail "a tap didn't say to hold"
+  # Slid left, it is deleted.
+  c voice-hold 1.2
+  c 'voice-drag -130 0' 0.5
+  [[ $(voice) == *'recording=0 '*'bar=0 '*'active=0 '* ]] || fail "slid left: $(voice)"
+  sent=$(grep -c 'Scenario: voice message sent' "$WORK/log.txt")
+  (( sent == 1 )) || fail "$sent sent after deleting"
+  # Slid up, it records on without the finger, with the chat closed too.
+  c voice-hold 0.5
+  c 'voice-drag 0 -100' 0.3
+  [[ $(voice) == *'recording=1 holding=0 locked=1 '*'lock=0 '* ]] || fail "locked: $(voice)"
+  c back 1.5
+  [[ $(voice) == *'active=1 '* ]] || fail "closing the chat ended the recording: $(voice)"
+  c 'chat 43' 2
+  line=$(voice)
+  [[ $line == *'recording=1 holding=0 locked=1 '*'bar=1 '*'active=1 '* ]] || fail "the chat opened again: $line"
+  c voice-send 1
+  grep -q 'Scenario: voice message sent: duration=[3-9]' "$WORK/log.txt" || fail "the locked one wasn't sent"
+  # Another chat opened ends it.
+  c voice-start 1
+  c 'chat 0' 2
+  [[ $(voice) == *'recording=0 '*'active=0 '* ]] || fail "another chat didn't end it: $(voice)"
+  (( $(grep -c 'Scenario: voice message sent' "$WORK/log.txt") == 2 )) || fail "the one ended by another chat was sent"
+  # It pauses what plays.
+  c 'chat 43' 2
+  c 'player-play 3' 0.3
+  player_until '*status=playing message=3 *' 4
+  c voice-start 0.5
+  [[ $(player) == *'status=paused '* ]] || fail "the player plays on while recording: $(player)"
+  c voice-delete 0.5
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  unset ALSOFT_DRIVERS CONTRAIL_SCENARIO_MICROPHONE
+  echo "   ok"
+}
+section_media_view_recording
 echo "PASS"

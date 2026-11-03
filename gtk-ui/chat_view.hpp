@@ -17,6 +17,7 @@
 namespace Contrail {
 
 class AudioPlayer;
+class VoiceRecordBar;
 class MainWindow;
 class MessageWidget;
 struct ForwardDraft;
@@ -69,6 +70,12 @@ class ChatView final {
   // The window's player, told what follows in this chat: after a voice message the next one, after a song the next
   // song, as far as they are loaded. Null without an account.
   [[nodiscard]] AudioPlayer *player();
+  // A voice message may be recorded here now: the field is there and nothing is being edited.
+  [[nodiscard]] bool canRecordVoice() const;
+  [[nodiscard]] std::int64_t replyToId() const { return _replyToId; }
+  // The voice message recorded here was sent (it took the reply along) or deleted.
+  void recordingEnded(bool sent);
+  [[nodiscard]] VoiceRecordBar *recordBar() const { return _recordBar.get(); }
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -312,6 +319,7 @@ class ChatView final {
   guint _closeSource = 0;
 
   std::int64_t _replyToId = 0;
+  std::unique_ptr<VoiceRecordBar> _recordBar;
   bool _forwardShown = false;  // The bar shows the messages to forward.
   std::int64_t _editing = 0;
   bool _editPending = false;

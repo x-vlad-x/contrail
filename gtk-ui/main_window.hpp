@@ -13,6 +13,7 @@
 namespace Contrail {
 
 class AudioPlayer;
+class VoiceRecorder;
 class ChatList;
 class ChatView;
 class LoginView;
@@ -54,6 +55,8 @@ class MainWindow final {
   [[nodiscard]] Td::Store *store() const { return _store.get(); }
   // Voice messages and music: one player for the account, made with the first bar of one. Null without a store.
   [[nodiscard]] AudioPlayer *player();
+  // The voice message being recorded: it goes on with its chat closed. Null without a store.
+  [[nodiscard]] VoiceRecorder *recorder();
   [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
   [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
@@ -92,6 +95,7 @@ class MainWindow final {
   Td::Session *_session = nullptr;
   std::unique_ptr<Td::Store> _store;
   std::unique_ptr<AudioPlayer> _player;  // Goes before the store it downloads with.
+  std::unique_ptr<VoiceRecorder> _recorder;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;

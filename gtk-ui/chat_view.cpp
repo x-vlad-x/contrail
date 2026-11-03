@@ -4,6 +4,7 @@
 #include "local_state.hpp"
 #include "main_window.hpp"
 #include "media/audio_player.hpp"
+#include "voice_record_bar.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
 #include "photo_viewer.hpp"
@@ -2298,6 +2299,9 @@ void ChatView::buildComposer() {
   gtk_stack_add_named(GTK_STACK(_composerStack), _joinButton, "join");
   gtk_box_append(GTK_BOX(composer), _composerStack);
   adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(_root), composer);
+  // With an empty field the send button records a voice message while it is held.
+  _recordBar = std::make_unique<VoiceRecordBar>(*this, composer, _composerStack, _sendButton, _toBottom);
+  refreshSendButton();
 }
 
 void ChatView::refreshComposerState() {
@@ -2323,6 +2327,9 @@ void ChatView::refreshComposerState() {
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "field");
   }
   gtk_widget_set_sensitive(_joinButton, !closed);
+  if (_recordBar) {
+    _recordBar->composerShown(g_strcmp0(gtk_stack_get_visible_child_name(GTK_STACK(_composerStack)), "field") == 0);
+  }
 }
 
 std::string ChatView::composerText() const {
@@ -2347,6 +2354,7 @@ void ChatView::refreshSendButton() {
   // Messages to forward go without a comment too.
   const auto forward = !_editing && forwarding();
   gtk_widget_set_sensitive(_sendButton, (!empty || forward) && !_editPending);
+  if (_recordBar) _recordBar->setFieldEmpty(empty && !forward && !_editing);
 }
 
 void ChatView::composerChanged() {
@@ -2459,6 +2467,7 @@ void ChatView::cancelReplyOrEdit() {
 }
 
 bool ChatView::handleEscape() {
+  if (_recordBar && _recordBar->cancel()) return true;
   if (_editing || _replyToId) {
     cancelReplyOrEdit();
     return true;
@@ -3426,6 +3435,21 @@ void ChatView::debugSponsored() const {
             int(_sponsoredAsked), int(_sponsored != nullptr), _sponsoredWaiting.size(), int(_sponsoredPlaced),
             (long long)(_sponsored ? _sponsored->sponsoredAfter >> 20 : 0), int(row != nullptr), int(_sponsoredViewed),
             _sponsoredClicks);
+}
+
+// --- voice messages recorded here ---
+
+bool ChatView::canRecordVoice() const {
+  const auto shown = gtk_stack_get_visible_child_name(GTK_STACK(_composerStack));
+  return !_editing && (g_strcmp0(shown, "field") == 0 || g_strcmp0(shown, "record") == 0);
+}
+
+void ChatView::recordingEnded(bool sent) {
+  refreshComposerState();
+  if (!sent) return;
+  cancelReplyOrEdit();
+  if (_reachedBottom) scrollToBottom();
+  else reload(0);
 }
 
 // --- the player ---

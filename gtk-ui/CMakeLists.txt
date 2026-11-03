@@ -127,7 +127,11 @@ if (CONTRAIL_TESTS)
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()
 
-# Section media-view: voice messages and music play through FFmpeg and OpenAL.
+# Section media-view: voice messages and music are played and recorded through FFmpeg and OpenAL.
 pkg_check_modules(CONTRAIL_PLAYER_DEPS REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libavutil openal)
-target_sources(contrail_core PRIVATE media/audio_player.cpp)
+target_sources(contrail_core PRIVATE media/audio_player.cpp media/voice_recorder.cpp voice_record_bar.cpp)
 target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_PLAYER_DEPS)
+if (CONTRAIL_TESTS)
+  add_executable(voice-waveform-test ${ROOT}/tests/td/voice-waveform-test.cpp)
+  target_link_libraries(voice-waveform-test PRIVATE contrail_core)
+endif()
