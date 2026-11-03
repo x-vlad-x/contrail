@@ -63,6 +63,7 @@ add_library(contrail_core STATIC
   chat_view.cpp
   debug.cpp
   device_scale.cpp
+  forward.cpp
   login.cpp
   main_window.cpp
   memory_trim.cpp

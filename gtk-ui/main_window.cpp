@@ -123,6 +123,8 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::clearChats() {
+  dropForwardPicker();
+  _forwardDrafts.clear();
   if (_chat) adw_navigation_page_set_child(_contentPage, _placeholder);
   _chat = nullptr;
   if ((_archive || _topics) && _sidebarNav && _chatList) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
@@ -407,6 +409,42 @@ void MainWindow::showSessionLost() {
                            "другого устройства.",
                            "Telegram завершив цей сеанс, його дані на пристрої видалено. Так буває з новим входом, "
                            "який не підтвердили на іншому пристрої, або коли сеанс завершено з іншого пристрою."));
+}
+
+void MainWindow::showForwardPicker(ForwardDraft draft) {
+  if (!_store || draft.ids.empty()) return;
+  dropForwardPicker();
+  _forwardPicker = std::make_unique<ForwardPicker>(*_store, *this, std::move(draft));
+  _forwardPicker->present();
+}
+
+// Not from inside the dialog's own signal.
+void MainWindow::forwardPickerClosed() {
+  if (_forwardPickerSource) return;
+  _forwardPickerSource = g_idle_add_once(+[](gpointer data) {
+    auto *self = static_cast<MainWindow *>(data);
+    self->_forwardPickerSource = 0;
+    self->_forwardPicker = nullptr;
+  }, this);
+}
+
+void MainWindow::dropForwardPicker() {
+  if (_forwardPickerSource) g_source_remove(std::exchange(_forwardPickerSource, 0));
+  _forwardPicker = nullptr;
+}
+
+const ForwardDraft *MainWindow::forwardDraft(Td::ChatId chat, std::int32_t topic) const {
+  const auto it = _forwardDrafts.find({chat, topic});
+  return it == _forwardDrafts.end() ? nullptr : &it->second;
+}
+
+void MainWindow::setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft) {
+  if (draft.ids.empty()) {
+    _forwardDrafts.erase({chat, topic});
+  } else {
+    _forwardDrafts[{chat, topic}] = std::move(draft);
+  }
+  if (_chat && _chat->chat() == chat && _chat->topic() == topic) _chat->forwardChanged();
 }
 
 void MainWindow::debugOpenChat(int index) {

@@ -212,8 +212,19 @@ class ScenarioTransport final : public Transport {
       case api::getChat::ID:
         answer(id, makeChat(static_cast<api::getChat &>(*function).chat_id_));
         break;
-      case api::createPrivateChat::ID:
-        answer(id, makeChat(static_cast<api::createPrivateChat &>(*function).user_id_));
+      case api::createPrivateChat::ID: {
+        const auto user = static_cast<api::createPrivateChat &>(*function).user_id_;
+        // Saved Messages, never used yet: TDLib tells about the chat before the answer, as about any new one.
+        if (user == kSelfId && !_selfAdded) {
+          _selfAdded = true;
+          update(api::make_object<api::updateNewChat>(
+              api::move_object_as<api::chat>(makeChat(kSelfId))));
+        }
+        answer(id, makeChat(user));
+        break;
+      }
+      case api::forwardMessages::ID:
+        answer(id, forwarded(static_cast<api::forwardMessages &>(*function)));
         break;
       case api::searchChatsOnServer::ID:
         answer(id, api::make_object<api::chats>(0, std::vector<std::int64_t>()));
@@ -294,6 +305,10 @@ class ScenarioTransport final : public Transport {
       case api::getMessageProperties::ID: {
         auto properties = api::make_object<api::messageProperties>();
         properties->can_be_edited_ = true;
+        properties->can_be_forwarded_ = true;
+        properties->can_be_copied_ = true;
+        properties->can_be_saved_ = true;
+        properties->can_be_replied_ = true;
         properties->can_be_deleted_for_all_users_ = true;
         properties->can_be_deleted_only_for_self_ = true;
         answer(id, std::move(properties));
@@ -425,6 +440,7 @@ class ScenarioTransport final : public Transport {
 
   void addOtherChats() {
     update(api::make_object<api::updateUser>(MakeUser(2000, "Anna", "Long")));
+    _selfAdded = true;
     addChat(kSelfId, api::make_object<api::chatTypePrivate>(kSelfId), "Vlad", std::int64_t(100) << 32, false,
             "Saved note", kSelfId);
     addChat(kGroupId, api::make_object<api::chatTypeBasicGroup>(100), "Team", std::int64_t(99) << 32, false,
@@ -536,6 +552,7 @@ class ScenarioTransport final : public Transport {
       message->reply_to_ = api::make_object<api::messageReplyToMessage>(
           chatId, (index - 1) * kIdStep, nullptr, 0, std::string(), nullptr, 0, nullptr);
     }
+    applyEntry(*message);
     return message;
   }
 
@@ -555,22 +572,137 @@ class ScenarioTransport final : public Transport {
   }
 
   ObjectPtr sent(api::sendMessage &request) {
-    const auto chatId = request.chat_id_;
     auto text = std::string();
     if (request.input_message_content_
         && request.input_message_content_->get_id() == api::inputMessageText::ID) {
       text = static_cast<api::inputMessageText &>(*request.input_message_content_).text_->text_;
     }
+    return outgoing(request.chat_id_, Entry{.text = text});
+  }
+
+  // --- what this account sent or forwarded ---------------------------------------
+
+  // Who a forwarded message was written by.
+  struct Origin {
+    std::int64_t user = 0;
+    std::int64_t chat = 0;
+    std::string hidden;
+  };
+  struct Entry {
+    std::string text;
+    int photo = -1;  // The scenario's photo of this index, with `text` as its caption.
+    bool forwarded = false;
+    Origin origin;
+  };
+
+  // A message sent or forwarded here: it stays as sent when the chat is opened again.
+  void applyEntry(api::message &message) {
+    const auto it = _entries.find({message.chat_id_, message.id_ - message.id_ % kIdStep});
+    if (it == _entries.end()) return;
+    const auto &entry = it->second;
+    message.sender_id_ = api::make_object<api::messageSenderUser>(kSelfId);
+    message.is_outgoing_ = true;
+    message.date_ = kNow;
+    message.reply_to_ = nullptr;
+    if (entry.photo >= 0) {
+      auto content = api::move_object_as<api::messagePhoto>(PhotoContent(entry.photo));
+      content->caption_ = Formatted(entry.text);
+      message.content_ = std::move(content);
+    } else {
+      auto content = api::make_object<api::messageText>();
+      content->text_ = Formatted(entry.text);
+      message.content_ = std::move(content);
+    }
+    message.forward_info_ = nullptr;
+    if (!entry.forwarded) return;
+    auto origin = api::object_ptr<api::MessageOrigin>();
+    if (entry.origin.user) {
+      origin = api::make_object<api::messageOriginUser>(entry.origin.user);
+    } else if (entry.origin.chat) {
+      origin = api::make_object<api::messageOriginChat>(entry.origin.chat, std::string());
+    } else {
+      origin = api::make_object<api::messageOriginHiddenUser>(entry.origin.hidden);
+    }
+    message.forward_info_ = api::make_object<api::messageForwardInfo>(std::move(origin), kNow - 3600, nullptr,
+                                                                      std::string());
+  }
+
+  api::object_ptr<api::message> outgoing(std::int64_t chatId, Entry entry) {
     const auto index = MessagesInChat() + ++_sentExtra[chatId];
-    const auto temporary = index * kIdStep + 1;
-    auto pending = MakeMessage(chatId, temporary, kSelfId, kNow, text);
+    const auto id = index * kIdStep;
+    _entries[{chatId, id}] = std::move(entry);
+    const auto temporary = id + 1;
+    auto pending = messageAt(chatId, index);
+    pending->id_ = temporary;
     pending->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
-    update(api::make_object<api::updateNewMessage>(MakeMessage(chatId, temporary, kSelfId, kNow, text)));
-    update(api::make_object<api::updateMessageSendSucceeded>(MakeMessage(chatId, index * kIdStep, kSelfId, kNow, text),
-                                                             temporary));
-    update(api::make_object<api::updateChatLastMessage>(chatId, MakeMessage(chatId, index * kIdStep, kSelfId, kNow, text),
+    auto shown = messageAt(chatId, index);
+    shown->id_ = temporary;
+    update(api::make_object<api::updateNewMessage>(std::move(shown)));
+    update(api::make_object<api::updateMessageSendSucceeded>(messageAt(chatId, index), temporary));
+    update(api::make_object<api::updateChatLastMessage>(chatId, messageAt(chatId, index),
                                                         std::vector<api::object_ptr<api::chatPosition>>()));
     return pending;
+  }
+
+  // A message as the chat has it now, null when there is none.
+  api::object_ptr<api::message> existing(std::int64_t chatId, std::int64_t id) {
+    if (chatId == kForumId) {
+      const auto topic = findTopic(TopicOfId(id));
+      const auto index = IndexOfId(id);
+      if (!topic || index < 1 || index > topic->last) return nullptr;
+      return topicMessage(topic->id, index, index > kTopicMessages ? _sentTexts[id] : "");
+    }
+    const auto index = int(id / kIdStep);
+    if (index < 1 || index > MessagesInChat() + _sentExtra[chatId]) return nullptr;
+    return messageAt(chatId, index);
+  }
+
+  // As Telegram does: with the senders' names the copies say whose they were (of a forwarded one, whose it was
+  // first); without them they are this account's own messages.
+  ObjectPtr forwarded(api::forwardMessages &request) {
+    auto result = api::make_object<api::messages>();
+    const auto topicId = request.topic_id_ && request.topic_id_->get_id() == api::messageTopicForum::ID
+        ? static_cast<api::messageTopicForum &>(*request.topic_id_).forum_topic_id_ : 1;
+    for (const auto id : request.message_ids_) {
+      auto source = existing(request.from_chat_id_, id);
+      if (!source) {
+        result->messages_.push_back(nullptr);
+        continue;
+      }
+      auto entry = Entry();
+      if (const auto text = source->content_->get_id() == api::messageText::ID
+              ? static_cast<const api::messageText &>(*source->content_).text_.get() : nullptr) {
+        entry.text = text->text_;
+      } else if (source->content_->get_id() == api::messagePhoto::ID) {
+        const auto &photo = static_cast<const api::messagePhoto &>(*source->content_);
+        entry.photo = int(source->id_ / kIdStep);
+        if (!request.remove_caption_ && photo.caption_) entry.text = photo.caption_->text_;
+      }
+      if (!request.send_copy_) {
+        entry.forwarded = true;
+        const auto origin = source->forward_info_ ? source->forward_info_->origin_.get() : nullptr;
+        if (origin && origin->get_id() == api::messageOriginUser::ID) {
+          entry.origin.user = static_cast<const api::messageOriginUser &>(*origin).sender_user_id_;
+        } else if (origin && origin->get_id() == api::messageOriginChat::ID) {
+          entry.origin.chat = static_cast<const api::messageOriginChat &>(*origin).sender_chat_id_;
+        } else if (origin && origin->get_id() == api::messageOriginHiddenUser::ID) {
+          entry.origin.hidden = static_cast<const api::messageOriginHiddenUser &>(*origin).sender_name_;
+        } else if (source->sender_id_->get_id() == api::messageSenderUser::ID) {
+          entry.origin.user = static_cast<const api::messageSenderUser &>(*source->sender_id_).user_id_;
+        } else {
+          entry.origin.chat = static_cast<const api::messageSenderChat &>(*source->sender_id_).chat_id_;
+        }
+      }
+      if (request.chat_id_ == kForumId) {
+        const auto into = findTopic(topicId);
+        if (!into) return api::make_object<api::error>(400, "TOPIC_ID_INVALID");
+        result->messages_.push_back(forumOutgoing(*into, std::move(entry)));
+      } else {
+        result->messages_.push_back(outgoing(request.chat_id_, std::move(entry)));
+      }
+    }
+    result->total_count_ = int(result->messages_.size());
+    return result;
   }
 
 
@@ -608,6 +740,7 @@ class ScenarioTransport final : public Transport {
     auto message = MakeMessage(kForumId, id, SenderOf(topic, index), date,
                                text.empty() ? "Topic " + std::to_string(topic) + ", message " + std::to_string(index) : text);
     message->topic_id_ = api::make_object<api::messageTopicForum>(topic);
+    applyEntry(*message);
     return message;
   }
 
@@ -772,21 +905,38 @@ class ScenarioTransport final : public Transport {
       forumCounters();
       return api::make_object<api::error>(400, "Scenario: a message came into topic " + std::to_string(into->id));
     }
-    const auto temporary = final + 1;
-    auto pending = topicMessage(into->id, index, text);
+    into->draft.clear();
+    return sendInto(*into, index, std::move(message));
+  }
+
+  // This account's message `index` of a topic, sent there now.
+  api::object_ptr<api::message> sendInto(Topic &into, int index, api::object_ptr<api::message> message) {
+    const auto temporary = TopicMessageId(into.id, index) + 1;
+    const auto text = _sentTexts[TopicMessageId(into.id, index)];
+    auto pending = topicMessage(into.id, index, text);
     pending->id_ = temporary;
     pending->date_ = kNow;
     pending->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
-    auto shown = topicMessage(into->id, index, text);
+    auto shown = topicMessage(into.id, index, text);
     shown->id_ = temporary;
     shown->date_ = kNow;
     update(api::make_object<api::updateNewMessage>(std::move(shown)));
     update(api::make_object<api::updateMessageSendSucceeded>(std::move(message), temporary));
     update(api::make_object<api::updateChatLastMessage>(kForumId, forumLastMessage(),
                                                         std::vector<api::object_ptr<api::chatPosition>>()));
-    into->draft.clear();
-    topicChanged(*into);
+    topicChanged(into);
     return pending;
+  }
+
+  api::object_ptr<api::message> forumOutgoing(Topic &into, Entry entry) {
+    auto index = into.last + 1;
+    while (SenderOf(into.id, index) != kSelfId) ++index;
+    into.last = index;
+    const auto id = TopicMessageId(into.id, index);
+    _sentTexts[id] = entry.text;
+    _entries[{kForumId, id}] = std::move(entry);
+    auto message = topicMessage(into.id, index, _sentTexts[id]);
+    return sendInto(into, index, std::move(message));
   }
 
   // The requests about the group with topics; false for anything else.
@@ -910,6 +1060,8 @@ class ScenarioTransport final : public Transport {
   bool _publicAdded = false;
   std::vector<Topic> _topics;
   std::map<std::int64_t, std::string> _sentTexts;  // What was written in the topics, by message id.
+  std::map<std::pair<std::int64_t, std::int64_t>, Entry> _entries;  // By chat and message id.
+  bool _selfAdded = false;
 };
 
 }  // namespace

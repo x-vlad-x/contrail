@@ -4,7 +4,9 @@
 #   2. only the rows near the screen keep their photos decoded, and photos far off come back the same;
 #   3. the decodes of a chat that closed don't go on;
 #   4. a group with topics: its list of topics, a topic with only its messages, a message sent and one received
-#      landing only in their topics, the list closed when the group stops having topics.
+#      landing only in their topics, the list closed when the group stops having topics;
+#   5. forwarding: the chats to choose from (Saved Messages first, a search), a topic asked for, the message
+#      waiting in the chosen place, sent with a comment and the sender's name, or alone as a copy.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -59,6 +61,14 @@ state() {
   [[ -n $value ]] || fail "no $1 in the chat state"
   echo "$value"
 }
+# The newest log line with $1, after asking for it with the debug command $2.
+asked() {
+  local before
+  before=$(grep -c "$1" "$WORK/log.txt" || true)
+  c "$2" 0
+  for _ in $(seq 50); do (( $(grep -c "$1" "$WORK/log.txt" || true) > before )) && break; sleep 0.1; done
+  grep "$1" "$WORK/log.txt" | tail -1
+}
 
 echo "1. The start of a chat"
 start 150
@@ -107,15 +117,6 @@ later=$(grep -c 'Picture: [0-9]' "$WORK/log.txt" || true)
 echo "   ok: $((later - decodes)) decodes finished after closing"
 stop
 
-# The newest log line with $1, after asking for it with the debug command $2.
-asked() {
-  local before
-  before=$(grep -c "$1" "$WORK/log.txt" || true)
-  c "$2" 0
-  for _ in $(seq 50); do (( $(grep -c "$1" "$WORK/log.txt" || true) > before )) && break; sleep 0.1; done
-  grep "$1" "$WORK/log.txt" | tail -1
-}
-
 echo "4. Topics of a group"
 start 120
 # The scenario's group with topics is below the 40 friends.
@@ -143,6 +144,53 @@ line=$(asked 'list shown=' list-state)
 before=$(grep -c 'topics chat=' "$WORK/log.txt" || true)
 c topic-state 1
 (( $(grep -c 'topics chat=' "$WORK/log.txt" || true) == before )) || fail "the topics stay without a forum"
+echo "   ok"
+stop
+
+echo "5. Forwarding"
+start 120
+# Friend 2's newest message, 120, is this account's.
+c 'chat 1' 3
+c forward 1
+line=$(asked 'forward picker:' forward-picker)
+[[ $line == *'page=chats forum=0 shown=42 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
+  || fail "the chats to forward to: $line"
+c 'forward-search club' 0.5
+line=$(asked 'forward picker:' forward-picker)
+[[ $line == *'shown=1 messages=1 rows: "Contrail Club"' ]] || fail "the search: $line"
+c forward-enter 1.5
+line=$(asked 'forward picker:' forward-picker)
+# The closed topic is not offered.
+[[ $line == *'page=topics forum=-400 shown=3 messages=1 rows: "Help" "Random" "General"' ]] || fail "topics: $line"
+c 'forward-pick-topic 1' 2
+line=$(asked 'chat topic=' state)
+[[ $line == *"topic=3 "* ]] || fail "Random isn't open: $line"
+line=$(asked 'chat forward:' state)
+[[ $line == *'waiting=1 names=1 bar=1 sendable=1 title="Forward Message" text="Vlad: Message 120"'* ]] \
+  || fail "the bar: $line"
+# It waits there while other chats are open.
+c 'chat 0' 2
+c 'chat 40' 2
+c 'topic 2' 2
+line=$(asked 'chat forward:' state)
+[[ $line == *"waiting=1 names=1 bar=1 "* ]] || fail "gone after leaving: $line"
+c 'send with a comment' 1.5
+line=$(asked 'chat forward:' state)
+[[ $line == *'waiting=0 '*' ["with a comment"] ["Message 120" from="Vlad"]' ]] || fail "sent with a comment: $line"
+line=$(asked 'chat topic=' state)
+[[ $line == *"topic=3 topics=3 "* ]] || fail "not in the topic: $line"
+# Without the names and without a comment: a copy.
+c 'chat 0' 2
+c forward 1
+c 'forward-search friend 3' 0.5
+c forward-enter 2
+c 'forward-mode no-names' 0.5
+line=$(asked 'chat forward:' state)
+[[ $line == *'waiting=1 names=0 bar=1 sendable=1 title="Forward Message" text="Sender names removed: Message 120"'* ]] \
+  || fail "no names: $line"
+c send 1.5
+line=$(asked 'chat forward:' state)
+[[ $line == *'waiting=0 '*' ["Message 120"]' && $line != *from=* ]] || fail "sent as a copy: $line"
 echo "   ok"
 stop
 echo "PASS"

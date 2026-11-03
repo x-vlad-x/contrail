@@ -1,11 +1,14 @@
 #pragma once
 
 #include "app.hpp"
+#include "forward.hpp"
 #include "td/client.hpp"
 #include "td/store.hpp"
 
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace Contrail {
 
@@ -49,6 +52,14 @@ class MainWindow final {
   [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
   [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
+  // Messages to forward: the chats to choose from, then they wait in the chosen chat (or topic) until sent there.
+  void showForwardPicker(ForwardDraft draft);
+  void forwardPickerClosed();
+  [[nodiscard]] ForwardPicker *forwardPicker() const { return _forwardPicker.get(); }
+  // Null when nothing waits there. An empty draft takes away what waited.
+  [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
+  void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
+
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
   void debugOpenTopic(int index);
@@ -64,6 +75,7 @@ class MainWindow final {
   void setCurrent(Td::ChatId chat, std::int32_t topic);
   // A new login dies within minutes if nobody confirms it on another device.
   void warnAboutConfirmation();
+  void dropForwardPicker();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
@@ -78,6 +90,9 @@ class MainWindow final {
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;
   std::unique_ptr<ChatView> _chat;
+  std::unique_ptr<ForwardPicker> _forwardPicker;
+  guint _forwardPickerSource = 0;
+  std::map<std::pair<Td::ChatId, std::int32_t>, ForwardDraft> _forwardDrafts;
   Td::Lifetime _sessionLifetime;
   std::string _language;
   guint _stringsTimeout = 0;

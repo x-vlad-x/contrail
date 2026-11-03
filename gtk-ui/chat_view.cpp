@@ -1,5 +1,6 @@
 #include "chat_view.hpp"
 
+#include "forward.hpp"
 #include "main_window.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
@@ -117,6 +118,28 @@ void DescribeSender(const Td::Store &store, const api::message &message, std::st
   }
 }
 
+// Who wrote a message to forward: of one forwarded already, who wrote it first.
+[[nodiscard]] std::string ForwardSenderName(const Td::Store &store, const api::message &message) {
+  const auto info = message.forward_info_.get();
+  const auto origin = info ? info->origin_.get() : nullptr;
+  if (const auto user = Cast<api::messageOriginUser>(origin)) {
+    const auto known = store.user(user->sender_user_id_);
+    return known ? Td::DisplayName(*known) : std::string();
+  }
+  if (const auto hidden = Cast<api::messageOriginHiddenUser>(origin)) return hidden->sender_name_;
+  auto chat = Td::ChatId(0);
+  if (const auto sender = Cast<api::messageOriginChat>(origin)) chat = sender->sender_chat_id_;
+  if (const auto channel = Cast<api::messageOriginChannel>(origin)) chat = channel->chat_id_;
+  if (chat) {
+    const auto known = store.chat(chat);
+    return known ? known->title : std::string();
+  }
+  auto name = std::string();
+  auto color = 0;
+  DescribeSender(store, message, name, color);
+  return name;
+}
+
 // "online", "last seen today at 12:34".
 [[nodiscard]] std::string OnlineText(const Td::User &user) {
   const auto now = Td::Now();
@@ -202,6 +225,7 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
   buildComposer();
   refreshHeader();
   refreshComposerState();
+  refreshForwardBar();
   _statusTimer.callOnce(kStatusPeriod);
   _signals.connect<void(GtkWidget *)>(_root, "map", [this](GtkWidget *) { scheduleViewportUpdate(); });
   _signals.connect<void(GObject *, GParamSpec *)>(_window.widget(), "notify::is-active",
@@ -246,7 +270,8 @@ void ChatView::start() {
             item.data->id_ = message.id_;
             item.data->sender_id_ = std::move(message.sender_id_);
             item.data->content_ = std::move(message.content_);
-            if (!_editing) replyTo(item);
+            // Messages waiting to be forwarded take the reply's place.
+            if (!_editing && !forwarding()) replyTo(item);
           },
           [](api::error &) {});
     }
@@ -1360,8 +1385,21 @@ void ChatView::buildComposer() {
   gtk_box_append(GTK_BOX(_replyBar), replyColumn);
   auto *cancel = MakeIconButton("window-close-symbolic", Tr("lng_cancel").c_str(), "flat");
   gtk_widget_add_css_class(cancel, "circular");
-  _signals.clicked(cancel, [this] { cancelReplyOrEdit(); });
+  _signals.clicked(cancel, [this] {
+    if (_replyToId || _editing) {
+      cancelReplyOrEdit();
+    } else {
+      cancelForward();
+    }
+  });
   gtk_box_append(GTK_BOX(_replyBar), cancel);
+  // Messages to forward: a tap on them shows what can be done with them.
+  auto *replyClick = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      replyClick, "released", [this](GtkGestureClick *, int, double, double) {
+        if (_forwardShown && !_replyToId && !_editing) showForwardMenu();
+      });
+  gtk_widget_add_controller(replyColumn, GTK_EVENT_CONTROLLER(replyClick));
   gtk_widget_set_visible(_replyBar, FALSE);
   gtk_box_append(GTK_BOX(composer), _replyBar);
 
@@ -1495,7 +1533,9 @@ void ChatView::setComposerText(const std::string &text) {
 
 void ChatView::refreshSendButton() {
   const auto empty = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(GTK_TEXT_VIEW(_input))) == 0;
-  gtk_widget_set_sensitive(_sendButton, !empty && !_editPending);
+  // Messages to forward go without a comment too.
+  const auto forward = !_editing && forwarding();
+  gtk_widget_set_sensitive(_sendButton, (!empty || forward) && !_editPending);
 }
 
 void ChatView::composerChanged() {
@@ -1547,6 +1587,7 @@ void ChatView::showReplyBar(const std::string &title, const std::string &text, c
 void ChatView::replyTo(const MessageItem &item) {
   if (item.local()) return;
   if (_editing) cancelReplyOrEdit();
+  if (forwarding()) cancelForward();
   _replyToId = item.id();
   auto name = std::string();
   auto color = 0;
@@ -1592,6 +1633,7 @@ void ChatView::cancelReplyOrEdit() {
   _editPending = false;
   gtk_text_view_set_editable(GTK_TEXT_VIEW(_input), TRUE);
   gtk_widget_set_visible(_replyBar, FALSE);
+  _forwardShown = false;
   if (wasEditing) {
     setComposerText(std::exchange(_beforeEditText, std::string()));
     if (const auto reply = std::exchange(_beforeEditReplyTo, 0)) {
@@ -1600,13 +1642,21 @@ void ChatView::cancelReplyOrEdit() {
   } else {
     _draftTimer.callOnce(kDraftDelay);
   }
+  // The messages to forward come back after an edit.
+  if (!_replyToId) refreshForwardBar();
   refreshSendButton();
 }
 
 bool ChatView::handleEscape() {
-  if (!_editing && !_replyToId) return false;
-  cancelReplyOrEdit();
-  return true;
+  if (_editing || _replyToId) {
+    cancelReplyOrEdit();
+    return true;
+  }
+  if (forwarding()) {
+    cancelForward();
+    return true;
+  }
+  return false;
 }
 
 void ChatView::applyEdit(const std::string &text) {
@@ -1650,14 +1700,24 @@ void ChatView::send() {
   if (!known || !_store.canWrite(*known)) return;
   auto text = composerText();
   const auto first = text.find_first_not_of(" \t\r\n");
-  if (first == std::string::npos) return;
+  if (first == std::string::npos) {
+    // Only the messages to forward.
+    if (!_editing && forwarding()) {
+      sendForward();
+      if (_reachedBottom) scrollToBottom();
+      else reload(0);
+    }
+    return;
+  }
   text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
   if (_editing) {
     applyEdit(text);
     return;
   }
+  // The comment goes first, then the messages to forward.
   _store.client().send(api::make_object<api::sendMessage>(_chat, topicObject(), ReplyTo(_replyToId), nullptr, nullptr,
                                                           InputText(text)));
+  sendForward();
   setComposerText(std::string());
   _draftTimer.cancel();
   // clear_draft has done it on the server.
@@ -1682,7 +1742,7 @@ void ChatView::sendText(const std::string &text) {
 void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y) {
   const auto id = item.id();
   // What may be done with a message is TDLib's to say. A message being sent has nothing to ask about.
-  const auto show = [this, id, widget, x, y](bool canEdit, bool forAll, bool onlyForSelf) {
+  const auto show = [this, id, widget, x, y](bool canEdit, bool canForward, bool forAll, bool onlyForSelf) {
     const auto found = find(id);
     if (!found || !gtk_widget_get_mapped(widget)) return;
     const auto known = _store.chat(_chat);
@@ -1695,6 +1755,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
       g_menu_append(menu, Tr("lng_context_reply_msg").c_str(), "msg.reply");
     }
     if (!text.empty()) g_menu_append(menu, Tr("lng_context_copy_text").c_str(), "msg.copy");
+    if (canForward && !found->local() && !service) {
+      g_menu_append(menu, Tr("lng_context_forward_msg").c_str(), "msg.forward");
+    }
     if (canEdit) g_menu_append(menu, Tr("lng_context_edit_msg").c_str(), "msg.edit");
     if (forAll || onlyForSelf) g_menu_append(menu, Tr("lng_context_delete_msg").c_str(), "msg.delete");
     if (!g_menu_model_get_n_items(G_MENU_MODEL(menu))) {
@@ -1724,6 +1787,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
       if (const auto item = find(id)) replyTo(*item);
     });
     add("copy", [text] { CopyToClipboard(text); });
+    add("forward", [this, id] {
+      if (const auto item = find(id)) forward(*item);
+    });
     add("edit", [this, id] {
       if (const auto item = find(id)) edit(*item);
     });
@@ -1733,16 +1799,16 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     gtk_popover_popup(GTK_POPOVER(popover));
   };
   if (item.local()) {
-    show(false, false, true);
+    show(false, false, false, true);
     return;
   }
   _store.client().request<api::messageProperties>(
       api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
       [show](api::messageProperties &properties) {
-        show(properties.can_be_edited_, properties.can_be_deleted_for_all_users_,
+        show(properties.can_be_edited_, properties.can_be_forwarded_, properties.can_be_deleted_for_all_users_,
              properties.can_be_deleted_only_for_self_);
       },
-      [show](api::error &) { show(false, false, false); });
+      [show](api::error &) { show(false, false, false, false); });
 }
 
 void ChatView::confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf) {
@@ -1766,6 +1832,127 @@ void ChatView::confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf) {
     client.send(api::make_object<api::deleteMessages>(chat, std::vector<std::int64_t>{id}, all));
   });
   adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+// --- forwarding ------------------------------------------------------------------
+
+const ForwardDraft *ChatView::forwardDraft() const {
+  return _window.forwardDraft(_chat, _topic);
+}
+
+void ChatView::forwardChanged() {
+  refreshForwardBar();
+}
+
+void ChatView::forward(const MessageItem &item) {
+  if (item.local()) return;
+  auto draft = ForwardDraft();
+  draft.from = _chat;
+  const auto add = [&](const MessageItem &message) {
+    draft.ids.push_back(message.id());
+    auto name = ForwardSenderName(_store, *message.data);
+    if (std::ranges::find(draft.senders, name) == draft.senders.end()) draft.senders.push_back(std::move(name));
+  };
+  // An album goes whole.
+  if (const auto album = item.data->media_album_id_) {
+    for (const auto &other : _items) {
+      if (!other->local() && other->data->media_album_id_ == album) add(*other);
+    }
+  }
+  if (draft.ids.empty()) add(item);
+  if (draft.ids.size() == 1) draft.preview = Td::MessagePreview(*item.data, _store);
+  _window.showForwardPicker(std::move(draft));
+}
+
+void ChatView::refreshForwardBar() {
+  const auto draft = forwardDraft();
+  if (!draft || _editing) {
+    // Shown again when the edit is over.
+    if (std::exchange(_forwardShown, false) && !_replyToId && !_editing) gtk_widget_set_visible(_replyBar, FALSE);
+    refreshSendButton();
+    return;
+  }
+  // One bar: the messages to forward take the place of a reply.
+  if (std::exchange(_replyToId, 0)) _draftTimer.callOnce(kDraftDelay);
+  const auto count = int(draft->ids.size());
+  const auto &senders = draft->senders;
+  auto text = std::string();
+  if (!draft->names) {
+    text = Tr("lng_forward_sender_names_removed");
+  } else if (senders.size() > 2) {
+    text = TrCount("lng_forwarding_from", std::int64_t(senders.size() - 1), {{"user", senders.front()}});
+  } else if (senders.size() == 2) {
+    text = Tr("lng_forwarding_from_two", {{"user", senders[0]}, {"second_user", senders[1]}});
+  } else if (!senders.empty()) {
+    text = senders.front();
+  }
+  if (count == 1 && !draft->preview.empty()) text = text.empty() ? draft->preview : text + ": " + draft->preview;
+  gtk_image_set_from_icon_name(GTK_IMAGE(_replyIcon), "mail-forward-symbolic");
+  gtk_label_set_text(GTK_LABEL(_replyTitle),
+                     (count == 1 ? Tr("lng_forward_title") : TrCount("lng_forward_many_title", count)).c_str());
+  gtk_label_set_text(GTK_LABEL(_replyText), Td::OneLine(text).c_str());
+  gtk_widget_set_visible(_replyBar, TRUE);
+  _forwardShown = true;
+  refreshSendButton();
+}
+
+void ChatView::cancelForward() {
+  _window.setForwardDraft(_chat, _topic, ForwardDraft());
+}
+
+// With or without the senders' names, or to another chat, as the phone apps offer.
+void ChatView::showForwardMenu() {
+  const auto draft = forwardDraft();
+  if (!draft) return;
+  const auto many = draft->ids.size() > 1;
+  auto *menu = g_menu_new();
+  g_menu_append(menu,
+                Tr(draft->names ? (many ? "lng_forward_action_hide_senders" : "lng_forward_action_hide_sender")
+                                : (many ? "lng_forward_action_show_senders" : "lng_forward_action_show_sender"))
+                    .c_str(),
+                "fwd.names");
+  g_menu_append(menu, Tr("lng_forward_change_recipient").c_str(), "fwd.recipient");
+  auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
+  g_object_unref(menu);
+  gtk_widget_set_parent(popover, _replyBar);
+  gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
+  gtk_popover_set_position(GTK_POPOVER(popover), GTK_POS_TOP);
+  DestroyPopoverOnClose(popover);
+  auto *group = g_simple_action_group_new();
+  const auto add = [&](const char *name, std::function<void()> callback) {
+    auto *action = g_simple_action_new(name, nullptr);
+    Connect<void(GSimpleAction *, GVariant *)>(action, "activate",
+                                               [callback](GSimpleAction *, GVariant *) { callback(); });
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+    g_object_unref(action);
+  };
+  add("names", [this] {
+    if (const auto draft = forwardDraft()) setForwardNames(!draft->names);
+  });
+  add("recipient", [this] {
+    const auto draft = forwardDraft();
+    if (!draft) return;
+    auto moved = *draft;
+    cancelForward();
+    _window.showForwardPicker(std::move(moved));
+  });
+  gtk_widget_insert_action_group(popover, "fwd", G_ACTION_GROUP(group));
+  g_object_unref(group);
+  gtk_popover_popup(GTK_POPOVER(popover));
+}
+
+void ChatView::sendForward() {
+  const auto draft = forwardDraft();
+  if (!draft) return;
+  // Without the senders' names they go as copies, with their captions, as Telegram Desktop sends them. The answer
+  // may come after the chat is closed: an error is told anyway.
+  _store.client().send(
+      api::make_object<api::forwardMessages>(_chat, topicObject(), draft->from, std::vector<std::int64_t>(draft->ids),
+                                             nullptr, !draft->names, false),
+      [](Td::ObjectPtr object) {
+        if (object && object->get_id() == api::error::ID) ShowToast(static_cast<api::error &>(*object).message_);
+      });
+  cancelForward();
 }
 
 // --- what the messages ask for -------------------------------------------------
@@ -1809,6 +1996,19 @@ void ChatView::debugState() const {
   auto newestText = std::string();
   if (!_items.empty()) newestText = Td::OneLine(PlainText(*_items.back()->data), 60);
   g_message("chat topic=%d topics=%s newestText=\"%s\"", int(_topic), topicList.c_str(), newestText.c_str());
+  // The last messages, and whose they were when forwarded.
+  auto last = std::string();
+  for (auto i = _items.size() > 4 ? _items.size() - 4 : 0; i < _items.size(); ++i) {
+    const auto &message = *_items[i]->data;
+    last += " [\"" + Td::OneLine(PlainText(message), 40) + "\"";
+    if (message.forward_info_) last += " from=\"" + ForwardSenderName(_store, message) + "\"";
+    last += "]";
+  }
+  const auto draft = forwardDraft();
+  g_message("chat forward: waiting=%zu names=%d bar=%d sendable=%d title=\"%s\" text=\"%s\" last:%s",
+            draft ? draft->ids.size() : 0, draft ? int(draft->names) : 1, int(_forwardShown),
+            int(gtk_widget_get_sensitive(_sendButton)), gtk_label_get_text(GTK_LABEL(_replyTitle)),
+            gtk_label_get_text(GTK_LABEL(_replyText)), last.c_str());
   g_message("chat state: messages=%zu rows=%zu nearRows=%zu oldest=%lld newest=%lld top=%d bottom=%d stick=%d reserve=%d value=%.0f "
             "page=%.0f upper=%.0f toBottom=%d replyTo=%lld editing=%lld draft=\"%s\"",
             _items.size(), _rows.size(), _nearRows.size(), (long long)(oldest >> 20), (long long)(newest >> 20), int(_reachedTop),
@@ -1852,6 +2052,43 @@ void ChatView::debugEdit(const std::string &text) {
       return;
     }
   }
+}
+
+void ChatView::debugForward() {
+  for (auto i = _items.rbegin(); i != _items.rend(); ++i) {
+    if ((*i)->local()) continue;
+    const auto id = (*i)->id();
+    // As the menu does: only a message that can be forwarded.
+    _store.client().request<api::messageProperties>(
+        api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
+        [this, id](api::messageProperties &properties) {
+          const auto found = find(id);
+          if (found && properties.can_be_forwarded_) forward(*found);
+          else g_message("chat forward: message %lld can't be forwarded", (long long)(id >> 20));
+        },
+        [](api::error &) {});
+    return;
+  }
+}
+
+void ChatView::debugForwardMode(bool names) {
+  setForwardNames(names);
+}
+
+void ChatView::setForwardNames(bool names) {
+  const auto draft = forwardDraft();
+  if (!draft || draft->names == names) return;
+  auto changed = *draft;
+  changed.names = names;
+  _window.setForwardDraft(_chat, _topic, std::move(changed));
+}
+
+void ChatView::debugForwardCancel() {
+  cancelForward();
+}
+
+void ChatView::debugForwardMenu() {
+  showForwardMenu();
 }
 
 void ChatView::debugDelete() {

@@ -6,10 +6,14 @@
 //   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
 //   question, saved)
 //   topic N (opens topic N of the group's topics shown) | topic-state | topic-menu N | topic-do N mute|read
+//   forward (the newest message of the open chat: the chats to choose from) | forward-pick N (row N of the chats
+//   shown) | forward-pick-topic N (of the group's topics) | forward-search TEXT | forward-enter | forward-picker
+//   (what it shows) | forward-mode names|no-names | forward-cancel | forward-menu (of the messages waiting)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "forward.hpp"
 #include "main_window.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
@@ -138,6 +142,25 @@ void Run(MainWindow &window, const std::string &command) {
     if (auto *topics = window.topicList(); topics && gap != std::string::npos) {
       topics->debugAction(std::atoi(rest.c_str()), rest.substr(gap + 1));
     }
+  } else if (name == "forward" && window.chatView()) {
+    window.chatView()->debugForward();
+  } else if (name == "forward-pick" && window.forwardPicker()) {
+    window.forwardPicker()->debugPick(std::atoi(rest.c_str()), false);
+  } else if (name == "forward-pick-topic" && window.forwardPicker()) {
+    window.forwardPicker()->debugPick(std::atoi(rest.c_str()), true);
+  } else if (name == "forward-search" && window.forwardPicker()) {
+    window.forwardPicker()->debugSearch(rest);
+  } else if (name == "forward-enter" && window.forwardPicker()) {
+    window.forwardPicker()->debugEnter();
+  } else if (name == "forward-picker") {
+    if (auto *picker = window.forwardPicker()) picker->debugState();
+    else g_message("forward picker: none");
+  } else if (name == "forward-mode" && window.chatView()) {
+    window.chatView()->debugForwardMode(rest != "no-names");
+  } else if (name == "forward-cancel" && window.chatView()) {
+    window.chatView()->debugForwardCancel();
+  } else if (name == "forward-menu" && window.chatView()) {
+    window.chatView()->debugForwardMenu();
   } else if (name == "state" && window.chatView()) {
     window.chatView()->debugState();
   } else if (name == "scroll" && window.chatView()) {

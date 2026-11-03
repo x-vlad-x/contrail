@@ -17,6 +17,7 @@ namespace Contrail {
 
 class MainWindow;
 class MessageWidget;
+struct ForwardDraft;
 struct MessageItem;
 struct ReplyPreview;
 
@@ -33,8 +34,10 @@ class ChatView final {
   [[nodiscard]] std::int32_t topic() const { return _topic; }  // 0: the whole chat.
   [[nodiscard]] Td::Store &store() const { return _store; }
   void showAt(std::int64_t message);
-  // Cancels a reply or an edit; false if there was nothing to cancel.
+  // Cancels a reply, an edit or the messages to forward; false if there was nothing to cancel.
   bool handleEscape();
+  // Other messages wait here to be forwarded, or none any more (MainWindow::setForwardDraft).
+  void forwardChanged();
 
   // What the messages ask for.
   void openChat(Td::ChatId chat);
@@ -55,6 +58,10 @@ class ChatView final {
   void debugReply();
   void debugEdit(const std::string &text);
   void debugDelete();
+  void debugForward();  // The newest message, to the chats to choose from.
+  void debugForwardMode(bool names);
+  void debugForwardCancel();
+  void debugForwardMenu();
 
  private:
   // One call of a function some time later. Started again, it waits from the start.
@@ -151,6 +158,15 @@ class ChatView final {
   void draftChanged();
   void confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf);
 
+  [[nodiscard]] const ForwardDraft *forwardDraft() const;
+  [[nodiscard]] bool forwarding() const { return forwardDraft() != nullptr; }
+  void forward(const MessageItem &item);
+  void refreshForwardBar();
+  void cancelForward();
+  void showForwardMenu();
+  void setForwardNames(bool names);
+  void sendForward();
+
   Td::Store &_store;
   const Td::ChatId _chat;
   const std::int32_t _topic;
@@ -211,6 +227,7 @@ class ChatView final {
   guint _closeSource = 0;
 
   std::int64_t _replyToId = 0;
+  bool _forwardShown = false;  // The bar shows the messages to forward.
   std::int64_t _editing = 0;
   bool _editPending = false;
   std::string _beforeEditText;
