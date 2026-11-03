@@ -1,5 +1,6 @@
 #include "call_notification.hpp"
 #include "call_shell.hpp"
+#include "proximity.hpp"
 
 #include <gio/gio.h>
 #include <memory>
@@ -27,20 +28,28 @@ void Wait(const std::function<bool()> &condition) {
 struct Shell {
   GDBusMethodInvocation *ring = nullptr;
   GDBusMethodInvocation *notification = nullptr;
+  GDBusMethodInvocation *inhibit = nullptr;
+  int uninhibited = 0;
+  guint32 lastUninhibited = 0;
   int ended = 0;
   int closed = 0;
   guint32 lastEnded = 0;
   guint32 lastClosed = 0;
-  ~Shell() { g_clear_object(&ring); g_clear_object(&notification); }
+  ~Shell() { g_clear_object(&ring); g_clear_object(&notification); g_clear_object(&inhibit); }
 
   static void Method(GDBusConnection *, const char *, const char *, const char *, const char *name,
                      GVariant *parameters, GDBusMethodInvocation *invocation, gpointer data) {
     auto &self = *static_cast<Shell *>(data);
     if (g_str_equal(name, "TriggerFeedback")) self.ring = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
+    else if (g_str_equal(name, "Inhibit")) self.inhibit = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
     else if (g_str_equal(name, "Notify")) self.notification = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
     else if (g_str_equal(name, "EndFeedback")) {
       ++self.ended;
       g_variant_get(parameters, "(u)", &self.lastEnded);
+      g_dbus_method_invocation_return_value(invocation, nullptr);
+    } else if (g_str_equal(name, "Uninhibit")) {
+      ++self.uninhibited;
+      g_variant_get(parameters, "(u)", &self.lastUninhibited);
       g_dbus_method_invocation_return_value(invocation, nullptr);
     } else if (g_str_equal(name, "CloseNotification")) {
       ++self.closed;
@@ -67,6 +76,11 @@ constexpr char kNotificationXml[] = R"xml(<node><interface name="org.freedesktop
 <arg type="u" direction="out"/></method><method name="CloseNotification"><arg type="u" direction="in"/></method>
 </interface></node>)xml";
 
+constexpr char kSessionXml[] = R"xml(<node><interface name="org.gnome.SessionManager">
+<method name="Inhibit"><arg type="s" direction="in"/><arg type="u" direction="in"/>
+<arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="out"/></method>
+<method name="Uninhibit"><arg type="u" direction="in"/></method></interface></node>)xml";
+
 void Own(GDBusConnection *bus, const char *name) {
   auto *reply = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus", "/org/freedesktop/DBus",
       "org.freedesktop.DBus", "RequestName", g_variant_new("(su)", name, 0u), G_VARIANT_TYPE("(u)"),
@@ -82,16 +96,23 @@ int main(int argc, char **argv) {
   g_test_dbus_up(testBus);
   auto *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
   g_assert_nonnull(bus);
+  g_assert_false(SystemRingtone());
   Own(bus, "org.sigxcpu.Feedback");
+  g_assert_true(SystemRingtone());
   Own(bus, "org.freedesktop.Notifications");
+  Own(bus, "org.gnome.SessionManager");
   auto shell = Shell();
   auto *feedback = g_dbus_node_info_new_for_xml(kFeedbackXml, nullptr);
   auto *notifications = g_dbus_node_info_new_for_xml(kNotificationXml, nullptr);
+  auto *session = g_dbus_node_info_new_for_xml(kSessionXml, nullptr);
   const auto vtable = GDBusInterfaceVTable{Shell::Method, nullptr, nullptr};
   const auto ringObject = g_dbus_connection_register_object(bus, "/org/sigxcpu/Feedback", feedback->interfaces[0],
       &vtable, &shell, nullptr, nullptr);
   const auto notificationObject = g_dbus_connection_register_object(bus, "/org/freedesktop/Notifications",
       notifications->interfaces[0], &vtable, &shell, nullptr, nullptr);
+  const auto inhibitObject = g_dbus_connection_register_object(bus, "/org/gnome/SessionManager",
+      session->interfaces[0], &vtable, &shell, nullptr, nullptr);
+  g_assert_cmpuint(inhibitObject, !=, 0);
   g_assert_cmpuint(ringObject, !=, 0);
   g_assert_cmpuint(notificationObject, !=, 0);
   // The application can close a call while feedbackd or Phosh still has its start request in flight.
@@ -130,6 +151,25 @@ int main(int argc, char **argv) {
     Wait([&] { return shell.closed == 2; });
     g_assert_cmpuint(notification.id(), ==, 0);
   }
+  {
+    auto idle = IdleInhibitor();
+    idle.set(true);
+    Wait([&] { return shell.inhibit; });
+  }
+  shell.reply(shell.inhibit, 77);
+  Wait([&] { return shell.uninhibited == 1; });
+  g_assert_cmpuint(shell.lastUninhibited, ==, 77);
+  {
+    auto idle = IdleInhibitor();
+    idle.set(true);
+    Wait([&] { return shell.inhibit; });
+    idle.set(false);
+    shell.reply(shell.inhibit, 78);
+    Wait([&] { return shell.uninhibited == 2; });
+    g_assert_cmpuint(shell.lastUninhibited, ==, 78);
+  }
+  g_dbus_connection_unregister_object(bus, inhibitObject);
+  g_dbus_node_info_unref(session);
   g_dbus_connection_unregister_object(bus, ringObject);
   g_dbus_connection_unregister_object(bus, notificationObject);
   g_dbus_node_info_unref(feedback);

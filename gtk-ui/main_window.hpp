@@ -77,6 +77,10 @@ class MainWindow final {
   [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
   void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
 
+  // Section calls: the call survives navigation between chats.
+  void startCall(Td::UserId user, bool video = false);
+  void setCallStatus(const std::string &text);
+  void debugCall(const std::string &action, const std::string &argument);
   // The chat's card, the contacts in the sidebar, "About" (dialogs.cpp).
   void openProfile(Td::ChatId chat);
   void openContacts();
@@ -100,10 +104,6 @@ class MainWindow final {
   [[nodiscard]] NetworkWatch *networkWatch() const { return _network.get(); }
   [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
   void releaseMemory(MemoryLevel level);
-  // Section calls: the call survives navigation between chats.
-  void startCall(Td::UserId user, bool video = false);
-  void setCallStatus(const std::string &text);
-  void debugCall(const std::string &action, const std::string &argument);
 
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
@@ -140,6 +140,7 @@ class MainWindow final {
   std::unique_ptr<VoiceRecorder> _recorder;
   std::unique_ptr<CallView> _call;
   GtkWidget *_callBar = nullptr;
+  std::string _callStatus;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;

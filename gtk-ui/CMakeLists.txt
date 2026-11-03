@@ -176,7 +176,7 @@ if (CONTRAIL_TESTS)
 endif()
 
 # Section calls: signaling and the scripted media also build without WebRTC.
-target_sources(contrail_core PRIVATE call_backend.cpp call_media_scenario.cpp calls.cpp
+target_sources(contrail_core PRIVATE call_backend.cpp call_camera.cpp call_media_scenario.cpp calls.cpp
   audio_route.cpp proximity.cpp call_shell.cpp call_notification.cpp call_lockscreen.cpp)
 pkg_check_modules(CONTRAIL_CALL_SHELL REQUIRED IMPORTED_TARGET json-glib-1.0)
 target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_CALL_SHELL)

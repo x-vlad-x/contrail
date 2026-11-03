@@ -86,3 +86,15 @@ target_link_libraries(contrail_call_media PUBLIC contrail_tgcalls PkgConfig::CON
 target_compile_options(contrail_call_media PRIVATE -Wall -Wno-unused-parameter -Wno-missing-field-initializers
   -Wno-deprecated-declarations -ffunction-sections -fdata-sections)
 target_link_libraries(contrail_core PUBLIC contrail_call_media)
+
+# Original call sounds, embedded as MP3 and decoded on demand with the FFmpeg already used by WebRTC.
+find_program(CONTRAIL_CALL_PYTHON python3 REQUIRED)
+set(CALL_SOUNDS_DIR ${CONTRAIL_TGCALLS_DIR}/../../Resources/sounds)
+set(CALL_SOUNDS_HEADER ${GENERATED}/call_sounds.h)
+add_custom_command(OUTPUT ${CALL_SOUNDS_HEADER}
+  COMMAND ${CONTRAIL_CALL_PYTHON} ${ROOT}/tools/td-call-sounds.py ${CALL_SOUNDS_DIR} ${CALL_SOUNDS_HEADER}
+  DEPENDS ${ROOT}/tools/td-call-sounds.py ${CALL_SOUNDS_DIR}/call_incoming.mp3 ${CALL_SOUNDS_DIR}/call_outgoing.mp3
+    ${CALL_SOUNDS_DIR}/call_connect.mp3 ${CALL_SOUNDS_DIR}/call_end.mp3 ${CALL_SOUNDS_DIR}/call_busy.mp3
+  VERBATIM)
+target_sources(contrail_call_media PRIVATE call_tones.cpp ${CALL_SOUNDS_HEADER})
+target_include_directories(contrail_call_media PRIVATE ${GENERATED})

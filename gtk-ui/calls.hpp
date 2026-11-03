@@ -3,6 +3,7 @@
 #include "app.hpp"
 #include "audio_route.hpp"
 #include "call_backend.hpp"
+#include "call_tones.hpp"
 #include "call_lockscreen.hpp"
 #include "call_notification.hpp"
 #include "call_shell.hpp"
@@ -17,6 +18,7 @@ class CallView final {
   ~CallView();
   void start(Td::UserId user, bool video = false);
   void present();
+  void setParentWindow(GtkWindow *parent);
   void debug(const std::string &action, const std::string &argument);
   [[nodiscard]] bool active() const { return _backend.active(); }
  private:
@@ -32,12 +34,14 @@ class CallView final {
   void setProximityShield(bool near);
   void updateLockScreen();
   void rating();
+  void updateTone();
   [[nodiscard]] std::string name() const;
   [[nodiscard]] std::string status() const;
 
   MainWindow &_parent;
   Td::Store &_store;
   CallBackend _backend;
+  std::unique_ptr<Calls::TonePlayer> _tones;
   GtkWidget *_window = nullptr;
   GtkWidget *_avatarBox = nullptr;
   GtkWidget *_name = nullptr;
@@ -66,6 +70,7 @@ class CallView final {
   guint _timer = 0;
   int _shownCall = 0;
   int _ratedCall = 0;
+  int _finishedCall = 0;
   bool _audioStarted = false;
   bool _shieldFullscreen = false;
   bool _debugLocked = false;
@@ -75,6 +80,8 @@ class CallView final {
   std::string _shownError;
   std::vector<Calls::Camera> _cameras;
   bool _devicesLoaded = false;
+  bool _systemRinger = false;
+  CallBackend::Stage _toneStage = CallBackend::Stage::None;
 };
 
 } // namespace Contrail

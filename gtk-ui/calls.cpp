@@ -1,4 +1,5 @@
 #include "calls.hpp"
+#include "call_camera.hpp"
 
 #include "main_window.hpp"
 #include "layout.hpp"
@@ -66,6 +67,7 @@ std::vector<Calls::Camera> Cameras() {
 CallView::CallView(MainWindow &window, Td::Store &store)
     : _parent(window), _store(store)
     , _backend(store.client(), g_getenv("CONTRAIL_SCENARIO") ? Calls::MakeScenarioMedia : Calls::StartMedia)
+    , _tones(Calls::MakeTonePlayer())
     , _audio([this] { updateAudioRoute(); }, Td::DataDirectory() + "/call-volumes.ini")
     , _proximity([this](bool near) { setProximityShield(near); })
     , _notification({.accept = [this] { _backend.accept(); }, .decline = [this] { _backend.hangup(); },
@@ -84,6 +86,7 @@ CallView::CallView(MainWindow &window, Td::Store &store)
   gtk_widget_set_size_request(_window, 320, 294);
   gtk_window_set_transient_for(GTK_WINDOW(_window), GTK_WINDOW(window.widget()));
   _signals.connect<gboolean(GtkWindow *)>(_window, "close-request", [=, this](GtkWindow *) -> gboolean {
+    if (_backend.snapshot().needRating) _backend.dismissRating();
     gtk_widget_set_visible(_window, FALSE);
     return TRUE;
   });
@@ -173,7 +176,7 @@ CallView::CallView(MainWindow &window, Td::Store &store)
     if (call.camera.empty()) loadCameras();
     const auto &cameras = _cameras;
     if (!call.camera.empty()) { _backend.setCamera({}); showFrame({}, true); }
-    else if (!cameras.empty()) _backend.setCamera(cameras.front().id);
+    else if (!cameras.empty()) _backend.setCamera(PreferredCallCamera(cameras));
     else ShowToast(Tr("lng_call_error_no_camera"));
   });
   _signals.clicked(_switchCamera, [this] { switchCamera(); });
@@ -189,6 +192,7 @@ CallView::~CallView() {
   _proximity.setEnabled(false);
   _idle.set(false);
   _ringer.stop();
+  if (_tones) _tones->stop();
   _notification.close();
   _lockScreen.hide();
   if (_timer) g_source_remove(_timer);
@@ -204,7 +208,12 @@ void CallView::start(Td::UserId user, bool video) {
   _backend.start(user, video);
 }
 
+void CallView::setParentWindow(GtkWindow *parent) {
+  gtk_window_set_transient_for(GTK_WINDOW(_window), parent);
+}
+
 void CallView::present() {
+  if (_parent.widget()) setParentWindow(GTK_WINDOW(_parent.widget()));
   if (_backend.snapshot().stage != S::None) gtk_window_present(GTK_WINDOW(_window));
 }
 
@@ -240,6 +249,7 @@ void CallView::refresh() {
   const auto busy = call.stage == S::Busy;
   const auto finishing = !active || call.stage == S::HangingUp;
   if (call.id != _shownCall || (!_shownCall && call.stage == S::Requesting)) {
+    if (auto *dialog = adw_window_get_visible_dialog(ADW_WINDOW(_window))) adw_dialog_force_close(dialog);
     _shownCall = call.id;
     _cameras.clear();
     _devicesLoaded = false;
@@ -278,7 +288,8 @@ void CallView::refresh() {
   if (!call.camera.empty()) gtk_widget_add_css_class(_camera, "active"); else gtk_widget_remove_css_class(_camera, "active");
   gtk_widget_set_tooltip_text(_camera, Tr(call.camera.empty() ? "lng_call_start_video" : "lng_call_stop_video").c_str());
   _idle.set(active && !finishing);
-  if (incoming) _ringer.start(); else _ringer.stop();
+  updateTone();
+  if (incoming && (_systemRinger || !_tones)) _ringer.start(); else _ringer.stop();
   if (!incoming && !finishing && !_audioStarted) { _audioStarted = true; _audio.begin(call.video); }
   if (finishing) {
     stopVideo();
@@ -308,7 +319,12 @@ void CallView::refresh() {
     _shownError = call.error;
     ShowToast(CallErrorText(call.error, name()));
   }
+  if (!active && call.id && !busy && _finishedCall != call.id) {
+    _finishedCall = call.id;
+    if (call.error.empty()) ShowToast(text);
+  }
   if (call.needRating) rating();
+  else if (!active && !busy) gtk_widget_set_visible(_window, FALSE);
 }
 
 void CallView::stopVideo() { showFrame({}, false); showFrame({}, true); }
@@ -336,12 +352,9 @@ void CallView::loadCameras() {
 }
 
 void CallView::switchCamera() {
-  const auto &cameras = _cameras;
-  const auto &current = _backend.snapshot().camera;
-  if (cameras.size() < 2 || current.empty()) return;
-  auto from = std::find_if(cameras.begin(), cameras.end(), [&](const auto &camera) { return camera.id == current; });
-  if (from == cameras.end() || ++from == cameras.end()) from = cameras.begin();
-  _backend.setCamera(from->id);
+  loadCameras();
+  const auto chosen = NextCallCamera(_cameras, _backend.snapshot().camera);
+  if (!chosen.empty()) _backend.setCamera(chosen);
 }
 
 void CallView::updateAudioRoute() {
@@ -355,6 +368,7 @@ void CallView::updateAudioRoute() {
   if (_backend.active() && output && output->device != _output) {
     _output = output->device;
     _backend.setOutputDevice(_output);
+    if (_tones) _tones->setOutputDevice(_output);
   }
   gtk_widget_set_sensitive(_speaker, _backend.active() && _audio.outputs().size() > 1);
   updateProximity();
@@ -437,18 +451,49 @@ void CallView::updateLockScreen() {
   _lockScreen.setShield(_proximity.near());
 }
 
+void CallView::updateTone() {
+  const auto &call = _backend.snapshot();
+  if (call.stage == S::Incoming && _toneStage != S::Incoming) _systemRinger = SystemRingtone();
+  if (_tones && !g_getenv("CONTRAIL_SCENARIO")) {
+    using Tone = Calls::Tone;
+    const auto wasWaiting = _toneStage == S::Incoming || _toneStage == S::Requesting || _toneStage == S::Ringing;
+    const auto waiting = call.stage == S::Incoming || call.stage == S::Requesting || call.stage == S::Ringing;
+    if (wasWaiting && !waiting) _tones->stop();
+    if (call.stage == S::Incoming) {
+      if (_systemRinger) _tones->stop();
+      else { _tones->setOutputDevice({}); _tones->play(Tone::Incoming, true); }
+    } else if (call.outgoing && (call.stage == S::Requesting || call.stage == S::Ringing)) {
+      _tones->play(Tone::Outgoing, true);
+    } else if (call.stage != _toneStage) {
+      if (call.stage == S::Exchanging) _tones->play(Tone::Connecting);
+      else if (call.stage == S::Busy) _tones->play(Tone::Busy);
+      else if ((call.stage == S::Failed || (call.stage == S::Ended && _toneStage != S::Incoming))
+          && _toneStage != S::None && _toneStage != S::Ended && _toneStage != S::Failed
+          && _toneStage != S::Busy) _tones->play(Tone::Ended);
+      else if (call.stage == S::HangingUp || call.stage == S::None) _tones->stop();
+    }
+  }
+  _toneStage = call.stage;
+}
+
 void CallView::rating() {
   const auto &call = _backend.snapshot();
   if (_ratedCall == call.id) return;
   _ratedCall = call.id;
+  present();
   auto *dialog = adw_alert_dialog_new(Tr("lng_call_rate_label").c_str(), nullptr);
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
   auto *score = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 5, 1);
   gtk_range_set_value(GTK_RANGE(score), 5);
   gtk_scale_set_digits(GTK_SCALE(score), 0);
   gtk_scale_set_draw_value(GTK_SCALE(score), TRUE);
+  gtk_range_set_round_digits(GTK_RANGE(score), 0);
   auto *comment = gtk_entry_new();
   gtk_entry_set_placeholder_text(GTK_ENTRY(comment), Tr("lng_call_rate_comment").c_str());
+  gtk_widget_set_sensitive(comment, FALSE);
+  Connect<void(GtkRange *)>(score, "value-changed", [comment](GtkRange *range) {
+    gtk_widget_set_sensitive(comment, gtk_range_get_value(range) < 5);
+  });
   gtk_box_append(GTK_BOX(box), score);
   gtk_box_append(GTK_BOX(box), comment);
   adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), box);
@@ -457,9 +502,10 @@ void CallView::rating() {
   const auto token = _lifetime.token();
   Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [this, token, score, comment, id = call.id]
       (AdwAlertDialog *, const char *response) {
-    if (!token.expired() && _backend.snapshot().id == id && g_strcmp0(response, "send") == 0) {
+    if (token.expired() || _backend.snapshot().id != id) return;
+    if (g_strcmp0(response, "send") == 0) {
       _backend.rate(int(gtk_range_get_value(GTK_RANGE(score))), gtk_editable_get_text(GTK_EDITABLE(comment)));
-    }
+    } else _backend.dismissRating();
   });
   adw_dialog_present(ADW_DIALOG(dialog), _window);
 }
@@ -473,7 +519,7 @@ void CallView::debug(const std::string &action, const std::string &argument) {
   else if (action == "camera") {
     if (_backend.snapshot().camera.empty()) loadCameras();
     const auto &cameras = _cameras;
-    if (!cameras.empty()) _backend.setCamera(_backend.snapshot().camera.empty() ? cameras.front().id : std::string());
+    if (!cameras.empty()) _backend.setCamera(_backend.snapshot().camera.empty() ? PreferredCallCamera(cameras) : std::string());
   } else if (action == "switch-camera") switchCamera();
   else if (action == "speaker") toggleSpeaker();
   else if (action == "route") _audio.select(argument);
@@ -481,7 +527,13 @@ void CallView::debug(const std::string &action, const std::string &argument) {
   else if (action == "lock") { _debugLocked = argument == "1"; updateLockScreen(); }
   else if (action == "hide") gtk_widget_set_visible(_window, FALSE);
   else if (action == "present") present();
-  else if (action == "devices") {
+  else if (action == "tone" && _tones) {
+    using Tone = Calls::Tone;
+    const auto tone = argument == "incoming" ? Tone::Incoming : argument == "outgoing" ? Tone::Outgoing
+        : argument == "connecting" ? Tone::Connecting : argument == "ended" ? Tone::Ended
+        : argument == "busy" ? Tone::Busy : Tone::None;
+    _tones->play(tone, tone == Tone::Incoming || tone == Tone::Outgoing);
+  } else if (action == "devices") {
     for (const auto &camera : Calls::Cameras()) g_message("call-camera: id=%s name=%s", camera.id.c_str(), camera.name.c_str());
     for (const auto &output : _audio.outputs()) g_message("call-output: id=%s kind=%d device=%s", output.id.c_str(),
         int(output.kind), output.device.c_str());
@@ -491,9 +543,9 @@ void CallView::debug(const std::string &action, const std::string &argument) {
   }
   const auto &call = _backend.snapshot();
   g_message("call-state: id=%d user=%lld stage=%d active=%d incoming=%d muted=%d camera=%s remote=%d local=%d "
-      "visible=%d shield=%d locked=%d notification=%u ringing=%u emojis=\"%s\" status=\"%s\" sound=%s", call.id, (long long)call.user,
+      "visible=%d shield=%d locked=%d notification=%u ringing=%u tone=%d emojis=\"%s\" status=\"%s\" sound=%s", call.id, (long long)call.user,
       int(call.stage), _backend.active(), call.stage == S::Incoming, call.muted, call.camera.c_str(),
-      _remoteWidth, _localWidth, gtk_widget_get_visible(_window), gtk_widget_get_visible(_shield), _lockScreen.shown(), _notification.id(), _ringer.eventId(),
+      _remoteWidth, _localWidth, gtk_widget_get_visible(_window), gtk_widget_get_visible(_shield), _lockScreen.shown(), _notification.id(), _ringer.eventId(), _tones ? int(_tones->current()) : 0,
       call.emojis.c_str(), status().c_str(), _backend.soundStats().c_str());
 }
 

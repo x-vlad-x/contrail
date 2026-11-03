@@ -1,4 +1,5 @@
 #include "call_backend.hpp"
+#include "call_camera.hpp"
 #include "td/session.hpp"
 
 #include <algorithm>
@@ -96,7 +97,7 @@ void CallBackend::setCamera(std::string id) {
   if (!_media || !active()) return;
   _call.error.clear();
   _call.camera = std::move(id);
-  if (!_call.camera.empty()) _call.video = true;
+  if (!_call.camera.empty()) { _call.video = true; RememberCallCamera(_call.camera); }
   _media->setCamera(_call.camera);
   if (_call.camera.empty() && _frame) _frame({}, true);
   changed();
@@ -111,9 +112,11 @@ void CallBackend::rate(int rating, const std::string &comment) {
   if (!_call.needRating || rating < 1 || rating > 5) return;
   _call.needRating = false;
   _client.send(api::make_object<api::sendCallRating>(api::make_object<api::inputCallDiscarded>(_call.id),
-      rating, comment, std::vector<api::object_ptr<api::CallProblem>>()));
+      rating, rating < 5 ? comment : std::string(), std::vector<api::object_ptr<api::CallProblem>>()));
   changed();
 }
+
+void CallBackend::dismissRating() { _call.needRating = false; changed(); }
 
 void CallBackend::updated(api::Update &update) {
   if (update.get_id() == api::updateCall::ID) {
@@ -246,7 +249,7 @@ void CallBackend::ready(const api::callStateReady &ready) {
     if (g_getenv("CONTRAIL_SCENARIO")) parameters.camera = _call.camera = "scenario-front";
     else {
       const auto cameras = Calls::Cameras();
-      if (!cameras.empty()) parameters.camera = _call.camera = cameras.front().id;
+      parameters.camera = _call.camera = PreferredCallCamera(cameras);
     }
   }
   _call.stage = Stage::Connecting;
@@ -292,6 +295,7 @@ void CallBackend::startMedia(Calls::Parameters parameters) {
       .cameraFailed = [this, token] {
         if (token.expired()) return;
         _call.camera.clear();
+        if (_media) _media->setCamera({});
         _call.error = "CAMERA_UNAVAILABLE";
         if (_frame) _frame({}, true);
         changed();

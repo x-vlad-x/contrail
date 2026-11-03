@@ -45,8 +45,9 @@
 //   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
 //   attach-menu file|location (an item of the attach menu, as a tap on it)
 //   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
-//   call-state|hide|present|speaker | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
+//   call-state|hide|present|speaker|camera-failed | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
 //   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
+//   call-tone incoming|outgoing|connecting|ended|busy|stop (plays only a call tone, without calling)
 #include "debug.hpp"
 
 #include "background_debug.hpp"

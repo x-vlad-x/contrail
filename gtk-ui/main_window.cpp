@@ -80,6 +80,7 @@ void MainWindow::buildWindow() {
   // Section calls: a persistent button above all pages returns to the call.
   auto *pages = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   _callBar = adw_banner_new("");
+  g_object_add_weak_pointer(G_OBJECT(_callBar), reinterpret_cast<gpointer *>(&_callBar));
   adw_banner_set_use_markup(ADW_BANNER(_callBar), FALSE);
   Connect<void(AdwBanner *)>(_callBar, "button-clicked", [this](AdwBanner *) { if (_call) _call->present(); });
   gtk_box_append(GTK_BOX(pages), _callBar);
@@ -92,7 +93,7 @@ void MainWindow::buildWindow() {
 
   // Section calls: closing the chat window must leave an ongoing call alive.
   Connect<gboolean(GtkWindow *)>(_window, "close-request", [this](GtkWindow *) -> gboolean {
-    if (!_call || !_call->active()) return FALSE;
+    if (!_call || !_call->active() || Settings().background) return FALSE;
     gtk_widget_set_visible(_window, FALSE);
     return TRUE;
   });
@@ -114,6 +115,8 @@ void MainWindow::buildWindow() {
     g_idle_add_once(+[](gpointer data) { static_cast<MainWindow *>(data)->closeToBackground(); }, this);
     return TRUE;
   });
+  if (_call) _call->setParentWindow(GTK_WINDOW(_window));
+  setCallStatus(_callStatus);
   _memoryGuard->setForeground(true);
 }
 
@@ -167,15 +170,16 @@ MainWindow::~MainWindow() {
   if (_stringsTimeout) g_source_remove(_stringsTimeout);
   _tray = nullptr;
   clearChats();
+  if (_callBar) g_object_remove_weak_pointer(G_OBJECT(_callBar), reinterpret_cast<gpointer *>(&_callBar));
   if (_sidebarNav) g_object_remove_weak_pointer(G_OBJECT(_sidebarNav), reinterpret_cast<gpointer *>(&_sidebarNav));
   if (_window) g_object_remove_weak_pointer(G_OBJECT(_window), reinterpret_cast<gpointer *>(&_window));
   if (_placeholder) g_object_unref(_placeholder);
 }
 
 void MainWindow::clearChats() {
-  clearViews();
   _call = nullptr;
   setCallStatus({});
+  clearViews();
   _forwardDrafts.clear();
   _notifier = nullptr;
   _network = nullptr;
@@ -259,6 +263,7 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
   _store = std::make_unique<Td::Store>(session.client(), [this](const api::message &message) {
     return Td::MessagePreview(message, *_store);
   });
+  _call = std::make_unique<CallView>(*this, *_store);
   // Live locations go on in the background, with or without a window on the screen.
   Live().setStore(_store.get());
   _network = std::make_unique<NetworkWatch>(session.client());
@@ -270,7 +275,6 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
     _unreadUnmuted = data.unread_unmuted_count_;
     updateTray();
   }, _unreadLifetime);
-  _call = std::make_unique<CallView>(*this, *_store);
   _language = language;
   _stringsAsked = false;
   _stringsReady = false;
@@ -709,6 +713,9 @@ void MainWindow::releaseWindow() {
     _saved->y = place.y;
   }
   clearViews();
+  if (_call) _call->setParentWindow(nullptr);
+  if (_callBar) g_object_remove_weak_pointer(G_OBJECT(_callBar), reinterpret_cast<gpointer *>(&_callBar));
+  _callBar = nullptr;
   if (_sidebarNav) g_object_remove_weak_pointer(G_OBJECT(_sidebarNav), reinterpret_cast<gpointer *>(&_sidebarNav));
   _sidebarNav = nullptr;
   auto *window = std::exchange(_window, nullptr);
@@ -753,7 +760,8 @@ void MainWindow::releaseMemory(MemoryLevel level) {
 namespace Contrail {
 void MainWindow::startCall(Td::UserId user, bool video) { if (_call) _call->start(user, video); }
 void MainWindow::setCallStatus(const std::string &text) {
-  if (!_callBar) return;  // The window is released: the bar comes back with it.
+  _callStatus = text;
+  if (!_callBar) return;
   adw_banner_set_button_label(ADW_BANNER(_callBar), Tr("lng_call_box_title").c_str());
   adw_banner_set_title(ADW_BANNER(_callBar), text.c_str());
   adw_banner_set_revealed(ADW_BANNER(_callBar), !text.empty());

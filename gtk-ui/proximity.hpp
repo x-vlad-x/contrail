@@ -2,6 +2,7 @@
 
 #include <gio/gio.h>
 #include <functional>
+#include <memory>
 
 namespace Contrail {
 
@@ -53,7 +54,8 @@ public:
 private:
   void uninhibit();
 
-  GCancellable *_cancellable = nullptr;
+  GDBusConnection *_bus = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
   guint _cookie = 0;
   bool _requested = false;
   bool _pending = false;
