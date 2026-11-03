@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace Contrail {
 
@@ -19,5 +20,13 @@ struct AppSettings {
 };
 [[nodiscard]] const AppSettings &Settings();
 void SetSettings(const AppSettings &settings);
+
+// Contrail 0.3 (on Telegram Desktop) left its data beside this one: its switches and language were carried over at
+// the first start (from contrail-data/tdata into [settings]); the language pack it used, empty for the system's.
+[[nodiscard]] std::string ChosenLanguage();
+// It had a signed-in account, which can't come along: the login page says why the user signs in again. Forgotten
+// once signed in.
+[[nodiscard]] bool SignedInBeforeTdlib();
+void ForgetSignedInBeforeTdlib();
 
 }  // namespace Contrail

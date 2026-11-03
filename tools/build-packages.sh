@@ -15,6 +15,13 @@
 # names another deps-td, for example the main checkout's from a git worktree). It is built for each architecture
 # in that architecture's package container, into deps-td-pkg/.
 #
+# Calls carry sound and video, as in 0.3.1: tgcalls is compiled from Telegram Desktop's sources (tdesktop/, the
+# release tag) against WebRTC (tg_owt) and rnnoise, which build-env/build-deps.sh builds in the same Debian 13
+# containers, with the small FFmpeg of the packages, into deps-x86_64 and deps-aarch64-trixie (deps-aarch64 is the
+# phone's FuriOS build and doesn't fit these packages). They are built there when missing; DEPS_ROOT names the
+# checkout that has them (by default this one, or the main checkout of a git worktree). CONTRAIL_CALLS=OFF builds
+# without sound and video in calls.
+#
 # Telegram API credentials: TELEGRAM_API_ID and TELEGRAM_API_HASH from the environment or from
 # api-credentials.env (see README.md). CONTRAIL_TEST_API=1 builds with Telegram Desktop's public credentials
 # instead: such packages are for checking the packaging only and can't be released.
@@ -25,7 +32,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 TARGET="${1:-all}"
-case "$TARGET" in aarch64|x86_64|all) ;; *) sed -n '2,22p' "$0" >&2; exit 2 ;; esac
+case "$TARGET" in aarch64|x86_64|all) ;; *) sed -n '2,29p' "$0" >&2; exit 2 ;; esac
 
 FLAVOUR="${CONTRAIL_FLAVOUR:-devel}"
 case "$FLAVOUR" in
@@ -59,10 +66,38 @@ if [[ $TD_DIR != "$ROOT/deps-td" ]]; then
 fi
 mkdir -p deps-td
 
+# WebRTC and the small FFmpeg (build-deps.sh), and tgcalls' sources in tdesktop/: mounted where the containers look
+# for them. A worktree's tdesktop is a link to the main checkout's, mounted at the path the link names.
+CALLS="${CONTRAIL_CALLS:-ON}"
+# (The containers leave empty mount points behind in this checkout: only a finished prefix counts.)
+DEPS_ROOT="$(realpath -m "${DEPS_ROOT:-$(ls "$ROOT"/deps-{x86_64,aarch64-trixie}/prefix/lib/libtg_owt.a >/dev/null 2>&1 &&
+  echo "$ROOT" || dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}")"
+TDESKTOP="$(realpath -m "$ROOT/tdesktop")"
+EXTRA_MOUNTS=()
+add_mount() {  # add_mount <host> <container>
+  EXTRA_MOUNTS+=(-v "$1:$2:z")
+  CONTRAIL_EXTRA_MOUNTS="${CONTRAIL_EXTRA_MOUNTS:+$CONTRAIL_EXTRA_MOUNTS;}$1:$2"
+}
+TGCALLS=/src/tdesktop/Telegram/ThirdParty/tgcalls
+if [[ $TDESKTOP != "$ROOT/tdesktop" ]]; then
+  add_mount "$TDESKTOP" "$TDESKTOP"
+  TGCALLS=$TDESKTOP/Telegram/ThirdParty/tgcalls
+fi
+[[ -f $TDESKTOP/Telegram/ThirdParty/tgcalls/tgcalls/Instance.cpp || $CALLS == OFF ]] ||
+  die "tdesktop/ has no tgcalls: check out Telegram Desktop there (git submodule update --init --recursive)"
+deps_dir() { [[ $1 == aarch64 ]] && echo deps-aarch64-trixie || echo deps-$1; }
+for arch in aarch64 x86_64; do
+  [[ $TARGET == all || $TARGET == "$arch" ]] || continue
+  dir=$(deps_dir "$arch")
+  mkdir -p "$DEPS_ROOT/$dir"
+  [[ $DEPS_ROOT != "$ROOT" ]] && add_mount "$DEPS_ROOT/$dir" "/src/$dir"
+done
+export CONTRAIL_EXTRA_MOUNTS DEPS_ROOT
+
 # in_container <image> <network: net|none> <command...>
 in_container() {
   local image=$1 network=$2; shift 2
-  local args=(--rm "${USER_ARGS[@]}" -e HOME=/tmp -e JOBS="$JOBS" -v "$ROOT:/src:z" "${TD_MOUNT[@]}" -w /src)
+  local args=(--rm "${USER_ARGS[@]}" -e HOME=/tmp -e JOBS="$JOBS" -v "$ROOT:/src:z" "${TD_MOUNT[@]}" "${EXTRA_MOUNTS[@]}" -w /src)
   [[ $network == none ]] && args+=(--network=none)
   "$ENGINE" run "${args[@]}" "$image" "$@"
 }
@@ -95,6 +130,14 @@ build_target() {
     log "Build container $image"
     "$ENGINE" build --label "contrail.recipe=$recipe_sum" -t "$image" -f "$recipe" build-env
   fi
+  local deps
+  deps=$(deps_dir "$arch")
+  # Each library is rebuilt only when its commit changes; a finished prefix isn't touched at all.
+  if [[ $CALLS != OFF && ! ( -f $DEPS_ROOT/$deps/prefix/lib/libtg_owt.a &&
+        -f $DEPS_ROOT/$deps/prefix/share/contrail/own-libraries.json ) ]]; then
+    log "WebRTC, rnnoise and FFmpeg for calls ($arch)"
+    in_container "$image" net build-env/build-deps.sh "$arch"
+  fi
   log "TDLib $TDLIB_COMMIT ($arch)"
   in_container "$image" net env TDLIB_OUT="/src/$td" build-env/build-tdlib.sh "$arch"
   log "Contrail ($arch, $FLAVOUR)"
@@ -104,7 +147,8 @@ build_target() {
     -DCONTRAIL_TD_DIR=/src/deps-td -DCONTRAIL_TD_BUILD="/src/$td" -DCONTRAIL_VERSION_LIMITS=OFF \
     -DTELEGRAM_API_ID="$TELEGRAM_API_ID" -DTELEGRAM_API_HASH="$TELEGRAM_API_HASH" \
     -DCONTRAIL_APP_ID="$APP_ID" -DCONTRAIL_APP_NAME="$APP_NAME" -DCONTRAIL_DATA_NAME="$DATA_NAME" \
-    -DCONTRAIL_COMMAND="$COMMAND" -DCONTRAIL_BUNDLE_RPATH=ON -DCONTRAIL_TESTS=OFF >/dev/null
+    -DCONTRAIL_COMMAND="$COMMAND" -DCONTRAIL_BUNDLE_RPATH=ON -DCONTRAIL_TESTS=OFF -DCONTRAIL_CALLS:BOOL="$CALLS" \
+    -DCONTRAIL_CALL_DEPS="/src/$deps/prefix" -DCONTRAIL_TGCALLS_DIR="$TGCALLS" >/dev/null
   in_container "$image" none ninja -C "$build" -j"$JOBS" contrail
   log "Packages ($arch)"
   python3 tools/package.py --arch "$arch" --container "$image" --api "$API_KIND" --tdlib-commit "$TDLIB_COMMIT" \

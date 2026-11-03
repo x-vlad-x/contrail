@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tarfile
 import time
 import urllib.request
 
@@ -40,10 +41,15 @@ TITLE = FLAVOURS["stable"]["title"]
 MAINTAINER = "Vladislav Shadiuk <6992531+x-vlad-x@users.noreply.github.com>"
 HOMEPAGE = "https://github.com/x-vlad-x/contrail"
 ARCHES = {
-    "aarch64": dict(deb="arm64", triple="aarch64-linux-gnu", build="build-td-pkg/aarch64"),
-    "x86_64": dict(deb="amd64", triple="x86_64-linux-gnu", build="build-td-pkg/x86_64"),
+    # deps: build-env/build-deps.sh's prefix in the same Debian 13 container (WebRTC for calls, the small FFmpeg).
+    "aarch64": dict(deb="arm64", triple="aarch64-linux-gnu", build="build-td-pkg/aarch64", deps="deps-aarch64-trixie"),
+    "x86_64": dict(deb="amd64", triple="x86_64-linux-gnu", build="build-td-pkg/x86_64", deps="deps-x86_64"),
 }
 FORMATS = ("deb", "rpm", "appimage", "flatpak")
+LICENSE_RE = re.compile(r"(^|/)(LICEN[CS]E|COPYING|NOTICE|PATENTS|AUTHORS|UNLICENSE)[^/]*$", re.I)
+SOURCE_SUFFIXES = (".c", ".cc", ".cpp", ".h", ".hpp", ".rs", ".py", ".go", ".js", ".m", ".mm", ".S", ".asm")
+# What build-deps.sh built that calls link statically (gtk-ui/call_media.cmake): WebRTC and rnnoise.
+STATIC_LIBRARIES = ("tg_owt", "rnnoise")
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
 # Where the DEB and RPM put the bundle (the launcher is linked into /usr/bin as NAME).
 SYSTEM_BUNDLE = f"usr/lib/{NAME}"
@@ -72,6 +78,15 @@ FLATPAK_PERMISSIONS = [
     "--talk-name=org.gnome.SessionManager", "--system-talk-name=org.freedesktop.login1",
     "--system-talk-name=net.hadess.SensorProxy",
 ]
+
+
+def deps(arch):
+    """build-deps.sh's prefix on this machine (DEPS_ROOT: tools/build-packages.sh mounts it at /src/<name>)."""
+    return Path(os.environ.get("DEPS_ROOT", ROOT)) / ARCHES[arch]["deps"]
+
+
+def deps_in_container(arch):
+    return Path("/src") / ARCHES[arch]["deps"]
 
 
 def run(command, **kwargs):
@@ -176,6 +191,54 @@ def package_version(flavour):
     return f"{version}-td.{count.stdout.strip() if count.returncode == 0 else 0}"
 
 
+def extract_licenses(archive, destination, wanted=None):
+    """Copies the license files of a source archive; `wanted` limits it to some top directories."""
+    count = 0
+    with tarfile.open(archive) as source:
+        for member in source:
+            name = member.name
+            if not member.isfile() or not LICENSE_RE.search(name) or name.endswith(SOURCE_SUFFIXES):
+                continue
+            parts = Path(name).parts
+            if any(part in {".git", "test", "tests", "testdata", "examples"} for part in parts):
+                continue
+            if wanted is not None and not any(name.startswith(prefix) for prefix in wanted):
+                continue
+            target = destination / name
+            if not target.resolve().is_relative_to(destination.resolve()):
+                raise RuntimeError(f"Unsafe path in {archive}: {name}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with source.extractfile(member) as stream:
+                target.write_bytes(stream.read())
+            count += 1
+    return count
+
+
+def static_notices(args, doc):
+    """License texts of what calls compile in: tgcalls from Telegram Desktop's sources, and the libraries
+    build-deps.sh built (WebRTC, rnnoise). A build without sound and video in calls has none of them."""
+    cache = (ROOT / ARCHES[args.arch]["build"] / "CMakeCache.txt").read_text()
+    if not re.search(r"^CONTRAIL_CALLS:BOOL=ON$", cache, re.M):
+        return False
+    target = doc / "static-libraries"
+    target.mkdir(parents=True, exist_ok=True)
+    sources = deps(args.arch) / "sources"
+    manifest = json.loads((sources / "manifest.json").read_text())
+    for name in STATIC_LIBRARIES:
+        record = manifest[name]
+        archive = sources / record["archive"]
+        if digest(archive) != record["sha256"]:
+            raise RuntimeError(f"Source archive changed after the build: {archive}")
+        if not extract_licenses(archive, target / name):
+            raise RuntimeError(f"No license files found for the statically linked {name}")
+    (target / "sources.json").write_text(json.dumps({name: manifest[name] for name in STATIC_LIBRARIES},
+                                                   indent=2, sort_keys=True) + "\n")
+    tgcalls = (ROOT / "tdesktop/Telegram/ThirdParty/tgcalls").resolve()
+    (target / "tgcalls").mkdir()
+    shutil.copy2(tgcalls / "LICENSE", target / "tgcalls/LICENSE")
+    return True
+
+
 def prepare_stage(args):
     """cmake --install of the Contrail component into STAGE/usr, stripped, with icons, notices and build records."""
     space = workspace(args.arch)
@@ -192,6 +255,7 @@ def prepare_stage(args):
     # The Debian packages the build used: headers, static parts, shared libraries (see LICENSES.md).
     execute(args.container, ["python3", container_path(ROOT / "tools/build_inputs.py"), container_path(build),
                              container_path(program), container_path(doc / "build-inputs.json")])
+    calls = static_notices(args, doc)
     execute(args.container, [f"{triple}-strip", "--remove-section=.comment", "--remove-section=.note",
                              container_path(program)])
     icons = stage / "usr/share/icons/hicolor"
@@ -220,6 +284,7 @@ def prepare_stage(args):
         "project_dirty": dirty,
         "source_date": source_date,
         "tdlib_commit": args.tdlib_commit,
+        "call_media": calls,
         "api_credentials": args.api,
         "container": args.container,
         "container_image": image,
@@ -240,8 +305,37 @@ def prepare_stage(args):
 
 
 def bundle_step(args, action, root, *options):
+    if action in ("deploy", "check", "licenses"):
+        # build-deps.sh's own libraries (the small FFmpeg) come before the container's.
+        options = (*options, "--own", deps_in_container(args.arch) / "prefix/lib")
     execute(args.container, ["python3", container_path(ROOT / "tools/bundle.py"), action, container_path(root),
                              ARCHES[args.arch]["triple"], *options])
+
+
+# Libraries only Debian's full FFmpeg needs (codecs, filters and protocols Contrail doesn't use): with the small
+# FFmpeg none of them may come back into a package through another library.
+FULL_FFMPEG_ONLY = ("libx264.", "libx265.", "libaom.", "libSvtAv1Enc.", "librav1e.", "libcodec2.", "libplacebo.",
+                    "libflite", "libopenmpt.", "librubberband.", "libjxl", "libbluray.", "libzmq.", "libsrt",
+                    "libssh.", "librist.", "libpocketsphinx.", "libzvbi.", "libvidstab.", "libxvidcore.",
+                    "libtheora", "libgme.", "libchromaprint.", "libmysofa.", "libOpenCL.")
+
+
+def check_ffmpeg(args, root):
+    """The bundled FFmpeg is build-deps.sh's, and nothing of Debian's full FFmpeg came in with it."""
+    listing = deps(args.arch) / "prefix/share/contrail/own-libraries.json"
+    own = json.loads(listing.read_text()) if listing.exists() else {}
+    if "libavcodec.so.61" not in own:
+        return
+    origins = json.loads((root / "share/doc/contrail/bundled/origins.json").read_text())
+    for name in own:
+        origin = origins.get(f"lib/{name}")
+        if origin is not None and "/prefix/lib/" not in origin:
+            raise RuntimeError(f"{name} was taken from {origin}, not from build-deps.sh's FFmpeg")
+    if "lib/libavcodec.so.61" not in origins:
+        raise RuntimeError("The package carries no FFmpeg: the system's would be used")
+    unwanted = sorted(p.name for p in (root / "lib").glob("*.so*") if p.name.startswith(FULL_FFMPEG_ONLY))
+    if unwanted:
+        raise RuntimeError("Libraries of the full FFmpeg are in the package: " + ", ".join(unwanted))
 
 
 def make_bundle(args, stage):
@@ -255,6 +349,7 @@ def make_bundle(args, stage):
     bundle_step(args, "deploy", bundle, "--host", host)
     bundle_step(args, "check", bundle, "--host", host)
     bundle_step(args, "licenses", bundle)
+    check_ffmpeg(args, bundle)
     return bundle
 
 
@@ -587,6 +682,7 @@ def build_flatpak(args, stage, version, info):
     bundle_step(args, "deploy", files, "--host", container_path(listing))
     bundle_step(args, "check", files, "--host", container_path(listing))
     bundle_step(args, "licenses", files)
+    check_ffmpeg(args, files)
     doc = files / "share/doc/contrail"
     (doc / "flatpak-runtime.txt").write_text(f"{ref} {commit}\n{FLATPAK_REMOTE}\n")
     sdk = ref.replace("Platform", "Sdk")

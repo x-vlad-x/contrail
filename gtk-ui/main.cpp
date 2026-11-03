@@ -2,6 +2,7 @@
 #include "call_media.hpp"
 #include "contrail_version.h"
 #include "debug.hpp"
+#include "local_state.hpp"
 #include "main_window.hpp"
 #include "td/scenario.hpp"
 #include "td/session.hpp"
@@ -38,7 +39,9 @@ void SessionClosed(bool lost) {
 
 void StartSession() {
   auto &program = Instance();
-  const auto language = SystemLanguage();
+  // The language Contrail 0.3 used, if this one came after it; otherwise the system's.
+  const auto chosen = ChosenLanguage();
+  const auto language = chosen.empty() ? SystemLanguage() : chosen;
   // The window's store and open chat go with the client they talk to, while it is still there.
   program.window->detach();
   GetApp().session = nullptr;

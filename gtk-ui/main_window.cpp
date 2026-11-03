@@ -339,6 +339,7 @@ void MainWindow::authorization(api::AuthorizationState &state) {
       showLogin(state);
       break;
     case api::authorizationStateReady::ID:
+      ForgetSignedInBeforeTdlib();
       showChats();
       break;
     case api::authorizationStateLoggingOut::ID:

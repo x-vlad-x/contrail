@@ -77,6 +77,7 @@ add_library(contrail_core STATIC
   device_scale.cpp
   dialogs.cpp
   forward.cpp
+  legacy_settings.cpp
   live_location.cpp
   live_map.cpp
   local_state.cpp
@@ -154,6 +155,8 @@ if (CONTRAIL_TESTS)
   target_link_libraries(td-message-text-test PRIVATE contrail_core)
   add_executable(picture-decode-test ${ROOT}/tests/td/picture-decode-test.cpp)
   target_link_libraries(picture-decode-test PRIVATE contrail_core)
+  add_executable(legacy-settings-test ${ROOT}/tests/td/legacy-settings-test.cpp)
+  target_link_libraries(legacy-settings-test PRIVATE contrail_core)
   add_executable(memory-pressure-test ${ROOT}/tests/memory-pressure.cpp)
   target_link_libraries(memory-pressure-test PRIVATE contrail_core)
   # Its checks are asserts: kept in a release build too.
