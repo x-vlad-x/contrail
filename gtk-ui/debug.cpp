@@ -22,7 +22,12 @@
 //   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
 //   edit-last (the up arrow in the empty field)
+//   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
+//   launcher) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
+//   mem-guard (its state) | mem-simulate low|critical | notify-state | proxy-...
 #include "debug.hpp"
+
+#include "background_debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
@@ -108,6 +113,12 @@ void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
+  if (RunBackgroundCommand(window, name, rest)) return;
+  // Without its window (the app in the background) only what needs none.
+  if (!window.widget() && name != "mem" && name != "mem-arenas" && name != "trim") {
+    g_message("debug: no window for %s", command.c_str());
+    return;
+  }
   if (name == "mem") {
     // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
     // is the main arena's only.

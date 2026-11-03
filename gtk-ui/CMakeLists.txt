@@ -82,6 +82,13 @@ add_library(contrail_core STATIC
   text.cpp
   topic_list.cpp
   userpics.cpp)
+# Settings and the app in the background: notifications, the tray icon, memory, the proxy.
+target_sources(contrail_core PRIVATE
+  background_debug.cpp
+  memory_guard.cpp
+  settings.cpp
+  tray.cpp)
+
 target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
 target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS PkgConfig::CONTRAIL_IMAGE_DEPS)
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. The x86_64 test container has older headers,
@@ -116,6 +123,10 @@ if (CONTRAIL_TESTS)
   target_link_libraries(td-message-text-test PRIVATE contrail_core)
   add_executable(picture-decode-test ${ROOT}/tests/td/picture-decode-test.cpp)
   target_link_libraries(picture-decode-test PRIVATE contrail_core)
+  add_executable(memory-pressure-test ${ROOT}/tests/memory-pressure.cpp)
+  target_link_libraries(memory-pressure-test PRIVATE contrail_core)
+  # Its checks are asserts: kept in a release build too.
+  target_compile_options(memory-pressure-test PRIVATE -UNDEBUG)
   target_compile_definitions(td-message-text-test PRIVATE
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()

@@ -384,7 +384,7 @@ class ScenarioTransport final : public Transport {
 
   void send(std::uint64_t id, FunctionPtr function) override {
     if (showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
-        || reactionRequest(id, *function)) {
+        || reactionRequest(id, *function) || backgroundRequest(id, *function)) {
       return;
     }
     switch (function->get_id()) {
@@ -2064,6 +2064,37 @@ class ScenarioTransport final : public Transport {
         return false;
     }
   }
+
+  // --- settings and the app in the background ------------------------------------
+
+  bool backgroundRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::loadChats::ID:
+        // The badge of the tray icon: the friends with unread messages (every fourth), none of them muted.
+        if (!_unreadCountSent) {
+          _unreadCountSent = true;
+          const auto unread = kChatCount / 4;
+          update(api::make_object<api::updateUnreadChatCount>(ListObject(false), kChatCount, unread, unread, 0, 0));
+        }
+        return false;
+      case api::getMe::ID: {
+        auto me = MakeUser(kSelfId, "Vlad", "");
+        me->phone_number_ = "15550001000";
+        answer(id, std::move(me));
+        return true;
+      }
+      case api::logOut::ID:
+        // As TDLib does: the session ends and its data goes; the program starts a new client.
+        answer(id, api::make_object<api::ok>());
+        authorization(api::make_object<api::authorizationStateLoggingOut>());
+        later(300, [this] { authorization(api::make_object<api::authorizationStateClosed>()); });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool _unreadCountSent = false;
 
   const bool _fullList;
   Sink _sink;

@@ -2,11 +2,13 @@
 
 #include "app.hpp"
 #include "forward.hpp"
+#include "memory_pressure.hpp"
 #include "td/client.hpp"
 #include "td/store.hpp"
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -15,6 +17,9 @@ namespace Contrail {
 class ChatList;
 class ChatView;
 class LoginView;
+class MemoryGuard;
+class SettingsView;
+class TrayIcon;
 class TopicList;
 
 // The application's window: a spinner while TDLib starts, the login, then the chats.
@@ -23,7 +28,7 @@ class MainWindow final {
   explicit MainWindow(GtkApplication *application);
   ~MainWindow();
 
-  [[nodiscard]] GtkWidget *widget() const { return _window; }
+  [[nodiscard]] GtkWidget *widget() const { return _window; }  // Null while the app runs without its window.
   void present();
   void showToast(const std::string &text);
 
@@ -62,6 +67,20 @@ class MainWindow final {
   [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
   void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
 
+  // Settings, About, and the app in the background (settings.cpp, tray.cpp, memory_guard.cpp).
+  void openSettings();
+  void showAbout();
+  [[nodiscard]] SettingsView *settingsView() const { return _settings.get(); }
+  // "Run in the background" was turned on or off: the tray icon, and whether closing the window quits.
+  void backgroundChanged();
+  // The window goes and its interface with it; TDLib, notifications and calls stay. Opening the app builds it
+  // again on the same chat. While signing in the window is only hidden: what was typed there would be lost.
+  void closeToBackground();
+  [[nodiscard]] bool isActive() const;
+  [[nodiscard]] TrayIcon *tray() const { return _tray.get(); }
+  [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
+  void releaseMemory(MemoryLevel level);
+
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
   void debugOpenTopic(int index);
@@ -78,6 +97,11 @@ class MainWindow final {
   // A new login dies within minutes if nobody confirms it on another device.
   void warnAboutConfirmation();
   void dropForwardPicker();
+  void buildWindow();
+  void clearViews();
+  void releaseWindow();
+  void restoreChat();
+  void updateTray();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
@@ -102,6 +126,21 @@ class MainWindow final {
   bool _stringsReady = false;  // Pages are built with their text: nothing is shown before the strings.
   std::unique_ptr<LoginView> _login;
   bool _loginShown = false;  // This client went through the login: it isn't confirmed yet.
+
+  // The app in the background.
+  struct SavedChat {
+    Td::ChatId chat = 0;
+    std::int32_t topic = 0;
+  };
+  GtkApplication *_application = nullptr;
+  std::unique_ptr<SettingsView> _settings;
+  std::unique_ptr<TrayIcon> _tray;
+  std::unique_ptr<MemoryGuard> _memoryGuard;
+  std::optional<SavedChat> _saved;  // The chat the window had when it went.
+  Td::Lifetime _unreadLifetime;
+  int _unreadUnmuted = 0;  // Chats with unread messages that notify: the tray icon's badge.
+  bool _authorized = false;  // The chats can be shown: the window built again shows them at once.
+  bool _held = false;  // The app holds itself without a window (g_application_hold).
 };
 
 }  // namespace Contrail

@@ -464,4 +464,85 @@ c 'tap-text 2 #contrail' 1
 c tree 0.5
 grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
+
+# Section background: the settings, the app without its window, the tray icon, notifications, the proxy. A fake
+# notification server and tray watcher (td-fake-desktop.py) stand for the desktop.
+section_background() {
+  echo "9. Settings and the app in the background"
+  local desktop=$WORK/desktop.txt fake
+  : > "$desktop"
+  "$(dirname "$(realpath "$0")")/td-fake-desktop.py" "$desktop" &
+  fake=$!
+  for _ in $(seq 50); do grep -q '^ready' "$desktop" && break; sleep 0.1; done
+  grep -q '^ready' "$desktop" || fail "the fake desktop didn't start"
+  bg() { asked 'bg: ' bg-state; }
+  clean() { ! grep -E 'CRITICAL|Gtk-WARNING' "$WORK/log.txt" | grep -v 'Vulkan' | head -3 | grep . || fail "GTK complained"; }
+  start 120
+  c settings 1.5
+  local line
+  line=$(asked 'settings:' settings-state)
+  [[ $line == *'notify=1 sound=1 preview=1 background=0 account="Vlad" phone=15550001000'* ]] \
+    || fail "the settings: $line"
+  c tree 0.5
+  for text in 'Notifications and Sounds' 'Desktop notifications' 'Allow sound' 'Show message text' \
+      'Run in the background' 'About Contrail' 'Log out' 'Saved Messages' '+15550001000'; do
+    grep -q "\"$text\"" "$WORK/log.txt" || fail "no \"$text\" in the settings"
+  done
+  c 'settings-set notify 0' 0.3
+  c tree 0.5
+  grep 'AdwSwitchRow "Allow sound"' "$WORK/log.txt" | tail -1 | grep -q insensitive \
+    || fail "the sound can be turned on without notifications"
+  c 'settings-set notify 1' 0.3
+  # In the background: the tray icon with the unread chats, the window closed and opened again on the same chat.
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "a tray icon without the background: $(bg)"
+  c 'settings-set background 1' 1.5
+  line=$(bg)
+  [[ $line == *'background=1 tray=registered unread=10'* ]] || fail "no tray icon: $line"
+  grep -q '^tray-register' "$desktop" || fail "the tray icon didn't register with the watcher"
+  local item="org.kde.StatusNotifierItem-$P-1"
+  [[ $(gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+      --method org.freedesktop.DBus.Properties.Get org.kde.StatusNotifierItem Title) == *"Contrail (10)"* ]] \
+    || fail "the tray icon's title has no unread chats"
+  c back 0.5
+  c 'chat 3' 2
+  local chat
+  chat=$(bg | sed -n 's/.* chat=\([-0-9]*\).*/\1/p')
+  [[ -n $chat && $chat != 0 ]] || fail "no chat opened: $(bg)"
+  c bg-close 2
+  line=$(bg)
+  [[ $line == *'window=0 '*'chat=0'* ]] || fail "the window stayed: $line"
+  kill -0 "$P" || fail "it quit instead of staying in the background"
+  grep -q 'background: the window is released' "$WORK/log.txt" || fail "the interface wasn't released"
+  gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+    --method org.kde.StatusNotifierItem.Activate 0 0 > /dev/null
+  sleep 2
+  line=$(bg)
+  [[ $line == *"window=1 visible=1 "*"chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
+  c bg-close 2
+  c bg-open 2
+  [[ $(bg) == *"window=1 visible=1 "*"chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  clean
+  # The settings stay for the next start.
+  kill "$P"; wait "$P" 2>/dev/null || true; P=
+  start 120
+  [[ $(bg) == *'background=1 tray=registered'* ]] || fail "the background setting was lost: $(bg)"
+  [[ $(asked 'mem-guard:' mem-guard) == *'level=normal'* ]] || fail "no memory guard"
+  c 'mem-simulate low' 0.5
+  grep -q 'memory low, .* freeing what can be freed' "$WORK/log.txt" || fail "low memory isn't handled"
+  c settings 1
+  c 'settings-set background 0' 1
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "the tray icon stayed: $(bg)"
+  # Logging out asks first; then a new session starts, without "you were logged out".
+  c settings-logout 0.5
+  [[ $(asked 'dialog:' dialog) == *'heading="Are you sure you want to log out?"'* ]] || fail "no question before logging out"
+  c 'dialog-answer logout' 3
+  grep -q 'You were logged out' "$WORK/log.txt" && fail "logging out was taken for a lost session"
+  c tree 0.5
+  grep -q '"Friend 1"' <(sed -n '/tree$/,$p' "$WORK/log.txt" | tail -400) || fail "no chats after logging out"
+  clean
+  stop
+  kill "$fake" 2>/dev/null || true
+  echo "   ok"
+}
+section_background
 echo "PASS"

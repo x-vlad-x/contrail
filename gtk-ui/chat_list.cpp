@@ -194,8 +194,17 @@ GtkWidget *ChatList::buildMenu() {
   });
   g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(saved));
   g_object_unref(saved);
+  for (const auto *name : {"settings", "about"}) {
+    auto *action = g_simple_action_new(name, nullptr);
+    _connections.connect<void(GSimpleAction *, GVariant *)>(action, "activate", [this, name](GSimpleAction *, GVariant *) {
+      if (g_str_equal(name, "settings")) _window.openSettings();
+      else _window.showAbout();
+    });
+    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+    g_object_unref(action);
+  }
   // Their pages come with a later stage. Greyed out rather than hidden: the menu keeps its shape.
-  for (const auto *name : {"contacts", "settings", "about"}) {
+  for (const auto *name : {"contacts"}) {
     auto *action = g_simple_action_new(name, nullptr);
     g_simple_action_set_enabled(action, FALSE);
     g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
