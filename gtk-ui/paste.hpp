@@ -2,13 +2,10 @@
 
 #include <gtk/gtk.h>
 
-#include <QtCore/QStringList>
-#include <QtGui/QImage>
+#include <string>
+#include <vector>
 
-#include <algorithm>
-#include <cstring>
-
-// Telling what a paste brings and reading it, without the core (tests/paste.cpp).
+// Telling what a paste brings and reading it, without the rest of the program (tests/paste.cpp).
 namespace Contrail {
 
 // What a paste brings. Files come first: a file manager offers a copied file's thumbnail as a picture
@@ -19,8 +16,8 @@ enum class PasteKind { Text, Files, Image };
 // Pasted or chosen files (GFile): local ones are sent, folders and unreadable files are refused, remote
 // ones (http://, an unmounted server) stay text. Flatpak's document portal gives local paths too.
 struct PastedFiles {
-  QStringList local;
-  QStringList remote;
+  std::vector<std::string> local;
+  std::vector<std::string> remote;
 };
 
 inline PasteKind ClassifyPaste(GdkContentFormats *formats) {
@@ -39,34 +36,28 @@ inline PastedFiles SplitPastedFiles(GSList *files) {
     auto *file = G_FILE(i->data);
     // Remote locations mounted by GVfs have a local path too.
     if (auto *path = g_file_get_path(file)) {
-      result.local.push_back(QString::fromUtf8(path));
+      result.local.emplace_back(path);
       g_free(path);
     } else if (auto *uri = g_file_get_uri(file)) {
-      result.remote.push_back(QString::fromUtf8(uri));
+      result.remote.emplace_back(uri);
       g_free(uri);
     }
   }
   return result;
 }
 
-inline QImage TextureToImage(GdkTexture *texture) {
-  if (!texture) return QImage();
-  const auto width = gdk_texture_get_width(texture), height = gdk_texture_get_height(texture);
-  auto *downloader = gdk_texture_downloader_new(texture);
-  // BGRA in memory is Qt's ARGB32 on little-endian machines.
-  gdk_texture_downloader_set_format(downloader, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED);
-  gsize stride = 0;
-  auto *bytes = gdk_texture_downloader_download_bytes(downloader, &stride);
-  gdk_texture_downloader_free(downloader);
-  auto image = QImage(width, height, QImage::Format_ARGB32_Premultiplied);
+// A pasted picture becomes a PNG file to send: TDLib uploads files, and the picture is lossless that way.
+// False when it couldn't be written.
+inline bool SaveTexturePng(GdkTexture *texture, const std::string &path) {
+  if (!texture) return false;
+  auto *bytes = gdk_texture_save_to_png_bytes(texture);
+  if (!bytes) return false;
   gsize size = 0;
-  const auto data = static_cast<const uchar *>(g_bytes_get_data(bytes, &size));
-  const auto line = std::min(gsize(image.bytesPerLine()), stride);
-  for (auto y = 0; y != height && gsize(y) * stride + line <= size; ++y) {
-    memcpy(image.scanLine(y), data + y * stride, line);
-  }
+  const auto data = static_cast<const char *>(g_bytes_get_data(bytes, &size));
+  // Written whole or not at all: a half-written picture must not be sent.
+  const auto written = size > 0 && g_file_set_contents(path.c_str(), data, gssize(size), nullptr);
   g_bytes_unref(bytes);
-  return image;
+  return written;
 }
 
 }  // namespace Contrail

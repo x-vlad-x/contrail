@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app.hpp"
+#include "attach_media.hpp"
 #include "td/store.hpp"
 
 #include <cstdint>
@@ -16,7 +17,9 @@
 
 namespace Contrail {
 
+class AttachDialog;
 class AudioPlayer;
+class ClipboardReader;
 class VoiceRecordBar;
 class MainWindow;
 class MessageWidget;
@@ -76,6 +79,12 @@ class ChatView final {
   // The voice message recorded here was sent (it took the reply along) or deleted.
   void recordingEnded(bool sent);
   [[nodiscard]] VoiceRecordBar *recordBar() const { return _recordBar.get(); }
+  // A tap on a file of a message still being sent: the upload stops and the message goes, as TDLib does it.
+  void cancelUpload(const MessageItem &item);
+  // paste (as Ctrl+V) | files PATH|PATH (as the file chooser) | copy-image PATH, copy-files PATH|PATH, copy-text TEXT
+  // (the clipboard as another program would fill it) | field (the field's text) | anything else to the dialog
+  // (AttachDialog::debugAction).
+  void debugAttach(const std::string &action);
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -320,6 +329,15 @@ class ChatView final {
 
   std::int64_t _replyToId = 0;
   std::unique_ptr<VoiceRecordBar> _recordBar;
+  // Files to send: chosen, or pasted (a paste is read in the background first).
+  void chooseFiles();
+  void paste();
+  void pasteText(const std::string &text);
+  void openAttach(const std::vector<std::string> &paths, GdkTexture *image = nullptr, const std::string &textOnCancel = {});
+  bool sendAttachments(const std::vector<AttachFile> &files, bool compress, bool group, const std::string &caption,
+                       std::int64_t replyTo);
+  std::unique_ptr<ClipboardReader> _pasteReader;
+  std::weak_ptr<AttachDialog> _attach;
   bool _forwardShown = false;  // The bar shows the messages to forward.
   std::int64_t _editing = 0;
   bool _editPending = false;

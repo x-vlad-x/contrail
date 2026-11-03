@@ -500,6 +500,10 @@ void Store::addFile(const api::file &source) {
     file.prefixOffset = source.local_->download_offset_;
     file.prefix = source.local_->downloaded_prefix_size_;
   }
+  if (source.remote_) {
+    file.uploaded = source.remote_->uploaded_size_;
+    file.uploading = source.remote_->is_uploading_active_;
+  }
   notify(_fileHandlers, file);
 }
 
@@ -666,6 +670,8 @@ void Store::updated(api::Update &update) {
         if (const auto value = As<api::optionValueInteger>(data.value_.get())) _selfId = value->value_;
       } else if (data.name_ == "replies_bot_chat_id") {
         if (const auto value = As<api::optionValueInteger>(data.value_.get())) _repliesChatId = value->value_;
+      } else if (data.name_ == "message_caption_length_max") {
+        if (const auto value = As<api::optionValueInteger>(data.value_.get())) _captionLimit = int(value->value_);
       }
       break;
     }

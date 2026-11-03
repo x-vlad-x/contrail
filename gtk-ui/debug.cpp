@@ -27,6 +27,9 @@
 //   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop
 //   voice-state | voice-start (locked, as the keyboard) | voice-hold | voice-drag DX DY | voice-release | voice-send
 //   voice-delete (a voice message recorded from the open chat's composer)
+//   attach-paste | attach-files PATH|PATH | attach-send | attach-cancel | attach-documents on|off | attach-group on|off
+//   attach-caption TEXT | attach-remove N | attach-state (the attach dialog of the open chat) | attach-copy-image PATH
+//   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -276,6 +279,8 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name.starts_with("attach-") && window.chatView()) {
+    window.chatView()->debugAttach(name.substr(7) + (rest.empty() ? "" : " " + rest));
   } else if (name.starts_with("voice-")) {
     if (window.chatView() && window.chatView()->recordBar()) {
       window.chatView()->recordBar()->debug(name.substr(6) + (rest.empty() ? "" : " " + rest));

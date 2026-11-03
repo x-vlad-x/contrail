@@ -3,6 +3,7 @@
 #include "forward.hpp"
 #include "local_state.hpp"
 #include "main_window.hpp"
+#include "attach.hpp"
 #include "media/audio_player.hpp"
 #include "voice_record_bar.hpp"
 #include "memory_trim.hpp"
@@ -554,6 +555,9 @@ void ChatView::start() {
 }
 
 ChatView::~ChatView() {
+  // Files prepared for this chat never go to another one.
+  _pasteReader = nullptr;
+  if (const auto attach = _attach.lock()) attach->close();
   // A menu open on a message goes before the rows do (GTK warns of a row finalized with it).
   dropMessageMenu(nullptr);
   if (_pinnedDialog) adw_dialog_force_close(ADW_DIALOG(_pinnedDialog));
@@ -2236,6 +2240,26 @@ void ChatView::buildComposer() {
   gtk_widget_set_hexpand(inputScroll, TRUE);
   gtk_widget_set_valign(inputScroll, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class(inputScroll, "message-input-frame");
+  // Files, as the phone apps' attach menu.
+  auto *attachMenu = g_menu_new();
+  g_menu_append(attachMenu, Tr("lng_attach_file").c_str(), "attach.file");
+  auto *attach = gtk_menu_button_new();
+  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(attach), "mail-attachment-symbolic");
+  gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(attach), G_MENU_MODEL(attachMenu));
+  g_object_unref(attachMenu);
+  gtk_widget_set_tooltip_text(attach, Tr("lng_attach").c_str());
+  gtk_widget_add_css_class(attach, "flat");
+  gtk_widget_add_css_class(attach, "circular");
+  gtk_widget_set_valign(attach, GTK_ALIGN_END);
+  auto *attachActions = g_simple_action_group_new();
+  auto *chooseAction = g_simple_action_new("file", nullptr);
+  _signals.connect<void(GSimpleAction *, GVariant *)>(chooseAction, "activate",
+                                                      [this](GSimpleAction *, GVariant *) { chooseFiles(); });
+  g_action_map_add_action(G_ACTION_MAP(attachActions), G_ACTION(chooseAction));
+  g_object_unref(chooseAction);
+  gtk_widget_insert_action_group(field, "attach", G_ACTION_GROUP(attachActions));
+  g_object_unref(attachActions);
+  gtk_box_append(GTK_BOX(field), attach);
   gtk_box_append(GTK_BOX(field), inputScroll);
 
   // Placeholder: a label over the empty field.
@@ -2279,6 +2303,14 @@ void ChatView::buildComposer() {
         return FALSE;
       });
   gtk_widget_add_controller(_input, keys);
+  // Ctrl+V, Shift+Insert and "Paste" in the field's menu: files and pictures go to the attach dialog, text stays with
+  // the field.
+  _signals.connect<void(GtkTextView *)>(_input, "paste-clipboard", [this](GtkTextView *view) {
+    if (ClassifyPaste(gdk_clipboard_get_formats(gtk_widget_get_clipboard(_input))) != PasteKind::Text) {
+      g_signal_stop_emission_by_name(view, "paste-clipboard");
+      paste();
+    }
+  });
 
   _composerStack = gtk_stack_new();
   gtk_stack_set_hhomogeneous(GTK_STACK(_composerStack), FALSE);
@@ -3435,6 +3467,185 @@ void ChatView::debugSponsored() const {
             int(_sponsoredAsked), int(_sponsored != nullptr), _sponsoredWaiting.size(), int(_sponsoredPlaced),
             (long long)(_sponsored ? _sponsored->sponsoredAfter >> 20 : 0), int(row != nullptr), int(_sponsoredViewed),
             _sponsoredClicks);
+}
+
+// --- files sent here ---
+
+void ChatView::chooseFiles() {
+  auto *dialog = gtk_file_dialog_new();
+  gtk_file_dialog_set_title(dialog, Tr("lng_attach").c_str());
+  // The chat may close while the dialog is open: then nothing is sent.
+  struct Context {
+    std::weak_ptr<void> alive;
+    ChatView *self = nullptr;
+  };
+  gtk_file_dialog_open_multiple(
+      dialog, GTK_WINDOW(_window.widget()), nullptr,
+      +[](GObject *source, GAsyncResult *result, gpointer data) {
+        auto *context = static_cast<Context *>(data);
+        if (auto *files = gtk_file_dialog_open_multiple_finish(GTK_FILE_DIALOG(source), result, nullptr)) {
+          GSList *list = nullptr;
+          for (auto i = g_list_model_get_n_items(files); i != 0; --i) {
+            list = g_slist_prepend(list, g_list_model_get_item(files, i - 1));
+          }
+          const auto split = SplitPastedFiles(list);
+          g_slist_free_full(list, g_object_unref);
+          g_object_unref(files);
+          if (!context->alive.expired() && !split.local.empty()) context->self->openAttach(split.local);
+        }
+        delete context;
+      },
+      new Context{_lifetime.token(), this});
+  g_object_unref(dialog);
+}
+
+void ChatView::paste() {
+  auto *clipboard = gtk_widget_get_clipboard(_input);
+  const auto kind = ClassifyPaste(gdk_clipboard_get_formats(clipboard));
+  // A new paste replaces one still being read; the reader dies with this chat, and its answer with it.
+  _pasteReader = std::make_unique<ClipboardReader>(clipboard, kind, [this](ClipboardReader::Result &&result) {
+    _pasteReader = nullptr;
+    if (!result.files.remote.empty()) {
+      // Links to remote files are text.
+      auto text = std::string();
+      for (const auto &uri : result.files.remote) text += (text.empty() ? "" : "\n") + uri;
+      pasteText(text);
+    }
+    if (!result.files.local.empty()) {
+      openAttach(result.files.local);
+    } else if (result.image) {
+      openAttach({}, std::exchange(result.image, nullptr), result.text);
+    } else if (result.files.remote.empty() && !result.text.empty()) {
+      pasteText(result.text);
+    }
+  });
+}
+
+void ChatView::pasteText(const std::string &text) {
+  if (text.empty() || !gtk_text_view_get_editable(GTK_TEXT_VIEW(_input))) return;
+  auto *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(_input));
+  gtk_text_buffer_delete_selection(buffer, TRUE, TRUE);
+  gtk_text_buffer_insert_interactive_at_cursor(buffer, text.data(), int(text.size()), TRUE);
+  gtk_text_view_scroll_mark_onscreen(GTK_TEXT_VIEW(_input), gtk_text_buffer_get_insert(buffer));
+}
+
+void ChatView::openAttach(const std::vector<std::string> &paths, GdkTexture *image, const std::string &textOnCancel) {
+  const auto known = _store.chat(_chat);
+  if (_editing || (_recordBar && _recordBar->recording()) || !known || !_store.canWrite(*known)) {
+    g_clear_object(&image);
+    pasteText(textOnCancel);
+    return;
+  }
+  if (const auto open = _attach.lock()) open->close();
+  // Where the files go is fixed now: the chat, the topic and the reply.
+  const auto replyTo = _replyToId;
+  const auto self = _store.user(_store.selfId());
+  auto text = composerText();
+  const auto first = text.find_first_not_of(" \t\r\n");
+  text = first == std::string::npos ? std::string() : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+  const auto alive = std::weak_ptr<void>(_lifetime.token());
+  _attach = AttachDialog::Show({
+      .parent = _window.widget(),
+      .paths = paths,
+      .image = image,
+      .caption = text,
+      .premium = self && self->premium,
+      .send = [this, alive, replyTo](const std::vector<AttachFile> &files, bool compress, bool group,
+                                     const std::string &caption) {
+        return !alive.expired() && sendAttachments(files, compress, group, caption, replyTo);
+      },
+      .cancelled = [this, alive, textOnCancel] {
+        // As in Telegram Desktop: the text pasted with a picture goes to the field instead.
+        if (!alive.expired()) pasteText(textOnCancel);
+      },
+  });
+}
+
+// As SendFilesBox did for 0.3.1: the files go in albums of up to ten, the caption with the last one. TDLib sends the
+// media of a chat in the order they were given (its queue of unsent media), keeps them while it is closed, and
+// uploads in the background.
+bool ChatView::sendAttachments(const std::vector<AttachFile> &files, bool compress, bool group,
+                               const std::string &caption, std::int64_t replyTo) {
+  if (const auto over = CaptionLength(caption) - _store.captionLimit(); over > 0) {
+    ShowToast(TrCount("lng_caption_limit_reached", over));
+    return false;
+  }
+  auto groups = DivideAttachments(files, compress, group);
+  if (groups.empty()) return false;
+  const auto captioned = CaptionIndex(groups.back());
+  for (std::size_t g = 0; g != groups.size(); ++g) {
+    const auto &files = groups[g].files;
+    auto contents = std::vector<api::object_ptr<api::InputMessageContent>>();
+    for (std::size_t i = 0; i != files.size(); ++i) {
+      const auto withCaption = g + 1 == groups.size() && i == captioned;
+      contents.push_back(AttachContent(files[i], compress, withCaption ? caption : std::string()));
+    }
+    if (contents.size() > 1) {
+      _store.client().send(api::make_object<api::sendMessageAlbum>(_chat, topicObject(), ReplyTo(replyTo), nullptr,
+                                                                   std::move(contents)));
+    } else {
+      _store.client().send(api::make_object<api::sendMessage>(_chat, topicObject(), ReplyTo(replyTo), nullptr, nullptr,
+                                                              std::move(contents.front())));
+    }
+  }
+  // The caption came from the message field.
+  if (!_editing) {
+    setComposerText(std::string());
+    cancelReplyOrEdit();
+  }
+  if (_reachedBottom) scrollToBottom();
+  else reload(0);
+  return true;
+}
+
+void ChatView::cancelUpload(const MessageItem &item) {
+  if (!item.data || !item.local()) return;
+  _store.client().send(api::make_object<api::deleteMessages>(_chat, std::vector<std::int64_t>{item.id()}, true));
+}
+
+void ChatView::debugAttach(const std::string &action) {
+  if (action == "paste") {
+    g_signal_emit_by_name(_input, "paste-clipboard");
+  } else if (action.starts_with("files ")) {
+    auto paths = std::vector<std::string>();
+    auto rest = action.substr(6);
+    for (auto bar = rest.find('|'); ; bar = rest.find('|')) {
+      paths.push_back(rest.substr(0, bar));
+      if (bar == std::string::npos) break;
+      rest = rest.substr(bar + 1);
+    }
+    openAttach(paths);
+  } else if (action.starts_with("copy-")) {
+    // What another program would have put on the clipboard: a picture, files, or text.
+    auto *clipboard = gtk_widget_get_clipboard(_input);
+    const auto value = action.substr(action.find(' ') + 1);
+    if (action.starts_with("copy-image ")) {
+      if (auto *texture = gdk_texture_new_from_filename(value.c_str(), nullptr)) {
+        gdk_clipboard_set_texture(clipboard, texture);
+        g_object_unref(texture);
+      }
+    } else if (action.starts_with("copy-files ")) {
+      auto files = std::vector<GFile *>();
+      auto rest = value;
+      for (auto bar = rest.find('|'); ; bar = rest.find('|')) {
+        files.push_back(g_file_new_for_commandline_arg(rest.substr(0, bar).c_str()));
+        if (bar == std::string::npos) break;
+        rest = rest.substr(bar + 1);
+      }
+      auto *list = gdk_file_list_new_from_array(files.data(), files.size());
+      gdk_clipboard_set(clipboard, GDK_TYPE_FILE_LIST, list);
+      g_boxed_free(GDK_TYPE_FILE_LIST, list);
+      for (auto *file : files) g_object_unref(file);
+    } else if (action.starts_with("copy-text ")) {
+      gdk_clipboard_set_text(clipboard, value.c_str());
+    }
+  } else if (action == "field") {
+    g_message("attach field: \"%s\"", composerText().c_str());
+  } else if (const auto attach = _attach.lock()) {
+    attach->debugAction(action);
+  } else {
+    g_message("attach state: no dialog");
+  }
 }
 
 // --- voice messages recorded here ---

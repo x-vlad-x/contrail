@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <deque>
+#include <gio/gio.h>
+#include <optional>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -93,6 +96,11 @@ constexpr auto kMediaSong2File = 4000004;
 constexpr auto kMediaStep = std::int64_t(8 * 1024);
 constexpr auto kMediaStepMs = 200u;
 constexpr auto kSentVoiceFiles = 4100000;
+// Section media-send: files sent are uploaded one after another in steps, as TDLib's queue does, and their message
+// is confirmed once its file is up (an album once all of it is). Deleting a message being sent stops its upload.
+constexpr auto kSentFiles = 4200000;
+constexpr auto kUploadStep = std::int64_t(64 * 1024);
+constexpr auto kUploadStepMs = 200u;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -454,6 +462,7 @@ class ScenarioTransport final : public Transport {
     if (_burst) g_source_remove(_burst);
     if (_downloadTicker) g_source_remove(_downloadTicker);
     if (_mediaTicker) g_source_remove(_mediaTicker);
+    if (_uploadTicker) g_source_remove(_uploadTicker);
     for (auto *later : std::set<Later *>(_later)) g_source_remove(later->source);
   }
 
@@ -468,6 +477,7 @@ class ScenarioTransport final : public Transport {
 
   void send(std::uint64_t id, FunctionPtr function) override {
     if (mediaRequest(id, *function)) return;
+    if (sendingRequest(id, *function)) return;
     if (showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
         || reactionRequest(id, *function)) {
       return;
@@ -888,6 +898,9 @@ class ScenarioTransport final : public Transport {
         && request.input_message_content_->get_id() == api::inputMessageVoiceNote::ID) {
       return outgoing(request.chat_id_, voiceEntry(static_cast<api::inputMessageVoiceNote &>(*request.input_message_content_)));
     }
+    if (request.input_message_content_) {
+      if (auto entry = fileEntry(*request.input_message_content_, 0)) return uploading(request.chat_id_, *entry);
+    }
     if (text.starts_with("/fail ")) return failing(request.chat_id_, text.substr(6));
     if (text.starts_with("/slow ")) return outgoing(request.chat_id_, Entry{.text = text.substr(6)}, kSlowSendMs);
     return outgoing(request.chat_id_, Entry{.text = text});
@@ -967,6 +980,9 @@ class ScenarioTransport final : public Transport {
     std::string voice;
     int voiceDuration = 0;
     std::string waveform;
+    // Section media-send: a file sent (its id in _sentFiles), and the album it went in.
+    std::int32_t sentFile = 0;
+    std::int64_t album = 0;
   };
 
   // A message sent or forwarded here: it stays as sent when the chat is opened again.
@@ -978,7 +994,10 @@ class ScenarioTransport final : public Transport {
     message.is_outgoing_ = true;
     message.date_ = kNow;
     message.reply_to_ = nullptr;
-    if (!entry.voice.empty()) {
+    message.media_album_id_ = entry.album;
+    if (entry.sentFile) {
+      message.content_ = sentContent(entry.sentFile);
+    } else if (!entry.voice.empty()) {
       message.content_ = sentVoice(message.id_ / kIdStep, entry);
     } else if (entry.photo >= 0) {
       auto content = api::move_object_as<api::messagePhoto>(PhotoContent(entry.photo));
@@ -1674,6 +1693,268 @@ class ScenarioTransport final : public Transport {
         _mediaDownloads[file].active = false;
         update(api::make_object<api::updateFile>(mediaFile(file)));
         answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // --- section media-send: files sent and their uploads --------------------------
+
+  struct SentFile {
+    std::int32_t content = 0;  // The input content's id, as TDLib's constructors number them.
+    std::string path;
+    std::string name;
+    std::string mime;
+    std::int64_t size = 0;
+    std::int64_t uploaded = 0;
+    int width = 0;
+    int height = 0;
+    int duration = 0;
+    bool streaming = false;
+    bool thumbnail = false;
+    std::string title;
+    std::string performer;
+    std::string caption;
+  };
+  struct Upload {
+    std::int64_t chat = 0;
+    int index = 0;
+    std::int64_t temporary = 0;
+    std::int32_t file = 0;
+    std::int64_t album = 0;
+  };
+
+  // A file of a photo, a video, a GIF, music or a document; nothing for other content.
+  std::optional<Entry> fileEntry(const api::InputMessageContent &content, std::int64_t album) {
+    auto file = SentFile();
+    file.content = content.get_id();
+    const auto local = [&](const api::InputFile *input) {
+      if (input && input->get_id() == api::inputFileLocal::ID) {
+        file.path = static_cast<const api::inputFileLocal &>(*input).path_;
+      }
+    };
+    const auto caption = [&](const api::formattedText *text) {
+      if (text) file.caption = text->text_;
+    };
+    switch (content.get_id()) {
+      case api::inputMessagePhoto::ID: {
+        const auto &photo = static_cast<const api::inputMessagePhoto &>(content);
+        local(photo.photo_->photo_.get());
+        file.width = photo.photo_->width_;
+        file.height = photo.photo_->height_;
+        caption(photo.caption_.get());
+        break;
+      }
+      case api::inputMessageVideo::ID: {
+        const auto &video = static_cast<const api::inputMessageVideo &>(content);
+        local(video.video_->video_.get());
+        file.width = video.video_->width_;
+        file.height = video.video_->height_;
+        file.duration = video.video_->duration_;
+        file.streaming = video.video_->supports_streaming_;
+        file.thumbnail = video.video_->thumbnail_ != nullptr;
+        caption(video.caption_.get());
+        break;
+      }
+      case api::inputMessageAnimation::ID: {
+        const auto &animation = static_cast<const api::inputMessageAnimation &>(content);
+        local(animation.animation_->animation_.get());
+        file.width = animation.animation_->width_;
+        file.height = animation.animation_->height_;
+        caption(animation.caption_.get());
+        break;
+      }
+      case api::inputMessageAudio::ID: {
+        const auto &audio = static_cast<const api::inputMessageAudio &>(content);
+        local(audio.audio_->audio_.get());
+        file.duration = audio.audio_->duration_;
+        file.title = audio.audio_->title_;
+        file.performer = audio.audio_->performer_;
+        caption(audio.caption_.get());
+        break;
+      }
+      case api::inputMessageDocument::ID: {
+        const auto &document = static_cast<const api::inputMessageDocument &>(content);
+        local(document.document_->document_.get());
+        file.thumbnail = document.document_->thumbnail_ != nullptr;
+        caption(document.caption_.get());
+        break;
+      }
+      default: return std::nullopt;
+    }
+    GStatBuf info;
+    if (file.path.empty() || g_stat(file.path.c_str(), &info) != 0) return std::nullopt;
+    file.size = info.st_size;
+    auto *name = g_path_get_basename(file.path.c_str());
+    file.name = name;
+    g_free(name);
+    auto *type = g_content_type_guess(file.path.c_str(), nullptr, 0, nullptr);
+    auto *mime = type ? g_content_type_get_mime_type(type) : nullptr;
+    file.mime = mime ? mime : "application/octet-stream";
+    g_free(mime);
+    g_free(type);
+    const auto kind = content.get_id() == api::inputMessagePhoto::ID       ? "photo"
+                      : content.get_id() == api::inputMessageVideo::ID     ? "video"
+                      : content.get_id() == api::inputMessageAnimation::ID ? "animation"
+                      : content.get_id() == api::inputMessageAudio::ID     ? "audio"
+                                                                           : "document";
+    g_message("Scenario: sent %s name=%s size=%lld %dx%d duration=%d thumbnail=%d album=%lld caption=\"%s\"", kind,
+              file.name.c_str(), (long long)file.size, file.width, file.height, file.duration, int(file.thumbnail),
+              (long long)album, file.caption.c_str());
+    const auto id = kSentFiles + std::int32_t(_sentFiles.size()) + 1;
+    _sentFiles[id] = std::move(file);
+    auto entry = Entry();
+    entry.sentFile = id;
+    entry.album = album;
+    return entry;
+  }
+
+  api::object_ptr<api::file> sentFileObject(std::int32_t id) {
+    const auto &sent = _sentFiles[id];
+    auto local = api::make_object<api::localFile>();
+    local->path_ = sent.path;
+    local->is_downloading_completed_ = true;
+    local->downloaded_prefix_size_ = sent.size;
+    local->downloaded_size_ = sent.size;
+    auto remote = api::make_object<api::remoteFile>();
+    remote->is_uploading_completed_ = sent.uploaded >= sent.size;
+    remote->is_uploading_active_ = !remote->is_uploading_completed_ && std::ranges::any_of(
+        _uploads, [&](const Upload &upload) { return upload.file == id; });
+    remote->uploaded_size_ = std::min(sent.uploaded, sent.size);
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->size_ = sent.size;
+    file->local_ = std::move(local);
+    file->remote_ = std::move(remote);
+    return file;
+  }
+
+  api::object_ptr<api::MessageContent> sentContent(std::int32_t id) {
+    const auto &sent = _sentFiles[id];
+    auto caption = Formatted(sent.caption);
+    switch (sent.content) {
+      case api::inputMessagePhoto::ID: {
+        auto photo = api::make_object<api::photo>();
+        photo->sizes_.push_back(
+            api::make_object<api::photoSize>("y", sentFileObject(id), sent.width, sent.height, std::vector<std::int32_t>()));
+        return api::make_object<api::messagePhoto>(std::move(photo), nullptr, std::move(caption), false, false, false);
+      }
+      case api::inputMessageVideo::ID: {
+        auto video = api::make_object<api::video>(sent.duration, sent.width, sent.height, sent.name, sent.mime, false,
+                                                  sent.streaming, nullptr, nullptr, sentFileObject(id));
+        return api::make_object<api::messageVideo>(std::move(video), std::vector<api::object_ptr<api::alternativeVideo>>(),
+                                                   std::vector<api::object_ptr<api::videoStoryboard>>(), nullptr, 0,
+                                                   std::move(caption), false, false, false);
+      }
+      case api::inputMessageAnimation::ID: {
+        auto animation = api::make_object<api::animation>(sent.duration, sent.width, sent.height, sent.name, sent.mime,
+                                                          false, nullptr, nullptr, sentFileObject(id));
+        return api::make_object<api::messageAnimation>(std::move(animation), std::move(caption), false, false, false);
+      }
+      case api::inputMessageAudio::ID: {
+        auto audio = api::make_object<api::audio>(sent.duration, sent.title, sent.performer, sent.name, sent.mime, nullptr,
+                                                  nullptr, std::vector<api::object_ptr<api::thumbnail>>(),
+                                                  sentFileObject(id));
+        return api::make_object<api::messageAudio>(std::move(audio), std::move(caption));
+      }
+      default: {
+        auto document = api::make_object<api::document>(sent.name, sent.mime, nullptr, nullptr, sentFileObject(id));
+        return api::make_object<api::messageDocument>(std::move(document), std::move(caption));
+      }
+    }
+  }
+
+  // As outgoing(), but confirmed once its upload is done.
+  api::object_ptr<api::message> uploading(std::int64_t chatId, const Entry &entry) {
+    const auto index = Count(chatId) + ++_sentExtra[chatId];
+    const auto id = index * kIdStep;
+    _entries[{chatId, id}] = entry;
+    const auto temporary = id + 1;
+    _uploads.push_back({chatId, index, temporary, entry.sentFile, entry.album});
+    const auto pending = [&] {
+      auto message = messageAt(chatId, index);
+      message->id_ = temporary;
+      message->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
+      return message;
+    };
+    update(api::make_object<api::updateNewMessage>(pending()));
+    if (!_uploadTicker) {
+      _uploadTicker = g_timeout_add(kUploadStepMs, +[](gpointer data) -> gboolean {
+        static_cast<ScenarioTransport *>(data)->uploadTick();
+        return G_SOURCE_CONTINUE;
+      }, this);
+    }
+    return pending();
+  }
+
+  void confirmUpload(const Upload &upload) {
+    update(api::make_object<api::updateMessageSendSucceeded>(messageAt(upload.chat, upload.index), upload.temporary));
+    update(api::make_object<api::updateChatLastMessage>(upload.chat, messageAt(upload.chat, upload.index),
+                                                        std::vector<api::object_ptr<api::chatPosition>>()));
+  }
+
+  void uploadTick() {
+    if (_uploads.empty()) {
+      g_source_remove(_uploadTicker);
+      _uploadTicker = 0;
+      return;
+    }
+    const auto upload = _uploads.front();
+    auto &sent = _sentFiles[upload.file];
+    sent.uploaded = std::min(sent.uploaded + kUploadStep, sent.size);
+    if (sent.uploaded < sent.size) {
+      update(api::make_object<api::updateFile>(sentFileObject(upload.file)));
+      return;
+    }
+    _uploads.pop_front();
+    update(api::make_object<api::updateFile>(sentFileObject(upload.file)));
+    // An album goes when all of it is up, in its order.
+    if (!upload.album) {
+      confirmUpload(upload);
+      return;
+    }
+    _uploaded.push_back(upload);
+    if (std::ranges::any_of(_uploads, [&](const Upload &next) { return next.album == upload.album; })) return;
+    for (const auto &done : _uploaded) {
+      if (done.album == upload.album) confirmUpload(done);
+    }
+    std::erase_if(_uploaded, [&](const Upload &done) { return done.album == upload.album; });
+  }
+
+  bool sendingRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::sendMessageAlbum::ID: {
+        auto &request = static_cast<api::sendMessageAlbum &>(function);
+        const auto album = ++_albums;
+        auto result = api::make_object<api::messages>();
+        for (const auto &content : request.input_message_contents_) {
+          if (auto entry = content ? fileEntry(*content, album) : std::nullopt) {
+            result->messages_.push_back(uploading(request.chat_id_, *entry));
+          }
+        }
+        result->total_count_ = int(result->messages_.size());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::deleteMessages::ID: {
+        // A message being sent: its upload stops. The deletion itself is the scenario's as usual.
+        const auto &request = static_cast<api::deleteMessages &>(function);
+        for (const auto message : request.message_ids_) {
+          const auto it = std::ranges::find_if(_uploads, [&](const Upload &upload) {
+            return upload.chat == request.chat_id_ && upload.temporary == message;
+          });
+          if (it == _uploads.end()) continue;
+          g_message("Scenario: upload of file %d stopped at %lld", it->file, (long long)_sentFiles[it->file].uploaded);
+          _uploads.erase(it);
+        }
+        return false;
+      }
+      case api::downloadFile::ID: {
+        const auto file = static_cast<api::downloadFile &>(function).file_id_;
+        if (!_sentFiles.contains(file)) return false;
+        answer(id, sentFileObject(file));
         return true;
       }
       default:
@@ -2406,6 +2687,12 @@ class ScenarioTransport final : public Transport {
   };
   std::map<std::int32_t, MediaDownload> _mediaDownloads;
   std::map<std::int32_t, std::string> _sentVoices;  // The voice messages recorded here, by their file ids.
+  // Section media-send.
+  std::map<std::int32_t, SentFile> _sentFiles;
+  std::deque<Upload> _uploads;    // In the order they were sent: the first one is uploaded.
+  std::vector<Upload> _uploaded;  // Of albums whose other files are still being uploaded.
+  std::int64_t _albums = 0;
+  guint _uploadTicker = 0;
   guint _mediaTicker = 0;
 };
 

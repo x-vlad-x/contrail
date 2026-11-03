@@ -46,6 +46,7 @@ constexpr auto kKilobyte = std::int64_t(1024);
 constexpr auto kPlayIcon = "media-playback-start-symbolic";
 constexpr auto kImageIcon = "image-x-generic-symbolic";
 constexpr auto kClockIcon = "contrail-clock-symbolic";
+constexpr auto kStopIcon = "process-stop-symbolic";
 constexpr auto kIconKey = "contrail-icon";
 constexpr auto kQualityKey = "contrail-media-quality";
 // Bumped when a picture gives its texture back: a decode started before then is dropped when it ends.
@@ -255,6 +256,10 @@ struct Visual {
     result.downloading = file.local_->is_downloading_active_;
     result.complete = file.local_->is_downloading_completed_;
     if (result.complete) result.path = file.local_->path_;
+  }
+  if (file.remote_) {
+    result.uploaded = file.remote_->uploaded_size_;
+    result.uploading = file.remote_->is_uploading_active_;
   }
   return result;
 }
@@ -1789,8 +1794,10 @@ void MessageWidget::updateDocumentState(Cell &cell, const Td::File &file) {
   const auto sending = cell.item->data && Cast<api::messageSendingStatePending>(cell.item->data->sending_state_.get());
   auto icon = static_cast<const char *>(g_object_get_data(G_OBJECT(cell.documentButton), kIconKey));
   auto status = cell.voice ? FormatDuration(cell.duration) : FormatSize(file.size);
+  // Being sent: how much is uploaded (waiting while the files before it go), and a tap stops it.
   if (sending) {
-    icon = kClockIcon;
+    icon = kStopIcon;
+    status = DownloadText(file.uploaded, file.size);
   } else if (downloading) {
     status = DownloadText(file.downloaded, file.size);
     icon = "process-stop-symbolic";
@@ -1799,8 +1806,9 @@ void MessageWidget::updateDocumentState(Cell &cell, const Td::File &file) {
   }
   gtk_label_set_text(GTK_LABEL(cell.documentStatus), status.c_str());
   if (cell.loadProgress) {
-    gtk_widget_set_visible(cell.loadProgress, downloading);
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell.loadProgress), DownloadFraction(file.downloaded, file.size));
+    gtk_widget_set_visible(cell.loadProgress, downloading || sending);
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(cell.loadProgress),
+                                  DownloadFraction(sending ? file.uploaded : file.downloaded, file.size));
   }
   gtk_button_set_icon_name(GTK_BUTTON(cell.documentButton), icon);
 }
@@ -1813,25 +1821,30 @@ void MessageWidget::updateStatus(Cell &cell, const Td::File &file) {
     return;
   }
   const auto downloading = file.downloading && !file.complete;
+  // Being sent: the upload's progress in the same places, and a tap stops it.
+  const auto sending = cell.item->data && Cast<api::messageSendingStatePending>(cell.item->data->sending_state_.get());
+  const auto fraction = DownloadFraction(sending ? file.uploaded : file.downloaded, file.size);
   if (cell.ring) {
-    // A video downloading: how much of it came instead of the play button.
-    gtk_widget_set_visible(cell.ring, downloading);
-    if (cell.play) gtk_widget_set_visible(cell.play, !downloading);
-    if (downloading) SetRingFraction(cell.ring, DownloadFraction(file.downloaded, file.size));
+    // A video downloading or uploading: how much of it went instead of the play button.
+    gtk_widget_set_visible(cell.ring, downloading || sending);
+    if (cell.play) gtk_widget_set_visible(cell.play, !downloading && !sending);
+    if (downloading || sending) SetRingFraction(cell.ring, fraction);
   }
   if (!cell.status) return;
   auto text = std::string();
   if (video) {
     text = cell.fallbackStatus;
-    if (downloading) {
+    if (sending) {
+      text = DownloadText(file.uploaded, file.size);
+    } else if (downloading) {
       text = DownloadText(file.downloaded, file.size);
       if (_chat.opensWhenLoaded(file.id)) {
         text += "\n";
         text += Translated("Opens when downloaded", "Откроется после загрузки", "Відкриється після завантаження");
       }
     }
-  } else if (downloading) {
-    text = Percent(DownloadFraction(file.downloaded, file.size));
+  } else if (downloading || sending) {
+    text = Percent(fraction);
   }
   gtk_label_set_text(GTK_LABEL(cell.status), text.c_str());
   gtk_widget_set_visible(cell.status, !text.empty());
@@ -1871,6 +1884,10 @@ void MessageWidget::highlight(const MessageItem *item) {
 void MessageWidget::openOnTap(GtkWidget *widget, MessageItem *item, Td::FileId file) {
   const auto open = [=, this] {
     if (!TapAllowed()) return;
+    if (item->data && Cast<api::messageSendingStatePending>(item->data->sending_state_.get())) {
+      _chat.cancelUpload(*item);
+      return;
+    }
     if (item->sponsored) _chat.sponsoredClicked(*item, true);
     const auto document = std::any_of(_cells.begin(), _cells.end(),
                                       [&](const auto &cell) { return cell->documentFile == file; });

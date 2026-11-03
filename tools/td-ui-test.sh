@@ -26,6 +26,10 @@
 #   M3. recording a voice message: the microphone only with an empty field, held and let go it is sent as Ogg Opus
 #      with its waveform and plays; a tap only says to hold, slid left it is deleted, slid up it records on with the
 #      chat closed and is sent from it opened again; another chat ends it; it pauses what plays.
+#   M4. sending files: the refused ones and why, the dialog's tiles, removing one, its title and switches, a photo and a
+#      video in an album with the caption on the photo, as documents, twelve photos in albums of ten and two in
+#      order, the caption's limit, the upload's progress and a tap that stops it; pasting a picture, files and text
+#      (and paste-test, which needs a display).
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -669,4 +673,102 @@ section_media_view_recording() {
   echo "   ok"
 }
 section_media_view_recording
+
+# Section media-send: files sent from the attach dialog and the clipboard.
+attach() { asked 'attach state:' attach-state; }
+sent() { grep -c 'Scenario: sent ' "$WORK/log.txt" || true; }
+section_media_send_attach() {
+  echo "M4. Sending files"
+  "$(dirname "$BIN")/paste-test" > /dev/null || fail "paste-test"
+  start 150
+  local F=$WORK/files line before
+  mkdir -p "$F/folder"
+  magick -size 3000x2000 xc:skyblue "$F/photo.png"
+  magick -size 400x300 xc:orange "$F/small.jpg"
+  ffmpeg -loglevel error -f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p "$F/clip.mp4"
+  printf 'notes\n' > "$F/notes.txt"
+  : > "$F/empty.txt"
+  head -c 2097152 /dev/urandom > "$F/big.bin"
+  truncate -s 2100M "$F/huge.bin"  # Sparse: nothing is written.
+  c 'chat 2' 3
+  # Nothing that can be sent: the window says why, no dialog.
+  c "attach-files $F/empty.txt|$F/folder" 1
+  grep -q 'toast: File: empty.txt is empty' "$WORK/log.txt" || fail "an empty file wasn't refused"
+  grep -q 'toast: File: folder is empty' "$WORK/log.txt" || fail "a folder wasn't refused"
+  [[ $(attach) == *'no dialog'* ]] || fail "a dialog for nothing to send: $(attach)"
+  c "attach-files $F/huge.bin" 1
+  grep -q "toast: huge.bin: The document can't be sent, because it is larger than 2000 MB." "$WORK/log.txt" \
+    || fail "a file too large wasn't refused"
+  # Some refused: the dialog says why; a photo, a video and a file.
+  c "attach-files $F/photo.png|$F/clip.mp4|$F/notes.txt|$F/empty.txt" 3
+  line=$(attach)
+  [[ $line == *'entries=3 ready=3 documents=0 documentsShown=1 group=1 groupShown=1 send=1 refused="File: empty.txt is empty and can'"'"'t be sent." title="3 files selected"'* ]] \
+    || fail "the dialog: $line"
+  grep -q 'attach entry: type=1 size=[0-9]* 2560x170[67] .*thumbnail=0 photo=1' "$WORK/log.txt" || fail "the photo wasn't made 2560 wide"
+  grep -q 'attach entry: type=2 size=[0-9]* 320x240 duration=2 thumbnail=1' "$WORK/log.txt" || fail "the video's thumbnail"
+  c 'attach-remove 2' 0.3
+  [[ $(attach) == *'entries=2 '* ]] || fail "removing one: $(attach)"
+  # An album of the photo and the video, the caption on the photo.
+  before=$(sent)
+  c 'attach-caption Hello' 0.3
+  c attach-send 1
+  [[ $(attach) == *'no dialog'* ]] || fail "the dialog stayed after Send: $(attach)"
+  (( $(sent) == before + 2 )) || fail "$(( $(sent) - before )) sent instead of 2"
+  grep -q 'Scenario: sent photo .*album=1 caption="Hello"' "$WORK/log.txt" || fail "the photo with the caption in an album"
+  grep -q 'Scenario: sent video .*thumbnail=1 album=1 caption=""' "$WORK/log.txt" || fail "the video in the album"
+  sleep 2
+  [[ $(asked 'chat media:' 'media 0') == *'[photo] ['* ]] || fail "the album isn't one row: $(asked 'chat media:' 'media 0')"
+  # Only photos: "images", and as documents one album of files.
+  c "attach-files $F/small.jpg|$F/photo.png" 3
+  [[ $(attach) == *'title="2 images selected"'* ]] || fail "images: $(attach)"
+  c 'attach-documents on' 0.3
+  [[ $(attach) == *'documents=1 '*'title="2 files selected"'* ]] || fail "as documents: $(attach)"
+  c attach-send 1
+  grep -q 'Scenario: sent document name=small.jpg .*album=2' "$WORK/log.txt" || fail "as documents in an album"
+  grep -q 'Scenario: sent document name=photo.png .*album=2' "$WORK/log.txt" || fail "the second document"
+  # Twelve photos: albums of ten and two, in order.
+  local list=
+  for i in $(seq 12); do cp "$F/small.jpg" "$F/p$i.jpg"; list+="${list:+|}$F/p$i.jpg"; done
+  c "attach-files $list" 4
+  [[ $(attach) == *'entries=12 ready=12 '* ]] || fail "twelve: $(attach)"
+  before=$(sent)
+  c attach-send 1.5
+  (( $(sent) == before + 12 )) || fail "$(( $(sent) - before )) of twelve sent"
+  (( $(grep -c 'Scenario: sent photo .*album=3 ' "$WORK/log.txt") == 10 )) || fail "the first album isn't ten"
+  (( $(grep -c 'Scenario: sent photo .*album=4 ' "$WORK/log.txt") == 2 )) || fail "the second album isn't two"
+  # A caption too long: said, and the files stay.
+  c "attach-files $F/notes.txt" 2
+  c "attach-caption $(printf 'x%.0s' $(seq 1100))" 0.3
+  c attach-send 1
+  grep -q 'toast: You.ve reached the media caption limit. Please make the caption shorter by 76 characters.' "$WORK/log.txt" \
+    || fail "the caption's limit"
+  [[ $(attach) == *'entries=1 '* ]] || fail "the files went with a caption too long: $(attach)"
+  c attach-cancel 1
+  # A large file: its upload's progress, and a tap stops it.
+  c "attach-files $F/big.bin" 2
+  c attach-send 1.5
+  line=$(asked 'chat media:' 'media 0')
+  [[ $line == *'local=1 '*'document="'*' MB · '*'%"'*'progress='*'icon=process-stop-symbolic'* ]] || fail "the upload's progress: $line"
+  c 'tap 0 0' 1
+  grep -q 'Scenario: upload of file [0-9]* stopped at [1-9]' "$WORK/log.txt" || fail "the tap didn't stop the upload"
+  [[ $(asked 'chat media:' 'media 0') != *'local=1 '* ]] || fail "the message stopped stays"
+  # Pasted: a picture goes to the dialog, its text back to the field when it is cancelled; files; text stays text.
+  c "attach-copy-image $F/small.jpg" 0.3
+  c attach-paste 2
+  # (The plural form is the language's: LANG=C has none of its own.)
+  [[ $(attach) == *'entries=1 ready=1 '*'title="1 image'* ]] || fail "a pasted picture: $(attach)"
+  c attach-cancel 1
+  c "attach-copy-files $F/notes.txt|$F/clip.mp4" 0.3
+  c attach-paste 3
+  [[ $(attach) == *'entries=2 ready=2 '* ]] || fail "pasted files: $(attach)"
+  c attach-cancel 1
+  c 'attach-copy-text Pasted text' 0.3
+  c attach-paste 1
+  [[ $(asked 'attach field:' attach-field) == *'"Pasted text"'* ]] || fail "pasted text: $(asked 'attach field:' attach-field)"
+  [[ $(attach) == *'no dialog'* ]] || fail "text opened the dialog"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  echo "   ok"
+}
+section_media_send_attach
 echo "PASS"
