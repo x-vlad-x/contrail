@@ -43,6 +43,7 @@
 //   attach-paste | attach-files PATH|PATH | attach-send | attach-cancel | attach-documents on|off | attach-group on|off
 //   attach-caption TEXT | attach-remove N | attach-state (the attach dialog of the open chat) | attach-copy-image PATH
 //   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
+//   attach-menu file|location (an item of the attach menu, as a tap on it)
 #include "debug.hpp"
 
 #include "background_debug.hpp"

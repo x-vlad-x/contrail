@@ -511,7 +511,7 @@ section_places() {
     || fail "the live location's map: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
   c loc-close 0.5
   # The picker: the device's position, places nearby, a place found by name, a point on the map.
-  c loc-picker 1
+  c 'attach-menu location' 1
   [[ $(asked 'Location picker:' loc-state) == *'sensitive=1'*'watching=1'* ]] \
     || fail "the picker: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
   c 'loc-fix 55.7000 37.6000 12' 1.5

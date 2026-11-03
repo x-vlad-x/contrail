@@ -90,8 +90,8 @@ class ChatView final {
   // A tap on a file of a message still being sent: the upload stops and the message goes, as TDLib does it.
   void cancelUpload(const MessageItem &item);
   // paste (as Ctrl+V) | files PATH|PATH (as the file chooser) | copy-image PATH, copy-files PATH|PATH, copy-text TEXT
-  // (the clipboard as another program would fill it) | field (the field's text) | anything else to the dialog
-  // (AttachDialog::debugAction).
+  // (the clipboard as another program would fill it) | field (the field's text) | menu file|location (an item of the
+  // attach menu, as a tap on it) | anything else to the dialog (AttachDialog::debugAction).
   void debugAttach(const std::string &action);
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.

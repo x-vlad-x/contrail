@@ -2255,9 +2255,10 @@ void ChatView::buildComposer() {
   gtk_widget_set_hexpand(inputScroll, TRUE);
   gtk_widget_set_valign(inputScroll, GTK_ALIGN_CENTER);
   gtk_widget_add_css_class(inputScroll, "message-input-frame");
-  // Files, as the phone apps' attach menu.
+  // A file or a location, as the phone apps' attach menu.
   auto *attachMenu = g_menu_new();
   g_menu_append(attachMenu, Tr("lng_attach_file").c_str(), "attach.file");
+  g_menu_append(attachMenu, Tr("lng_maps_point").c_str(), "attach.location");
   auto *attach = gtk_menu_button_new();
   gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(attach), "mail-attachment-symbolic");
   gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(attach), G_MENU_MODEL(attachMenu));
@@ -2267,22 +2268,19 @@ void ChatView::buildComposer() {
   gtk_widget_add_css_class(attach, "circular");
   gtk_widget_set_valign(attach, GTK_ALIGN_END);
   auto *attachActions = g_simple_action_group_new();
-  auto *chooseAction = g_simple_action_new("file", nullptr);
-  _signals.connect<void(GSimpleAction *, GVariant *)>(chooseAction, "activate",
-                                                      [this](GSimpleAction *, GVariant *) { chooseFiles(); });
-  g_action_map_add_action(G_ACTION_MAP(attachActions), G_ACTION(chooseAction));
-  g_object_unref(chooseAction);
+  const auto addAttachAction = [&](const char *name, void (ChatView::*method)()) {
+    auto *action = g_simple_action_new(name, nullptr);
+    _signals.connect<void(GSimpleAction *, GVariant *)>(action, "activate",
+                                                        [this, method](GSimpleAction *, GVariant *) { (this->*method)(); });
+    g_action_map_add_action(G_ACTION_MAP(attachActions), G_ACTION(action));
+    g_object_unref(action);
+  };
+  addAttachAction("file", &ChatView::chooseFiles);
+  addAttachAction("location", &ChatView::chooseLocation);
   gtk_widget_insert_action_group(field, "attach", G_ACTION_GROUP(attachActions));
   g_object_unref(attachActions);
   gtk_box_append(GTK_BOX(field), attach);
   gtk_box_append(GTK_BOX(field), inputScroll);
-
-  // A location, as the phone apps' attach menu has it.
-  auto *locationButton = MakeIconButton("contrail-map-pin-symbolic", Tr("lng_maps_point").c_str(), "flat");
-  gtk_widget_add_css_class(locationButton, "circular");
-  gtk_widget_set_valign(locationButton, GTK_ALIGN_END);
-  _signals.clicked(locationButton, [this] { chooseLocation(); });
-  gtk_box_prepend(GTK_BOX(field), locationButton);
 
   // Placeholder: a label over the empty field.
   const auto known = _store.chat(_chat);
@@ -3689,6 +3687,9 @@ void ChatView::debugAttach(const std::string &action) {
     }
   } else if (action == "field") {
     g_message("attach field: \"%s\"", composerText().c_str());
+  } else if (action.starts_with("menu ")) {
+    // An item of the attach menu, as a tap on it: file or location.
+    gtk_widget_activate_action(_input, ("attach." + action.substr(5)).c_str(), nullptr);
   } else if (const auto attach = _attach.lock()) {
     attach->debugAction(action);
   } else {
