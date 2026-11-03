@@ -40,8 +40,19 @@ file(CONFIGURE OUTPUT ${GENERATED}/contrail_version.h
 file(CONFIGURE OUTPUT ${GENERATED}/contrail_api.h
   CONTENT "#pragma once\ninline constexpr int kApiId = @TELEGRAM_API_ID@;\ninline constexpr char kApiHash[] = \"@TELEGRAM_API_HASH@\";\n" @ONLY)
 
-# TDLib's libraries, in link order.
-if (CMAKE_CROSSCOMPILING)
+# Which Contrail this is: by default the test version that runs next to the stable one, with a data directory of
+# its own (under XDG_DATA_HOME). The packages can build it under the stable ID (tools/build-packages.sh).
+set(CONTRAIL_APP_ID io.github.x_vlad_x.Contrail.Devel CACHE STRING "Application ID")
+set(CONTRAIL_APP_NAME "Contrail TDLib" CACHE STRING "The name in the menu")
+set(CONTRAIL_DATA_NAME contrail-td/app CACHE STRING "The data directory, under XDG_DATA_HOME")
+file(CONFIGURE OUTPUT ${GENERATED}/contrail_app.h
+  CONTENT "#pragma once\nnamespace Contrail {\ninline constexpr char kAppId[] = \"@CONTRAIL_APP_ID@\";\ninline constexpr char kAppName[] = \"@CONTRAIL_APP_NAME@\";\ninline constexpr char kDataName[] = \"@CONTRAIL_DATA_NAME@\";\n}  // namespace Contrail\n" @ONLY)
+
+# TDLib's libraries, in link order. The packages build TDLib in their own containers: CONTRAIL_TD_BUILD.
+set(CONTRAIL_TD_BUILD "" CACHE PATH "TDLib's build directory, if not deps-td/<architecture>")
+if (CONTRAIL_TD_BUILD)
+  set(TD_BUILD ${CONTRAIL_TD_BUILD})
+elseif (CMAKE_CROSSCOMPILING)
   set(TD_BUILD ${CONTRAIL_TD_DIR}/aarch64)
 else()
   set(TD_BUILD ${CONTRAIL_TD_DIR}/${CMAKE_SYSTEM_PROCESSOR})
@@ -111,8 +122,9 @@ if (CONTRAIL_SHUMATE_FOUND)
   target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_SHUMATE)
 endif()
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. The x86_64 test container has older headers,
-# which don't know these macros.
-if (CMAKE_CROSSCOMPILING)
+# which don't know these macros, and so do the packages' Debian 13 containers (CONTRAIL_VERSION_LIMITS=OFF).
+option(CONTRAIL_VERSION_LIMITS "Warn about GTK and libadwaita API newer than FuriOS 14's" ${CMAKE_CROSSCOMPILING})
+if (CONTRAIL_VERSION_LIMITS)
   target_compile_definitions(contrail_core PUBLIC GLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_84
     GLIB_VERSION_MAX_ALLOWED=GLIB_VERSION_2_84 GDK_VERSION_MIN_REQUIRED=GDK_VERSION_4_12
     GDK_VERSION_MAX_ALLOWED=GDK_VERSION_4_22 ADW_VERSION_MIN_REQUIRED=ADW_VERSION_1_6
@@ -217,3 +229,5 @@ if (CONTRAIL_TESTS)
   add_executable(call-shell-test ${ROOT}/tests/td/call-shell-test.cpp)
   target_link_libraries(call-shell-test PRIVATE contrail_core)
 endif()
+# What the packages install (tools/package.py).
+include(${ROOT}/packaging/install.cmake)

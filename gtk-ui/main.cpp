@@ -63,6 +63,16 @@ void Activate(GApplication *) {
   program.window->present();
 }
 
+// tg:// and t.me links from the desktop entry (Exec=contrail -- %u) and other apps, as 0.3.1 took them.
+void Open(GApplication *application, GFile **files, int count, const char *) {
+  Activate(application);
+  for (auto i = 0; i != count; ++i) {
+    auto *uri = g_file_get_uri(files[i]);
+    if (uri) Instance().window->openLinkWhenReady(uri);
+    g_free(uri);
+  }
+}
+
 void Shutdown(GApplication *) {
   auto &program = Instance();
   program.quitting = true;
@@ -87,9 +97,10 @@ int main(int argc, char **argv) {
   using namespace Contrail;
   auto &program = Instance();
   g_set_prgname(kAppId);
-  g_set_application_name("Contrail TD");
-  program.application = adw_application_new(kAppId, G_APPLICATION_DEFAULT_FLAGS);
+  g_set_application_name(kAppName);
+  program.application = adw_application_new(kAppId, G_APPLICATION_HANDLES_OPEN);
   g_signal_connect(program.application, "activate", G_CALLBACK(Activate), nullptr);
+  g_signal_connect(program.application, "open", G_CALLBACK(Open), nullptr);
   g_signal_connect(program.application, "shutdown", G_CALLBACK(Shutdown), nullptr);
   // Ctrl+C and SIGTERM close TDLib cleanly too.
   g_unix_signal_add(SIGTERM, Quit, nullptr);

@@ -19,6 +19,7 @@
 #include "td/message_text.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
+#include "text.hpp"
 #include "topic_list.hpp"
 #include "tray.hpp"
 #include "userpics.hpp"
@@ -378,6 +379,7 @@ void MainWindow::showChats() {
     _loginShown = false;
     warnAboutConfirmation();
   }
+  if (!_pendingLink.empty()) openLinkWhenReady(std::exchange(_pendingLink, std::string()));
 }
 
 void MainWindow::setCurrent(Td::ChatId chat, std::int32_t topic) {
@@ -752,6 +754,15 @@ void MainWindow::releaseMemory(MemoryLevel level) {
     ReleaseAvatars();
   }
   TrimMemorySoon(0);
+}
+
+void MainWindow::openLinkWhenReady(const std::string &link) {
+  if (!_authorized || !_chatList) {
+    // Only the last one: a link given while signing in waits for the chats.
+    _pendingLink = link;
+    return;
+  }
+  if (IsTelegramLink(link)) OpenTelegramLink(link);
 }
 
 }  // namespace Contrail

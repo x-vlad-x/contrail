@@ -5,7 +5,7 @@ called by tools/package.py. ELF files are only read (readelf), so an ARM64 bundl
 on x86_64 the same way; only gio-querymodules runs, through qemu-user when cross-building.
 
   bundle.py resources ROOT TRIPLE [--gtk] [--pactl]   files loaded at run time that aren't ELF dependencies:
-                                                      Qt plugins; with --gtk also GIO modules, gdk-pixbuf loaders,
+                                                      with --gtk: GIO modules, gdk-pixbuf loaders,
                                                       GSettings schemas, icon themes, MIME data, translations;
                                                       with --pactl also PulseAudio's pactl (the Flatpak runtime
                                                       has none)
@@ -38,8 +38,6 @@ import subprocess
 
 DOC = Path("share/doc/contrail")
 ORIGINS = DOC / "bundled/origins.json"
-# Qt runs offscreen; Telegram Desktop needs the image formats (WebP emoji) and the TLS backend.
-QT_PLUGINS = ["platforms/libqoffscreen.so", "imageformats", "tls", "networkinformation"]
 GIO_MODULES = ["libdconfsettings.so", "libgiognutls.so", "libgiolibproxy.so"]
 LOCALE_DOMAINS = {"gtk40", "libadwaita", "glib20", "gdk-pixbuf"}
 # e_machine of each target.
@@ -117,14 +115,6 @@ def target_tool(triple, path):
 
 def resources(root, triple, gtk, pactl):
     lib = Path(f"/usr/lib/{triple}")
-    plugins = root / "lib/qt6/plugins"
-    for name in QT_PLUGINS:
-        source = lib / "qt6/plugins" / name
-        if source.is_dir():
-            copy_tree(source, plugins / name)
-        else:
-            (plugins / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, plugins / name)
     if pactl:
         (root / "bin").mkdir(parents=True, exist_ok=True)
         if machine(Path("/usr/bin/pactl")) != MACHINES[triple]:

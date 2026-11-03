@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the built packages in clean containers, the way users install them. Nothing touches the host's
-# system or any Telegram account; the program runs with a fictional local demo account and no network.
+# system or any Telegram account; the program runs on the scripted transport (a made-up account) and no network.
+# CONTRAIL_FLAVOUR (devel by default, as in tools/build-packages.sh) picks the packages.
 #
 #   tools/smoke-test.sh FORMAT-ARCH...    deb, rpm, appimage or flatpak; amd64 or arm64; e.g. deb-amd64
 #   tools/smoke-test.sh all-amd64         every format of an architecture (all-arm64, all)
@@ -16,10 +17,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 ENGINE="${CONTAINER_ENGINE:-$(command -v podman || command -v docker)}"
-VERSION=$(cat VERSION)
+# The flavour the packages were built as (tools/build-packages.sh): its names and version.
+FLAVOUR="${CONTRAIL_FLAVOUR:-devel}"
+read -r APP_ID NAME < <(python3 -c "import sys; sys.path.insert(0, 'tools'); import package
+package.configure(sys.argv[1]); print(package.APP_ID, package.NAME)" "$FLAVOUR")
 file_of() {
-  python3 -c "import sys; sys.path.insert(0, 'tools'); import package; print(package.package_file(*sys.argv[1:]))" \
-    "$1" "$2" "$VERSION"
+  python3 -c "import sys; sys.path.insert(0, 'tools'); import package; package.configure(sys.argv[1])
+print(package.package_file(sys.argv[2], sys.argv[3], package.package_version(sys.argv[1])))" "$FLAVOUR" "$1" "$2"
 }
 TOOLS_DEBIAN="xvfb dbus dbus-x11 libglib2.0-bin x11-apps netpbm xclip"
 TOOLS_FEDORA="xorg-x11-server-Xvfb dbus-daemon dbus-tools glib2 xwd netpbm-progs mesa-dri-drivers dejavu-sans-fonts xclip"
@@ -101,9 +105,9 @@ COPY $file /tmp/
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends /tmp/$file \
       > /tmp/apt.log 2>&1 || { tail -n 30 /tmp/apt.log; exit 1; }"
         run "$tag" "$platform" "set -e
-          dpkg -s contrail | sed -n '/^Version/p;/^Depends/p'
-          contrail --check-libs
-          tests/smoke/run-demo.sh /out/$out contrail" ;;
+          dpkg -s $NAME | sed -n '/^Version/p;/^Depends/p'
+          $NAME --check-libs
+          tests/smoke/run-demo.sh /out/$out $APP_ID $NAME" ;;
       rpm)
         if [[ $name == opensuse-* ]]; then
           install="zypper -q -n --no-gpg-checks install --allow-unsigned-rpm /tmp/$file"
@@ -115,9 +119,9 @@ RUN $setup
 COPY $file /tmp/
 RUN $install > /tmp/install.log 2>&1 || { tail -n 30 /tmp/install.log; exit 1; }"
         run "$tag" "$platform" "set -e
-          rpm -q contrail
-          contrail --check-libs
-          tests/smoke/run-demo.sh /out/$out contrail" ;;
+          rpm -q $NAME
+          $NAME --check-libs
+          tests/smoke/run-demo.sh /out/$out $APP_ID $NAME" ;;
       appimage)
         if [[ -n $emulated ]]; then
           # Under qemu-user binfmt the AppImage can't be started itself: its "AI" mark in the ELF header doesn't
@@ -131,25 +135,25 @@ print(int.from_bytes(d[40:48], "little") + int.from_bytes(d[58:60], "little") * 
 RUN $setup && ( command -v apt-get >/dev/null && apt-get install -y -qq squashfs-tools || dnf install -q -y squashfs-tools )"
           run "$tag" "$platform" "set -e
             unsquashfs -q -o $offset -d /tmp/Contrail out/packages/$file >/dev/null
-            tests/smoke/run-demo.sh /out/$out /tmp/Contrail/AppRun"
+            tests/smoke/run-demo.sh /out/$out $APP_ID /tmp/Contrail/AppRun"
         else
           image "$tag" "$platform" build-env "FROM $base
 RUN $setup"
           run "$tag" "$platform" "set -e
             cp out/packages/$file /tmp/Contrail.AppImage
-            tests/smoke/run-demo.sh /out/$out /tmp/Contrail.AppImage --appimage-extract-and-run"
+            tests/smoke/run-demo.sh /out/$out $APP_ID /tmp/Contrail.AppImage --appimage-extract-and-run"
         fi ;;
       flatpak)
         # The runtime comes from the packaging's own download (out/flatpak/), not from the network.
         image "$tag" "$platform" build-env "FROM $base
 RUN $setup"
-        command="flatpak run --arch=$machine io.github.x_vlad_x.Contrail"
+        command="flatpak run --arch=$machine $APP_ID"
         run "$tag" "$platform" "set -e
           export FLATPAK_USER_DIR=/tmp/flatpak
           cp -a /src/out/flatpak/user /tmp/flatpak
           flatpak install --user -y --noninteractive --no-related --no-deps out/packages/$file
-          flatpak info --user io.github.x_vlad_x.Contrail | sed -n '/Version\\|Runtime\\|Arch/p'
-          tests/smoke/run-demo.sh /out/$out $command" --privileged ;;
+          flatpak info --user $APP_ID | sed -n '/Version\\|Runtime\\|Arch/p'
+          tests/smoke/run-demo.sh /out/$out $APP_ID $command" --privileged ;;
     esac
     [[ -n ${SMOKE_KEEP:-} ]] || "$ENGINE" rmi -f "$tag" >/dev/null 2>&1 || true
   done

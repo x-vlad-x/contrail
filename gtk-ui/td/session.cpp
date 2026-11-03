@@ -1,6 +1,7 @@
 #include "td/session.hpp"
 
 #include "contrail_api.h"
+#include "contrail_app.h"
 
 #include <td/telegram/Client.h>
 
@@ -45,7 +46,7 @@ std::string SystemVersion() {
 
 std::string DataDirectory() {
   if (const auto custom = g_getenv("CONTRAIL_TD_DIR")) return custom;
-  auto *path = g_build_filename(g_get_user_data_dir(), "contrail-td", "app", nullptr);
+  auto *path = g_build_filename(g_get_user_data_dir(), kDataName, nullptr);
   auto result = std::string(path);
   g_free(path);
   return result;

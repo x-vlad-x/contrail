@@ -1,6 +1,8 @@
 // Contrail: an unofficial GTK4 + libadwaita Telegram client on TDLib.
 #pragma once
 
+#include "contrail_app.h"
+
 #include <adwaita.h>
 #include <gtk/gtk.h>
 
@@ -11,8 +13,8 @@
 
 namespace Contrail {
 
-// Application ID: D-Bus name, desktop file and icon name. The version on TDLib runs next to the stable one.
-inline constexpr char kAppId[] = "io.github.x_vlad_x.Contrail.Devel";
+// kAppId (D-Bus name, desktop file and icon name) and kAppName come from the build (CMakeLists.txt): the version
+// on TDLib runs next to the stable one under an ID of its own.
 inline constexpr char kProjectUrl[] = "https://github.com/x-vlad-x/contrail";
 
 class MainWindow;

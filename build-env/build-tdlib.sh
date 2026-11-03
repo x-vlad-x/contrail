@@ -2,7 +2,8 @@
 # Builds TDLib at the pinned commit as static libraries.
 # Runs inside a build container: tdesktop-cross for aarch64, contrail-desktop for x86_64 (it has the native libraries):
 #   build-env/run.sh build-env/build-tdlib.sh aarch64
-# The sources go to deps-td/src, the libraries to deps-td/<architecture>. Nothing is rebuilt when they are current.
+# The sources go to deps-td/src, the libraries to deps-td/<architecture> (or TDLIB_OUT: the packages build them
+# in their own containers, tools/build-packages.sh). Nothing is rebuilt when they are current.
 set -euo pipefail
 cd /src
 ARCH=${1:?usage: $0 aarch64|x86_64}
@@ -10,7 +11,7 @@ COMMIT=4c6377a  # TDLib 1.8.69. Updating it is a step of its own: td_api changes
 JOBS=${JOBS:-$(nproc)}
 ROOT=/src/deps-td
 SRC=$ROOT/src
-OUT=$ROOT/$ARCH
+OUT=${TDLIB_OUT:-$ROOT/$ARCH}
 FLAGS="-ffunction-sections -fdata-sections"
 
 if [[ ! -d $SRC/.git ]]; then
