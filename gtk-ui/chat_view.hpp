@@ -103,6 +103,15 @@ class ChatView final {
   void debugMedia(std::int64_t number);
   void debugTap(std::int64_t number, int index);
   void debugTapText(std::int64_t number, const std::string &part);
+
+  // Where the screen is, to come back to it when the window is built again after the background: the first message
+  // whose top is on the screen and how far down. Empty at the end of the chat, which it opens at anyway.
+  struct Place {
+    std::int64_t message = 0;
+    double y = 0.;
+  };
+  [[nodiscard]] Place place() const;
+  void restorePlace(Place place);
   void debugSponsored() const;
 
  private:

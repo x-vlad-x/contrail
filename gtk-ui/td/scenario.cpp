@@ -391,7 +391,7 @@ class ScenarioTransport final : public Transport {
 
   void send(std::uint64_t id, FunctionPtr function) override {
     if (placesRequest(id, *function) || showcaseRequest(id, *function) || forumRequest(id, *function)
-        || pinnedRequest(id, *function) || reactionRequest(id, *function)) {
+        || pinnedRequest(id, *function) || reactionRequest(id, *function) || backgroundRequest(id, *function)) {
       return;
     }
     switch (function->get_id()) {
@@ -1618,6 +1618,7 @@ class ScenarioTransport final : public Transport {
     if (!link.starts_with("tg:") && link.find("t.me/") == std::string::npos) {
       return api::make_object<api::error>(400, "Not a Telegram link");
     }
+    if (link.starts_with("tg://socks?")) return proxyLink(link);
     const auto slash = path.find('/');
     const auto name = path.substr(0, slash);
     if (slash != std::string::npos) return api::make_object<api::internalLinkTypeMessage>(link);
@@ -2411,6 +2412,207 @@ class ScenarioTransport final : public Transport {
         return false;
     }
   }
+
+  // --- settings and the app in the background ------------------------------------
+
+  template <typename Type>
+  static const Type *As(const api::Object *object) {
+    return object && object->get_id() == Type::ID ? static_cast<const Type *>(object) : nullptr;
+  }
+
+  bool backgroundRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::loadChats::ID:
+        // The badge of the tray icon: the friends with unread messages (every fourth), none of them muted.
+        if (!_unreadCountSent) {
+          _unreadCountSent = true;
+          const auto unread = kChatCount / 4;
+          update(api::make_object<api::updateUnreadChatCount>(ListObject(false), kChatCount, unread, unread, 0, 0));
+        }
+        return false;
+      case api::getMe::ID: {
+        auto me = MakeUser(kSelfId, "Vlad", "");
+        me->phone_number_ = "15550001000";
+        answer(id, std::move(me));
+        return true;
+      }
+      case api::setOption::ID: {
+        auto &request = static_cast<api::setOption &>(function);
+        if (request.name_ == "notification_group_count_max") {
+          const auto value = As<api::optionValueInteger>(request.value_.get());
+          _notificationsOn = value && value->value_ > 0;
+        }
+        return false;
+      }
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        const auto input = As<api::inputMessageText>(request.input_message_content_.get());
+        const auto text = input && input->text_ ? input->text_->text_ : std::string();
+        // "/notify" or "/notify2": a message or two come to Friend 5 a second later, with their notifications.
+        if (text == "/notify" || text == "/notify2") {
+          later(1000, [this, count = text == "/notify2" ? 2 : 1] {
+            for (auto i = 0; i != count; ++i) notifyIncoming();
+          });
+        }
+        if (request.chat_id_ == kNotifyChat) {
+          const auto reply = As<api::inputMessageReplyToMessage>(request.reply_to_.get());
+          g_message("scenario: sent to %lld \"%s\" reply_to=%lld", static_cast<long long>(request.chat_id_),
+                    text.c_str(), static_cast<long long>(reply ? reply->message_id_ : 0));
+        }
+        return false;
+      }
+      case api::viewMessages::ID: {
+        auto &request = static_cast<api::viewMessages &>(function);
+        // Read here or anywhere: TDLib takes the chat's notifications away.
+        if (request.chat_id_ == kNotifyChat && !_notes.empty()) {
+          update(api::make_object<api::updateNotificationGroup>(
+              kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), kNotifyChat, kNotifyChat, 1, 0,
+              std::vector<api::object_ptr<api::notification>>(), std::exchange(_notes, {})));
+        }
+        return false;
+      }
+      case api::removeNotificationGroup::ID:
+        g_message("scenario: notifications removed");
+        _notes.clear();
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::setNetworkType::ID:
+        g_message("scenario: network %d", static_cast<api::setNetworkType &>(function).type_->get_id());
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::getProxies::ID:
+        answer(id, addedProxies());
+        return true;
+      case api::addProxy::ID:
+      case api::editProxy::ID: {
+        const auto edit = function.get_id() == api::editProxy::ID;
+        auto &proxy = edit ? static_cast<api::editProxy &>(function).proxy_ : static_cast<api::addProxy &>(function).proxy_;
+        const auto enable = edit ? static_cast<api::editProxy &>(function).enable_ : static_cast<api::addProxy &>(function).enable_;
+        auto it = edit ? std::ranges::find(_proxies, static_cast<api::editProxy &>(function).proxy_id_, &Proxy::id)
+                       : _proxies.end();
+        if (edit && it == _proxies.end()) {
+          answer(id, api::make_object<api::error>(400, "PROXY_NOT_FOUND"));
+          return true;
+        }
+        if (!edit) it = _proxies.insert(_proxies.end(), Proxy{.id = ++_proxyIds});
+        it->proxy = CopyProxy(*proxy);
+        if (enable) useProxy(it->id);
+        answer(id, addedProxy(*it));
+        return true;
+      }
+      case api::enableProxy::ID:
+        useProxy(static_cast<api::enableProxy &>(function).proxy_id_);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::disableProxy::ID:
+        useProxy(0);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::removeProxy::ID:
+        std::erase_if(_proxies, [&](const Proxy &proxy) { return proxy.id == static_cast<api::removeProxy &>(function).proxy_id_; });
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::pingProxy::ID: {
+        // A server named "down..." doesn't answer.
+        const auto &proxy = static_cast<api::pingProxy &>(function).proxy_;
+        if (proxy && proxy->server_.starts_with("down")) answer(id, api::make_object<api::error>(400, "Connection refused"));
+        else answer(id, api::make_object<api::seconds>(0.042));
+        return true;
+      }
+      case api::logOut::ID:
+        // As TDLib does: the session ends and its data goes; the program starts a new client.
+        answer(id, api::make_object<api::ok>());
+        authorization(api::make_object<api::authorizationStateLoggingOut>());
+        later(300, [this] { authorization(api::make_object<api::authorizationStateClosed>()); });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // A message from Friend 5, and its notification when the program asked for them.
+  void notifyIncoming() {
+    const auto chat = kNotifyChat;
+    const auto index = MessagesInChat() + 2000 + (++_notified);
+    const auto text = "Are you coming tonight? " + std::to_string(_notified);
+    _orders[chat].first = std::int64_t(3000 + _notified) << 32;
+    auto positions = std::vector<api::object_ptr<api::chatPosition>>();
+    positions.push_back(api::make_object<api::chatPosition>(ListObject(false), _orders[chat].first, false, nullptr));
+    update(api::make_object<api::updateNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text)));
+    update(api::make_object<api::updateChatLastMessage>(chat, MakeMessage(chat, index * kIdStep, chat, kNow, text),
+                                                        std::move(positions)));
+    update(api::make_object<api::updateChatReadInbox>(chat, (MessagesInChat() - 1) * kIdStep, int(_notes.size()) + 1));
+    if (!_notificationsOn) return;
+    const auto notification = 100 + _notified;
+    auto added = std::vector<api::object_ptr<api::notification>>();
+    added.push_back(api::make_object<api::notification>(
+        notification, kNow, false,
+        api::make_object<api::notificationTypeNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text), true)));
+    _notes.push_back(notification);
+    update(api::make_object<api::updateNotificationGroup>(
+        kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), chat, chat, 1, int(_notes.size()),
+        std::move(added), std::vector<std::int32_t>()));
+  }
+
+  struct Proxy {
+    std::int32_t id = 0;
+    api::object_ptr<api::proxy> proxy;
+    bool enabled = false;
+    std::int32_t lastUsed = 0;
+  };
+  static api::object_ptr<api::proxy> CopyProxy(const api::proxy &proxy) {
+    auto type = api::object_ptr<api::ProxyType>();
+    if (const auto socks = As<api::proxyTypeSocks5>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeSocks5>(socks->username_, socks->password_);
+    } else if (const auto http = As<api::proxyTypeHttp>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeHttp>(http->username_, http->password_, http->http_only_);
+    } else if (const auto mtproto = As<api::proxyTypeMtproto>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeMtproto>(mtproto->secret_);
+    }
+    return api::make_object<api::proxy>(proxy.server_, proxy.port_, std::move(type));
+  }
+  api::object_ptr<api::addedProxy> addedProxy(const Proxy &proxy) {
+    return api::make_object<api::addedProxy>(proxy.id, proxy.lastUsed, proxy.enabled, std::string(),
+                                             CopyProxy(*proxy.proxy));
+  }
+  api::object_ptr<api::addedProxies> addedProxies() {
+    auto result = api::make_object<api::addedProxies>();
+    for (const auto &proxy : _proxies) result->proxies_.push_back(addedProxy(proxy));
+    return result;
+  }
+  // As TDLib does when the way to the servers changes: connecting for a moment, then connected.
+  void useProxy(std::int32_t id) {
+    for (auto &proxy : _proxies) {
+      proxy.enabled = proxy.id == id;
+      if (proxy.enabled) proxy.lastUsed = kNow;
+    }
+    update(api::make_object<api::updateConnectionState>(
+        id ? api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnectingToProxy>())
+           : api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnecting>())));
+    later(1500, [this] {
+      update(api::make_object<api::updateConnectionState>(api::make_object<api::connectionStateReady>()));
+    });
+  }
+  // tg://socks?server=S&port=P, as TDLib reads it.
+  ObjectPtr proxyLink(const std::string &link) {
+    const auto value = [&](const std::string &key) {
+      const auto at = link.find(key + "=");
+      if (at == std::string::npos) return std::string();
+      const auto from = at + key.size() + 1;
+      return link.substr(from, link.find('&', from) - from);
+    };
+    return api::make_object<api::internalLinkTypeProxy>(api::make_object<api::proxy>(
+        value("server"), std::atoi(value("port").c_str()), api::make_object<api::proxyTypeSocks5>("", "")));
+  }
+  std::vector<Proxy> _proxies;
+  std::int32_t _proxyIds = 0;
+
+  static constexpr auto kNotifyChat = std::int64_t(5);
+  static constexpr auto kNotifyGroup = std::int32_t(1);
+  bool _unreadCountSent = false;
+  bool _notificationsOn = false;
+  int _notified = 0;
+  std::vector<std::int32_t> _notes;  // The notifications of Friend 5 not read yet.
 
   const bool _fullList;
   Sink _sink;

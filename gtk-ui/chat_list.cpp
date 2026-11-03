@@ -200,19 +200,18 @@ GtkWidget *ChatList::buildMenu() {
   });
   g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(contacts));
   g_object_unref(contacts);
+  auto *settings = g_simple_action_new("settings", nullptr);
+  _connections.connect<void(GSimpleAction *, GVariant *)>(settings, "activate", [this](GSimpleAction *, GVariant *) {
+    _window.openSettings();
+  });
+  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(settings));
+  g_object_unref(settings);
   auto *about = g_simple_action_new("about", nullptr);
   _connections.connect<void(GSimpleAction *, GVariant *)>(about, "activate", [this](GSimpleAction *, GVariant *) {
     _window.showAbout();
   });
   g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(about));
   g_object_unref(about);
-  // Its page comes with a later stage. Greyed out rather than hidden: the menu keeps its shape.
-  for (const auto *name : {"settings"}) {
-    auto *action = g_simple_action_new(name, nullptr);
-    g_simple_action_set_enabled(action, FALSE);
-    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
-    g_object_unref(action);
-  }
   gtk_widget_insert_action_group(popover, "contrail", G_ACTION_GROUP(group));
   g_object_unref(group);
   return popover;

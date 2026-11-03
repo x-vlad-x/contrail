@@ -3474,4 +3474,24 @@ void ChatView::openLocation(const MessageItem &item) {
   if (item.data) ShowLocation(_window, *item.data);
 }
 
+// --- the place on the screen, kept while the app is in the background -----------------------
+
+ChatView::Place ChatView::place() const {
+  if (_stickToBottom || atBottom()) return {};
+  for (const auto &item : _items) {
+    const auto row = rowFor(item.get());
+    auto *widget = row ? row->widgetFor(item.get()) : nullptr;
+    auto point = graphene_point_t();
+    const auto zero = GRAPHENE_POINT_INIT(0, 0);
+    if (!widget || !gtk_widget_get_mapped(widget) || !gtk_widget_compute_point(widget, _scroll, &zero, &point)) continue;
+    if (point.y >= 0) return {item->id(), double(point.y)};
+  }
+  return {};
+}
+
+void ChatView::restorePlace(Place place) {
+  // A topic finds its place in the group first; it opens where it was read instead.
+  if (place.message && !_topic) jumpToMessage(place.message, place.y);
+}
+
 }  // namespace Contrail

@@ -567,4 +567,179 @@ section_places() {
   stop
 }
 section_places
+# Section background: the settings, the app without its window, the tray icon, notifications, the proxy. A fake
+# notification server and tray watcher (td-fake-desktop.py) stand for the desktop.
+section_background() {
+  echo "10. Settings and the app in the background"
+  local desktop=$WORK/desktop.txt fake
+  : > "$desktop"
+  "$(dirname "$(realpath "$0")")/td-fake-desktop.py" "$desktop" &
+  fake=$!
+  for _ in $(seq 50); do grep -q '^ready' "$desktop" && break; sleep 0.1; done
+  grep -q '^ready' "$desktop" || fail "the fake desktop didn't start"
+  bg() { asked 'bg: ' bg-state; }
+  clean() { ! grep -E 'CRITICAL|Gtk-WARNING' "$WORK/log.txt" | grep -v 'Vulkan' | head -3 | grep . || fail "GTK complained"; }
+  start 120
+  c settings 1.5
+  local line
+  line=$(asked 'settings:' settings-state)
+  [[ $line == *'notify=1 sound=1 preview=1 background=0 account="Vlad" phone=15550001000'* ]] \
+    || fail "the settings: $line"
+  c tree 0.5
+  for text in 'Notifications and Sounds' 'Desktop notifications' 'Allow sound' 'Show message text' \
+      'Run in the background' 'About Contrail' 'Log out' 'Saved Messages' '+15550001000'; do
+    grep -q "\"$text\"" "$WORK/log.txt" || fail "no \"$text\" in the settings"
+  done
+  c 'settings-set notify 0' 0.3
+  c tree 0.5
+  grep 'AdwSwitchRow "Allow sound"' "$WORK/log.txt" | tail -1 | grep -q insensitive \
+    || fail "the sound can be turned on without notifications"
+  c 'settings-set notify 1' 0.3
+  # In the background: the tray icon with the unread chats, the window closed and opened again on the same chat.
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "a tray icon without the background: $(bg)"
+  c 'settings-set background 1' 1.5
+  line=$(bg)
+  [[ $line == *'background=1 tray=registered unread=10'* ]] || fail "no tray icon: $line"
+  grep -q '^tray-register' "$desktop" || fail "the tray icon didn't register with the watcher"
+  local item="org.kde.StatusNotifierItem-$P-1"
+  [[ $(gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+      --method org.freedesktop.DBus.Properties.Get org.kde.StatusNotifierItem Title) == *"Contrail (10)"* ]] \
+    || fail "the tray icon's title has no unread chats"
+  c back 0.5
+  c 'chat 3' 2
+  local chat place
+  chat=$(bg | sed -n 's/.* chat=\([-0-9]*\).*/\1/p')
+  [[ -n $chat && $chat != 0 ]] || fail "no chat opened: $(bg)"
+  # Up from the end: the window built again comes back to the same place, not to the end.
+  for _ in 1 2 3; do c 'scroll -900' 0.5; done
+  sleep 1
+  place=$(bg | sed -n 's/.* place=\([0-9]*\/[0-9]*\) .*/\1/p')
+  [[ -n $place && $place != 0/* ]] || fail "no place up in the chat: $(bg)"
+  c bg-close 2
+  line=$(bg)
+  [[ $line == *'window=0 '*'chat=0'* ]] || fail "the window stayed: $line"
+  kill -0 "$P" || fail "it quit instead of staying in the background"
+  grep -q 'background: the window is released' "$WORK/log.txt" || fail "the interface wasn't released"
+  gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+    --method org.kde.StatusNotifierItem.Activate 0 0 > /dev/null
+  sleep 2
+  line=$(bg)
+  [[ $line == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
+  c bg-close 2
+  c bg-open 2
+  [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  clean
+  # A network gone and back: TDLib is told once each time.
+  [[ $(asked 'network:' net-state) == *'sent=0'* ]] || fail "the network type sent at the start: $(asked 'network:' net-state)"
+  c 'net-simulate none' 0.2
+  c 'net-simulate none' 0.2
+  c 'net-simulate mobile' 0.5
+  (( $(grep -c 'scenario: network' "$WORK/log.txt") == 2 )) || fail "the network changes weren't told once each"
+  # The settings stay for the next start.
+  kill "$P"; wait "$P" 2>/dev/null || true; P=
+  start 120
+  [[ $(bg) == *'background=1 tray=registered'* ]] || fail "the background setting was lost: $(bg)"
+  [[ $(asked 'mem-guard:' mem-guard) == *'level=normal'* ]] || fail "no memory guard"
+  c 'mem-simulate low' 0.5
+  grep -q 'memory low, .* freeing what can be freed' "$WORK/log.txt" || fail "low memory isn't handled"
+  # Notifications: two messages to a chat that isn't open, the window closed; one notification for both.
+  notes() { grep -c "^$1" "$desktop" || true; }
+  c 'chat 0' 2
+  [[ $(bg) != *' chat=5' ]] || fail "the chat that gets messages is open"
+  c 'send /notify2' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=Are you coming tonight? 1\nAre you coming tonight? 2 '* ]] \
+    || fail "the notification: $line"
+  [[ $line == *'actions=default,mark-read,inline-reply '*'sound=message-new-instant'* ]] || fail "its buttons: $line"
+  (( $(notes notify) == 2 )) && [[ $line == *' replaces='[1-9]* ]] || fail "not one notification for the chat: $line"
+  local id
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  [[ $(asked 'notify:' notify-state) == *"[group=1 chat=5 shown=$id count=2 adopted=0]"* ]] || fail "$(asked 'notify:' notify-state)"
+  # Answered from the notification: sent to the chat, which is read then, and the notification goes.
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Reply "$id" 'On my way' > /dev/null
+  sleep 1
+  grep -q 'scenario: sent to 5 "On my way" reply_to=0' "$WORK/log.txt" || fail "the answer wasn't sent"
+  grep -q "^close id=$id" "$desktop" || fail "the notification stayed after the chat was read"
+  [[ $(bg) == *'window=0 '* ]] || fail "answering opened the window"
+  # Without the text of messages; a tap opens the chat.
+  c bg-open 2
+  c settings 1
+  c 'settings-set preview 0' 0.3
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=You have a new message '* ]] || fail "the text is shown: $line"
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Invoke "$id" default > /dev/null
+  sleep 2
+  [[ $(bg) == *'window=1 visible=1 '*' chat=5' ]] || fail "a tap didn't open the chat: $(bg)"
+  # Turned off: nothing comes.
+  c settings 1
+  c 'settings-set preview 1' 0.3
+  c 'settings-set notify 0' 0.3
+  local before
+  before=$(notes notify)
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 2.5
+  (( $(notes notify) == before )) || fail "a notification came with them turned off"
+  c settings 1
+  c 'settings-set notify 1' 0.3
+  c 'settings-set background 0' 1
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "the tray icon stayed: $(bg)"
+  # The proxies: added through the dialog, used, checked, edited, removed, turned off and on.
+  proxies() { asked 'proxy: use' proxy-state; }
+  c settings 1
+  c proxy 1
+  [[ $(proxies) == *'proxy: use=0' ]] || fail "proxies before any was added: $(proxies)"
+  c 'proxy-add socks5 good.example 1080 user secret' 0.5
+  line=$(proxies)
+  [[ $line == *'use=1 [0 SOCKS5 good.example:1080 enabled status="connecting…"]' ]] || fail "not used: $line"
+  sleep 2
+  [[ $(proxies) == *'[0 SOCKS5 good.example:1080 enabled status="online"]' ]] || fail "not connected: $(proxies)"
+  c 'proxy-add mtproto down.example 443' 0.5
+  grep -q 'proxy: dialog save=0' "$WORK/log.txt" || fail "an MTProto proxy without a secret can be saved"
+  c 'proxy-add mtproto down.example 443 dd0123456789abcdef' 2.5
+  line=$(proxies)
+  [[ $line == *'[0 SOCKS5 good.example:1080 status="available (ping: 42 ms)"] [1 MTProto down.example:443 enabled status="online"]' ]] \
+    || fail "two proxies: $line"
+  c 'proxy-enable 0' 2.5
+  [[ $(proxies) == *'enabled status="online"] [1 MTProto down.example:443 status="not available"]' ]] \
+    || fail "the other one: $(proxies)"
+  c 'proxy-edit 0 http good.example 8080' 1
+  c 'proxy-remove 1' 1
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="'* ]] || fail "edited and removed: $(proxies)"
+  [[ $(proxies) != *'[1 '* ]] || fail "not removed: $(proxies)"
+  c 'proxy-use 0' 1
+  [[ $(proxies) == *'use=0 [0 HTTP good.example:8080 status="available (ping: 42 ms)"]' ]] || fail "turned off: $(proxies)"
+  c 'proxy-use 1' 2.5
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="online"]' ]] || fail "turned on again: $(proxies)"
+  # A proxy link asks first.
+  c 'proxy-link tg://socks?server=link.example&port=1081' 1
+  [[ $(asked 'dialog:' dialog) == *'heading="Enable proxy" body="link.example:1081 (SOCKS5)"'* ]] \
+    || fail "no question for a proxy link: $(asked 'dialog:' dialog)"
+  c 'dialog-answer connect' 1
+  c back 0.5
+  c proxy 1.5
+  [[ $(proxies) == *'[1 SOCKS5 link.example:1081 enabled status="'* ]] || fail "the link's proxy: $(proxies)"
+  c back 0.5
+  c back 0.5
+  # Logging out asks first; then a new session starts, without "you were logged out".
+  c settings-logout 0.5
+  [[ $(asked 'dialog:' dialog) == *'heading="Are you sure you want to log out?"'* ]] || fail "no question before logging out"
+  c 'dialog-answer logout' 3
+  grep -q 'You were logged out' "$WORK/log.txt" && fail "logging out was taken for a lost session"
+  c tree 0.5
+  grep -q '"Friend 1"' <(sed -n '/tree$/,$p' "$WORK/log.txt" | tail -400) || fail "no chats after logging out"
+  clean
+  stop
+  kill "$fake" 2>/dev/null || true
+  echo "   ok"
+}
+section_background
 echo "PASS"

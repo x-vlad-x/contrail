@@ -29,7 +29,15 @@
 //   profile-member N | profile-mute | contacts | contacts-state | contacts-search TEXT | contacts-open N | about
 //   live-locations (what is shared from here) | live-update (a fix taken and sent now) | live-bar | live-bar-tap
 //   live-map (of the open chat) | on the shared map: live-state, live-share (its button), live-row N
+//   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
+//   launcher) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
+//   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
+//   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
+//   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
+//   proxy-enable N | proxy-remove N | proxy-link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
 #include "debug.hpp"
+
+#include "background_debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
@@ -118,6 +126,12 @@ void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
+  if (RunBackgroundCommand(window, name, rest)) return;
+  // Without its window (the app in the background) only what needs none.
+  if (!window.widget() && name != "mem" && name != "mem-arenas" && name != "trim") {
+    g_message("debug: no window for %s", command.c_str());
+    return;
+  }
   if (name == "mem") {
     // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
     // is the main arena's only.

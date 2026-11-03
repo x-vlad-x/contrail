@@ -3,6 +3,7 @@
 #include "chat_view.hpp"
 #include "layout.hpp"
 #include "main_window.hpp"
+#include "proxy.hpp"
 #include "scroll_helpers.hpp"
 #include "td/strings.hpp"
 
@@ -332,6 +333,9 @@ void OpenTelegramLink(const std::string &href) {
                 failed);
             break;
           }
+          case api::internalLinkTypeProxy::ID:
+            ConfirmAddProxy(*window, std::move(static_cast<api::internalLinkTypeProxy &>(*object).proxy_));
+            break;
           default: elsewhere(); break;
         }
       },
