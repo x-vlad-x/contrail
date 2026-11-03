@@ -64,6 +64,7 @@ add_library(contrail_core STATIC
   debug.cpp
   device_scale.cpp
   forward.cpp
+  local_state.cpp
   login.cpp
   main_window.cpp
   memory_trim.cpp

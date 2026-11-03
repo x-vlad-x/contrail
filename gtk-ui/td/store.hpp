@@ -57,6 +57,7 @@ struct Chat {
   std::string draft;
   std::int64_t draftReplyTo = 0;
   bool canSendBasic = true;  // The chat's permissions for everybody; a group's own status can narrow this.
+  bool canPinAll = false;    // The members may pin messages (the chat's permissions for everybody).
   bool forum = false;        // A supergroup with topics: its messages are read and written in them.
   bool supergroup = false;
 };
@@ -68,6 +69,9 @@ struct Group {
   bool canPost = true;   // In a channel: only some admins. In a group: unless restricted.
   bool forum = false;
   bool manageTopics = false;  // May write in closed topics.
+  // Pins messages by its own rights (an admin, the owner, restricted), or as every member may (Chat::canPinAll).
+  bool canPin = false;
+  bool pinAsMembers = true;
 };
 
 // A topic of a group with topics. What its row shows is kept as a chat's is (the name in `row.title`; `row.muted`
@@ -132,6 +136,8 @@ class Store final {
   [[nodiscard]] const Group *group(const Chat &chat) const;
   // Whether a text can be sent here at all: "join" or "mute" go in the place of the field otherwise.
   [[nodiscard]] bool canWrite(const Chat &chat) const;
+  // Whether this account may pin and unpin messages in the chat: otherwise it can only hide the pinned bar.
+  [[nodiscard]] bool canPin(const Chat &chat) const;
   [[nodiscard]] UserId selfId() const { return _selfId; }
   [[nodiscard]] ChatId repliesChatId() const { return _repliesChatId; }
   // The public name of a user's chat or a supergroup, without the "@". Empty when there is none.

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -62,6 +63,10 @@ class ChatView final {
   void debugForwardMode(bool names);
   void debugForwardCancel();
   void debugForwardMenu();
+  void debugMessageMenu(std::int64_t number);  // Of message N (its server number), 0: the newest.
+  void debugPin(std::int64_t number, bool pin);  // As the menu's Pin or Unpin does: the question comes.
+  void debugPinnedBar(const std::string &what);  // tap | close | list | state
+  void debugPinnedList(const std::string &what);  // state | pick N | action
 
  private:
   // One call of a function some time later. Started again, it waits from the start.
@@ -167,6 +172,30 @@ class ChatView final {
   void setForwardNames(bool names);
   void sendForward();
 
+  // The pinned message bar under the header (Telegram Desktop's PinnedTracker): the newest message pinned above the
+  // bottom of the screen; a tap shows it, and then the one pinned before it. Only the ids of the pinned messages are
+  // held, and the one the bar shows.
+  void buildPinnedBar();
+  void loadPinned();
+  void pinnedPage(Td::api::foundChatMessages &found, bool first);
+  void pinnedChanged(std::int64_t id, bool pinned);
+  void updatePinnedViewer();
+  void setPinnedAround(std::int64_t around);
+  void fetchPinnedMessage();
+  void refreshPinnedBar();
+  void setPinnedPreview();
+  void showPinnedPicture(const std::string &path);
+  void pinnedBarClicked();
+  void pinnedCloseClicked();
+  [[nodiscard]] bool canPinMessages() const;
+  [[nodiscard]] bool pinnedHiddenByUser() const;
+  [[nodiscard]] int pinnedIndex() const;
+  void showPinnedList();
+  void confirmPin(std::int64_t id);
+  void confirmUnpin(std::int64_t id);
+  void confirmUnpinAll();
+  void confirmHidePinned();
+
   Td::Store &_store;
   const Td::ChatId _chat;
   const std::int32_t _topic;
@@ -193,6 +222,13 @@ class ChatView final {
   GtkWidget *_replyIcon = nullptr;
   GtkWidget *_replyTitle = nullptr;
   GtkWidget *_replyText = nullptr;
+  GtkWidget *_pinnedBar = nullptr;
+  GtkWidget *_pinnedTitle = nullptr;
+  GtkWidget *_pinnedText = nullptr;
+  GtkWidget *_pinnedPreview = nullptr;
+  GtkWidget *_pinnedListButton = nullptr;
+  GtkWidget *_pinnedClose = nullptr;
+  GtkWidget *_pinnedDialog = nullptr;  // The list of them while it is open.
   SignalConnections _signals;
 
   std::vector<std::unique_ptr<MessageItem>> _items;
@@ -237,11 +273,23 @@ class ChatView final {
   std::int64_t _savedDraftReply = 0;
   gint64 _lastTyping = 0;
 
+  Td::Lifetime _pinnedLifetime;         // Ends with the search of the pinned messages it was for.
+  std::vector<std::int64_t> _pinnedIds;  // Oldest first.
+  int _pinnedTotal = 0;
+  bool _pinnedLoaded = false;
+  std::int64_t _pinnedAround = std::numeric_limits<std::int64_t>::max();  // The bar shows the last one before it.
+  std::int64_t _pinnedCurrent = 0;
+  std::int64_t _pinnedClicked = 0;  // Shown with a tap on the bar: the bar goes on to the one before it.
+  Td::api::object_ptr<Td::api::message> _pinnedMessage;  // The one the bar shows, once it came.
+  Td::FileId _pinnedFile = 0;  // Its picture, being downloaded.
+  double _lastScrollValue = 0.;
+
   Timer _readTimer;
   Timer _statusTimer;
   Timer _reserveTimer;
   Timer _jumpTimer;
   Timer _draftTimer;
+  Timer _pinnedTimer;  // Pins changed in a group with topics: which of them are this topic's is asked again.
 };
 
 }  // namespace Contrail

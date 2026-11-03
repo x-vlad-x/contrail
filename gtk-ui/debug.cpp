@@ -9,6 +9,10 @@
 //   forward (the newest message of the open chat: the chats to choose from) | forward-pick N (row N of the chats
 //   shown) | forward-pick-topic N (of the group's topics) | forward-search TEXT | forward-enter | forward-picker
 //   (what it shows) | forward-mode names|no-names | forward-cancel | forward-menu (of the messages waiting)
+//   menu [N] (of message N, its server number; the newest without it) | pin [N] | unpin [N] (the question comes)
+//   pinned-state | pinned-bar (a tap on it) | pinned-close (its cross) | pinned-list (all of them) | pinned-list-state
+//   pinned-list-pick N | pinned-list-action (unpin all, or hide)
+//   dialog (the question shown: its texts and check box) | dialog-check 0|1 | dialog-answer RESPONSE (cancel, pin...)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -53,6 +57,35 @@ void Print(GtkWidget *widget, int depth, std::string &out) {
   }
   for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
     Print(child, depth + 1, out);
+  }
+}
+
+// The question in front, if there is one.
+AdwAlertDialog *ShownAlert(MainWindow &window) {
+  auto *dialog = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(window.widget()));
+  return ADW_IS_ALERT_DIALOG(dialog) ? ADW_ALERT_DIALOG(dialog) : nullptr;
+}
+
+void DialogCommand(MainWindow &window, const std::string &name, const std::string &rest) {
+  auto *alert = ShownAlert(window);
+  if (!alert) {
+    g_message("dialog: none");
+    return;
+  }
+  auto *extra = adw_alert_dialog_get_extra_child(alert);
+  auto *check = GTK_IS_CHECK_BUTTON(extra) ? GTK_CHECK_BUTTON(extra) : nullptr;
+  if (name == "dialog-check") {
+    if (check) gtk_check_button_set_active(check, std::atoi(rest.c_str()) != 0);
+  } else if (name == "dialog-answer") {
+    // As a tap on the button: the answer, then the dialog closes.
+    g_signal_emit_by_name(alert, "response", rest.c_str());
+    adw_dialog_force_close(ADW_DIALOG(alert));
+  } else {
+    const auto heading = adw_alert_dialog_get_heading(alert);
+    const auto body = adw_alert_dialog_get_body(alert);
+    const auto label = check ? gtk_check_button_get_label(check) : nullptr;
+    g_message("dialog: heading=\"%s\" body=\"%s\" check=\"%s\" checked=%d", heading ? heading : "", body ? body : "",
+              label ? label : "", check ? int(gtk_check_button_get_active(check)) : -1);
   }
 }
 
@@ -161,6 +194,26 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugForwardCancel();
   } else if (name == "forward-menu" && window.chatView()) {
     window.chatView()->debugForwardMenu();
+  } else if (name == "menu" && window.chatView()) {
+    window.chatView()->debugMessageMenu(std::atoll(rest.c_str()));
+  } else if ((name == "pin" || name == "unpin") && window.chatView()) {
+    window.chatView()->debugPin(std::atoll(rest.c_str()), name == "pin");
+  } else if (name == "pinned-state" && window.chatView()) {
+    window.chatView()->debugPinnedBar("state");
+  } else if (name == "pinned-bar" && window.chatView()) {
+    window.chatView()->debugPinnedBar("tap");
+  } else if (name == "pinned-close" && window.chatView()) {
+    window.chatView()->debugPinnedBar("close");
+  } else if (name == "pinned-list" && window.chatView()) {
+    window.chatView()->debugPinnedBar("list");
+  } else if (name == "pinned-list-state" && window.chatView()) {
+    window.chatView()->debugPinnedList("state");
+  } else if (name == "pinned-list-pick" && window.chatView()) {
+    window.chatView()->debugPinnedList("pick " + rest);
+  } else if (name == "pinned-list-action" && window.chatView()) {
+    window.chatView()->debugPinnedList("action");
+  } else if (name == "dialog" || name == "dialog-check" || name == "dialog-answer") {
+    DialogCommand(window, name, rest);
   } else if (name == "state" && window.chatView()) {
     window.chatView()->debugState();
   } else if (name == "scroll" && window.chatView()) {

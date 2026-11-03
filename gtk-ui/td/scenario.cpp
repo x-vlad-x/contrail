@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,7 +27,8 @@ constexpr auto kGroupId = std::int64_t(-100);
 constexpr auto kChannelId = std::int64_t(-200);
 constexpr auto kPublicChatId = std::int64_t(-300);
 // A group with topics, below the friends: General, a pinned closed one, one with unread messages and a mention, a
-// muted one. Sending "/in N text" in it brings "text" from somebody into topic N, "/unforum" turns the topics off.
+// muted one. Sending "/in N text" in it brings "text" from somebody into topic N, "/unforum" turns the topics off,
+// "/pin N" has an admin pin message N of the topic it is sent in.
 constexpr auto kForumId = std::int64_t(-400);
 constexpr auto kForumGroupId = std::int64_t(400);
 constexpr auto kForumOrder = std::int64_t(1) << 31;
@@ -36,6 +38,10 @@ constexpr auto kPinnedOrder = std::int64_t(1) << 62;
 constexpr auto kNewMessageEveryMs = 5000;
 // Message ids in TDLib are server ids shifted by 20 bits.
 constexpr auto kIdStep = std::int64_t(1) << 20;
+// Pinned messages: three in Friend 1's chat (the middle one a photo, whatever CONTRAIL_SCENARIO_PHOTOS says), one in
+// Friend 2's, one in the group's topic Random. Nobody but its admins may pin in the group: there the bar can only be
+// hidden.
+constexpr auto kPinnedPhoto = 70;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -152,6 +158,21 @@ api::object_ptr<api::photoSize> PhotoSize(int index, const char *type, int width
   return size;
 }
 
+// The blurred picture a message carries: a JPEG of a few hundred bytes.
+api::object_ptr<api::minithumbnail> MiniThumbnail() {
+  auto *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 40, 30);
+  gdk_pixbuf_fill(pixbuf, 0x3080c0ff);
+  gchar *buffer = nullptr;
+  gsize length = 0;
+  auto result = api::object_ptr<api::minithumbnail>();
+  if (gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &length, "jpeg", nullptr, "quality", "40", nullptr)) {
+    result = api::make_object<api::minithumbnail>(40, 30, std::string(buffer, length));
+  }
+  g_free(buffer);
+  g_object_unref(pixbuf);
+  return result;
+}
+
 api::object_ptr<api::MessageContent> PhotoContent(int index) {
   auto photo = api::make_object<api::photo>();
   photo->sizes_.push_back(PhotoSize(index, "m", 320, 240));
@@ -196,7 +217,7 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
-    if (forumRequest(id, *function)) return;
+    if (forumRequest(id, *function) || pinnedRequest(id, *function)) return;
     switch (function->get_id()) {
       case api::setTdlibParameters::ID:
         answer(id, api::make_object<api::ok>());
@@ -311,6 +332,8 @@ class ScenarioTransport final : public Transport {
         properties->can_be_replied_ = true;
         properties->can_be_deleted_for_all_users_ = true;
         properties->can_be_deleted_only_for_self_ = true;
+        const auto chat = static_cast<api::getMessageProperties &>(*function).chat_id_;
+        properties->can_be_pinned_ = chat != kForumId && chat != kChannelId;
         answer(id, std::move(properties));
         break;
       }
@@ -547,12 +570,19 @@ class ScenarioTransport final : public Transport {
     const auto sender = index % 3 == 0 ? kSelfId : chatId;
     auto message = MakeMessage(chatId, index * kIdStep, sender, kNow - (MessagesInChat() - index) * 600, MessageText(index));
     if (WithPhotos() && index % 4 == 1) message->content_ = PhotoContent(index);
+    if (chatId == 1 && index == kPinnedPhoto) {
+      auto photo = api::move_object_as<api::messagePhoto>(PhotoContent(index));
+      photo->photo_->minithumbnail_ = MiniThumbnail();
+      photo->caption_ = Formatted("Pinned photo");
+      message->content_ = std::move(photo);
+    }
     // Every seventh message answers the one before it.
     if (index % 7 == 0) {
       message->reply_to_ = api::make_object<api::messageReplyToMessage>(
           chatId, (index - 1) * kIdStep, nullptr, 0, std::string(), nullptr, 0, nullptr);
     }
     applyEntry(*message);
+    message->is_pinned_ = isPinned(chatId, message->id_);
     return message;
   }
 
@@ -706,6 +736,104 @@ class ScenarioTransport final : public Transport {
   }
 
 
+  // --- pinned messages -----------------------------------------------------------
+
+  bool isPinned(std::int64_t chat, std::int64_t id) const {
+    const auto it = _pinned.find(chat);
+    return it != _pinned.end() && it->second.contains(id);
+  }
+
+  api::object_ptr<api::message> anyMessage(std::int64_t chat, std::int64_t id) {
+    if (chat == kForumId) {
+      const auto topic = TopicOfId(id);
+      const auto index = IndexOfId(id);
+      return topicMessage(topic, index, index > kTopicMessages ? _sentTexts[id] : "");
+    }
+    return messageAt(chat, int(id / kIdStep));
+  }
+
+  void setPinned(std::int64_t chat, std::int64_t id, bool pinned) {
+    auto &ids = _pinned[chat];
+    if (pinned ? !ids.insert(id).second : !ids.erase(id)) return;
+    update(api::make_object<api::updateMessageIsPinned>(chat, id, pinned));
+  }
+
+  // Newest first, as TDLib answers; from_message_id itself is left out.
+  ObjectPtr searchPinned(const api::searchChatMessages &request) {
+    auto ids = std::vector<std::int64_t>();
+    if (const auto it = _pinned.find(request.chat_id_); it != _pinned.end()) {
+      const auto topic = request.topic_id_ && request.topic_id_->get_id() == api::messageTopicForum::ID
+          ? static_cast<const api::messageTopicForum &>(*request.topic_id_).forum_topic_id_ : 0;
+      for (const auto id : it->second) {
+        if (!topic || TopicOfId(id) == topic) ids.push_back(id);
+      }
+    }
+    std::ranges::sort(ids, std::greater<>());
+    auto result = api::make_object<api::foundChatMessages>();
+    result->total_count_ = int(ids.size());
+    for (const auto id : ids) {
+      if (request.from_message_id_ && id >= request.from_message_id_) continue;
+      if (int(result->messages_.size()) == request.limit_) {
+        result->next_from_message_id_ = result->messages_.back()->id_;
+        break;
+      }
+      result->messages_.push_back(anyMessage(request.chat_id_, id));
+    }
+    return result;
+  }
+
+  bool pinnedRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::searchChatMessages::ID: {
+        auto &request = static_cast<api::searchChatMessages &>(function);
+        if (!request.filter_ || request.filter_->get_id() != api::searchMessagesFilterPinned::ID) return false;
+        answer(id, searchPinned(request));
+        return true;
+      }
+      case api::getChatPinnedMessage::ID: {
+        const auto chat = static_cast<api::getChatPinnedMessage &>(function).chat_id_;
+        const auto it = _pinned.find(chat);
+        if (it == _pinned.end() || it->second.empty()) answer(id, api::make_object<api::error>(404, "Not Found"));
+        else answer(id, anyMessage(chat, *it->second.rbegin()));
+        return true;
+      }
+      case api::pinChatMessage::ID: {
+        const auto &request = static_cast<api::pinChatMessage &>(function);
+        if (request.chat_id_ == kForumId || request.chat_id_ == kChannelId) {
+          answer(id, api::make_object<api::error>(400, "CHAT_ADMIN_REQUIRED"));
+          return true;
+        }
+        setPinned(request.chat_id_, request.message_id_, true);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::unpinChatMessage::ID: {
+        const auto &request = static_cast<api::unpinChatMessage &>(function);
+        setPinned(request.chat_id_, request.message_id_, false);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::unpinAllChatMessages::ID: {
+        const auto chat = static_cast<api::unpinAllChatMessages &>(function).chat_id_;
+        const auto ids = _pinned[chat];
+        for (const auto message : ids) setPinned(chat, message, false);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::unpinAllForumTopicMessages::ID: {
+        const auto &request = static_cast<api::unpinAllForumTopicMessages &>(function);
+        const auto ids = _pinned[request.chat_id_];
+        for (const auto message : ids) {
+          if (TopicOfId(message) == request.forum_topic_id_) setPinned(request.chat_id_, message, false);
+        }
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
   // --- the group with topics ---------------------------------------------------
 
   struct Topic {
@@ -741,6 +869,7 @@ class ScenarioTransport final : public Transport {
                                text.empty() ? "Topic " + std::to_string(topic) + ", message " + std::to_string(index) : text);
     message->topic_id_ = api::make_object<api::messageTopicForum>(topic);
     applyEntry(*message);
+    message->is_pinned_ = isPinned(kForumId, id);
     return message;
   }
 
@@ -881,6 +1010,10 @@ class ScenarioTransport final : public Transport {
     if (text == "/unforum") {
       supergroup(false);
       return api::make_object<api::error>(400, "Scenario: the group has no topics now");
+    }
+    if (text.rfind("/pin ", 0) == 0) {
+      setPinned(kForumId, TopicMessageId(topicId, std::atoi(text.c_str() + 5)), true);
+      return api::make_object<api::error>(400, "Scenario: pinned by an admin");
     }
     auto incoming = text.rfind("/in ", 0) == 0;
     auto into = findTopic(topicId);
@@ -1061,6 +1194,11 @@ class ScenarioTransport final : public Transport {
   std::vector<Topic> _topics;
   std::map<std::int64_t, std::string> _sentTexts;  // What was written in the topics, by message id.
   std::map<std::pair<std::int64_t, std::int64_t>, Entry> _entries;  // By chat and message id.
+  std::map<std::int64_t, std::set<std::int64_t>> _pinned = {
+      {1, {30 * kIdStep, kPinnedPhoto * kIdStep, 100 * kIdStep}},
+      {2, {50 * kIdStep}},
+      {kForumId, {(10 * 10 + 3) * kIdStep}},
+  };
   bool _selfAdded = false;
 };
 

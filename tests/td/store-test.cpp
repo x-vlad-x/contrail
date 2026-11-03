@@ -307,6 +307,44 @@ void TopicsOfAGroupHeld() {
   g_assert_true(f.store.topics(kChat).empty());
 }
 
+// Who may pin: anybody in a private chat, in a group the members if everybody may, otherwise by their own rights.
+void PinRights() {
+  auto f = Fixture();
+  f.addChat(1, 10);
+  g_assert_true(f.store.canPin(*f.store.chat(1)));
+
+  constexpr auto kGroup = std::int64_t(-500);
+  auto chat = api::make_object<api::chat>();
+  chat->id_ = kGroup;
+  chat->type_ = api::make_object<api::chatTypeSupergroup>(500, false);
+  chat->permissions_ = api::make_object<api::chatPermissions>();
+  f.update(api::make_object<api::updateNewChat>(std::move(chat)));
+  const auto group = [&](api::object_ptr<api::ChatMemberStatus> status, bool channel = false) {
+    auto supergroup = api::make_object<api::supergroup>();
+    supergroup->id_ = 500;
+    supergroup->is_channel_ = channel;
+    supergroup->status_ = std::move(status);
+    f.update(api::make_object<api::updateSupergroup>(std::move(supergroup)));
+    return f.store.canPin(*f.store.chat(kGroup));
+  };
+  g_assert_false(group(api::make_object<api::chatMemberStatusMember>()));
+  auto everybody = api::make_object<api::chatPermissions>();
+  everybody->can_pin_messages_ = true;
+  f.update(api::make_object<api::updateChatPermissions>(kGroup, std::move(everybody)));
+  g_assert_true(group(api::make_object<api::chatMemberStatusMember>()));
+  // Restricted: its own permissions say, whatever the others may.
+  g_assert_false(group(api::make_object<api::chatMemberStatusRestricted>(true, 0, api::make_object<api::chatPermissions>())));
+  auto rights = api::make_object<api::chatAdministratorRights>();
+  rights->can_edit_messages_ = true;
+  g_assert_false(group(api::make_object<api::chatMemberStatusAdministrator>(false, std::move(rights))));
+  // In a channel pinning goes with editing.
+  rights = api::make_object<api::chatAdministratorRights>();
+  rights->can_edit_messages_ = true;
+  g_assert_true(group(api::make_object<api::chatMemberStatusAdministrator>(false, std::move(rights)), true));
+  g_assert_false(group(api::make_object<api::chatMemberStatusMember>(), true));
+  g_assert_true(group(api::make_object<api::chatMemberStatusCreator>(false, true)));
+}
+
 }  // namespace
 }  // namespace Contrail
 
@@ -328,5 +366,6 @@ int main(int argc, char **argv) {
   g_test_add_func("/store/unread-chats", UnreadChatsReachTheList);
   g_test_add_func("/store/list-dates", ListDates);
   g_test_add_func("/store/topics", TopicsOfAGroupHeld);
+  g_test_add_func("/store/pin-rights", PinRights);
   return g_test_run();
 }

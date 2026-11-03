@@ -88,29 +88,39 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
   group.member = true;
   group.canPost = !channel;
   group.manageTopics = false;
+  group.canPin = false;
+  group.pinAsMembers = !channel;
   if (!status) return;
   switch (status->get_id()) {
     case api::chatMemberStatusCreator::ID:
       group.member = static_cast<const api::chatMemberStatusCreator &>(*status).is_member_;
       group.canPost = true;
       group.manageTopics = true;
+      group.canPin = true;
+      group.pinAsMembers = false;
       break;
     case api::chatMemberStatusAdministrator::ID: {
       const auto &rights = static_cast<const api::chatMemberStatusAdministrator &>(*status).rights_;
       group.canPost = !channel || (rights && rights->can_post_messages_);
       group.manageTopics = rights && rights->can_manage_topics_;
+      // In a channel pinning goes with editing messages.
+      group.canPin = rights && (channel ? rights->can_edit_messages_ : rights->can_pin_messages_);
+      group.pinAsMembers = false;
       break;
     }
     case api::chatMemberStatusRestricted::ID: {
       const auto &restricted = static_cast<const api::chatMemberStatusRestricted &>(*status);
       group.member = restricted.is_member_;
       group.canPost = restricted.permissions_ && restricted.permissions_->can_send_basic_messages_;
+      group.canPin = restricted.permissions_ && restricted.permissions_->can_pin_messages_;
+      group.pinAsMembers = false;
       break;
     }
     case api::chatMemberStatusLeft::ID:
     case api::chatMemberStatusBanned::ID:
       group.member = false;
       group.canPost = false;
+      group.pinAsMembers = false;
       break;
     default: break;
   }
@@ -171,6 +181,14 @@ bool Store::canWrite(const Chat &chat) const {
   const auto known = group(chat);
   if (chat.kind == ChatKind::Channel) return known && known->canPost;
   return chat.canSendBasic && (!known || known->canPost);
+}
+
+bool Store::canPin(const Chat &chat) const {
+  if (chat.kind == ChatKind::Private) return true;
+  if (chat.kind == ChatKind::Secret) return false;
+  const auto known = group(chat);
+  if (!known) return false;
+  return known->pinAsMembers ? chat.canPinAll : known->canPin;
 }
 
 const File *Store::file(FileId id) const {
@@ -405,6 +423,7 @@ void Store::addChat(api::chat &source) {
   chat.draft = DraftText(source.draft_message_);
   chat.draftReplyTo = DraftReplyTo(source.draft_message_);
   chat.canSendBasic = !source.permissions_ || source.permissions_->can_send_basic_messages_;
+  chat.canPinAll = source.permissions_ && source.permissions_->can_pin_messages_;
   if (const auto type = source.type_.get()) {
     switch (type->get_id()) {
       case api::chatTypePrivate::ID:
@@ -578,6 +597,7 @@ void Store::updated(api::Update &update) {
       auto &data = static_cast<api::updateChatPermissions &>(update);
       withChat(data.chat_id_, [&](Chat &chat) {
         chat.canSendBasic = !data.permissions_ || data.permissions_->can_send_basic_messages_;
+        chat.canPinAll = data.permissions_ && data.permissions_->can_pin_messages_;
       });
       break;
     }

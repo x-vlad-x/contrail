@@ -1,9 +1,11 @@
 #include "chat_view.hpp"
 
 #include "forward.hpp"
+#include "local_state.hpp"
 #include "main_window.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
+#include "picture_decode.hpp"
 #include "scroll_helpers.hpp"
 #include "td/chat_row.hpp"
 #include "td/dates.hpp"
@@ -50,6 +52,9 @@ constexpr auto kTypingPeriod = gint64(5) * G_USEC_PER_SEC;
 // A server message id is the server's number shifted by 20 bits. History asked from the first one is the start of a
 // chat, whichever messages are left there.
 constexpr auto kFirstMessageId = std::int64_t(1) << 20;
+constexpr auto kPinnedPreviewSize = 36;
+constexpr auto kPinnedPage = 100;
+constexpr auto kNoMessage = std::numeric_limits<std::int64_t>::max();
 
 void OpenPath(const std::string &path) {
   if (auto *uri = g_filename_to_uri(path.c_str(), nullptr, nullptr)) {
@@ -185,6 +190,104 @@ void DescribeSender(const Td::Store &store, const api::message &message, std::st
   return nullptr;
 }
 
+// A bar under the header, as the phone apps show the pinned message: a tap on it does one thing, the buttons at its
+// end others. In a revealer, to slide in and out.
+[[nodiscard]] GtkWidget *MakeTopBar(const char *cssClass, GtkWidget *prefix, GtkWidget **title, GtkWidget **text,
+                                    std::vector<GtkWidget *> buttons, std::function<void()> tapped) {
+  auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_add_css_class(box, "chat-top-bar");
+  gtk_widget_add_css_class(box, cssClass);
+  if (prefix) {
+    gtk_widget_set_valign(prefix, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(box), prefix);
+  }
+  auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_widget_add_css_class(column, "top-bar-text");
+  gtk_widget_set_hexpand(column, TRUE);
+  gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
+  *title = gtk_label_new(nullptr);
+  gtk_widget_add_css_class(*title, "top-bar-title");
+  gtk_label_set_xalign(GTK_LABEL(*title), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(*title), PANGO_ELLIPSIZE_END);
+  gtk_box_append(GTK_BOX(column), *title);
+  *text = gtk_label_new(nullptr);
+  gtk_label_set_xalign(GTK_LABEL(*text), 0);
+  gtk_label_set_ellipsize(GTK_LABEL(*text), PANGO_ELLIPSIZE_END);
+  gtk_label_set_single_line_mode(GTK_LABEL(*text), TRUE);
+  gtk_box_append(GTK_BOX(column), *text);
+  gtk_box_append(GTK_BOX(box), column);
+  for (auto *button : buttons) {
+    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(box), button);
+  }
+  // The buttons claim their own taps.
+  auto *click = gtk_gesture_click_new();
+  Connect<void(GtkGestureClick *, int, double, double)>(click, "released",
+                                                        [tapped](GtkGestureClick *, int, double, double) { tapped(); });
+  gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
+  auto *revealer = gtk_revealer_new();
+  gtk_revealer_set_transition_type(GTK_REVEALER(revealer), GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+  gtk_revealer_set_child(GTK_REVEALER(revealer), box);
+  return revealer;
+}
+
+// The small picture of a message for the pinned bar: the blurred one it carries, and the file of a size that covers
+// the bar's square (or the largest there is). Null where it has none: text, stickers, a hidden spoiler.
+struct PinnedPicture {
+  const api::minithumbnail *mini = nullptr;
+  const api::file *file = nullptr;
+};
+
+[[nodiscard]] const api::file *ThumbnailFile(const api::object_ptr<api::thumbnail> &thumbnail) {
+  return thumbnail ? thumbnail->file_.get() : nullptr;
+}
+
+[[nodiscard]] PinnedPicture PinnedPictureOf(const api::message &message, int pixels) {
+  const auto content = message.content_.get();
+  if (const auto photo = Cast<api::messagePhoto>(content); photo && photo->photo_) {
+    auto result = PinnedPicture{photo->photo_->minithumbnail_.get()};
+    if (photo->has_spoiler_) return result;
+    const api::photoSize *best = nullptr;
+    for (const auto &size : photo->photo_->sizes_) {
+      if (!size || !size->photo_) continue;
+      const auto covers = std::min(size->width_, size->height_) >= pixels;
+      const auto bestCovers = best && std::min(best->width_, best->height_) >= pixels;
+      // The smallest that covers it, or the largest of those that don't.
+      if (!best || (covers && (!bestCovers || size->width_ < best->width_))
+          || (!covers && !bestCovers && size->width_ > best->width_)) {
+        best = size.get();
+      }
+    }
+    result.file = best ? best->photo_.get() : nullptr;
+    return result;
+  }
+  if (const auto video = Cast<api::messageVideo>(content); video && video->video_) {
+    if (video->has_spoiler_) return {video->video_->minithumbnail_.get()};
+    return {video->video_->minithumbnail_.get(), ThumbnailFile(video->video_->thumbnail_)};
+  }
+  if (const auto animation = Cast<api::messageAnimation>(content); animation && animation->animation_) {
+    if (animation->has_spoiler_) return {animation->animation_->minithumbnail_.get()};
+    return {animation->animation_->minithumbnail_.get(), ThumbnailFile(animation->animation_->thumbnail_)};
+  }
+  if (const auto note = Cast<api::messageVideoNote>(content); note && note->video_note_) {
+    return {note->video_note_->minithumbnail_.get(), ThumbnailFile(note->video_note_->thumbnail_)};
+  }
+  if (const auto document = Cast<api::messageDocument>(content); document && document->document_) {
+    return {document->document_->minithumbnail_.get(), ThumbnailFile(document->document_->thumbnail_)};
+  }
+  if (const auto audio = Cast<api::messageAudio>(content); audio && audio->audio_) {
+    return {audio->audio_->album_cover_minithumbnail_.get(), ThumbnailFile(audio->audio_->album_cover_thumbnail_)};
+  }
+  return {};
+}
+
+[[nodiscard]] api::object_ptr<api::searchChatMessages> SearchPinned(Td::ChatId chat,
+                                                                    api::object_ptr<api::MessageTopic> topic,
+                                                                    std::int64_t from) {
+  return api::make_object<api::searchChatMessages>(chat, std::move(topic), std::string(), nullptr, from, 0, kPinnedPage,
+                                                   api::make_object<api::searchMessagesFilterPinned>());
+}
+
 [[nodiscard]] GtkListBoxRow *NextRow(GtkListBoxRow *row) {
   return gtk_list_box_get_row_at_index(GTK_LIST_BOX(gtk_widget_get_parent(GTK_WIDGET(row))),
                                        gtk_list_box_row_get_index(row) + 1);
@@ -216,11 +319,12 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
         _statusTimer.callOnce(kStatusPeriod);
       }),
       _reserveTimer([this] { maintainTopReserve(); }), _jumpTimer([this] { scheduleViewportUpdate(); }),
-      _draftTimer([this] { saveDraft(); }) {
+      _draftTimer([this] { saveDraft(); }), _pinnedTimer([this] { loadPinned(); }) {
   _root = adw_toolbar_view_new();
   g_object_ref_sink(_root);
   adw_toolbar_view_set_bottom_bar_style(ADW_TOOLBAR_VIEW(_root), ADW_TOOLBAR_RAISED);
   buildHeader();
+  buildPinnedBar();
   buildList();
   buildComposer();
   refreshHeader();
@@ -231,6 +335,7 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
   _signals.connect<void(GObject *, GParamSpec *)>(_window.widget(), "notify::is-active",
                                                   [this](GObject *, GParamSpec *) { _readTimer.callOnce(300); });
   subscribe();
+  loadPinned();
 
   // TDLib keeps a chat's messages up to date while it is open, and needs that to count views.
   _store.client().send(api::make_object<api::openChat>(_chat));
@@ -282,6 +387,7 @@ void ChatView::start() {
 }
 
 ChatView::~ChatView() {
+  if (_pinnedDialog) adw_dialog_force_close(ADW_DIALOG(_pinnedDialog));
   _signals.clear();
   if (_viewportSource) g_source_remove(_viewportSource);
   if (_closeSource) g_source_remove(_closeSource);
@@ -310,6 +416,10 @@ void ChatView::subscribe() {
     if (known && known->kind == Td::ChatKind::Private && known->peerId == id) refreshHeader();
   }, _lifetime);
   _store.onFile([this](const Td::File &file) {
+    if (_pinnedFile && file.id == _pinnedFile && file.complete) {
+      _pinnedFile = 0;
+      showPinnedPicture(file.path);
+    }
     for (const auto &[raw, row] : _rows) row->fileChanged(file);
   }, _lifetime);
 }
@@ -386,6 +496,7 @@ void ChatView::updated(api::Update &update) {
       auto &data = static_cast<api::updateMessageContent &>(update);
       refresh(data.chat_id_, data.message_id_,
               [&](api::message &message) { message.content_ = std::move(data.new_content_); });
+      if (data.chat_id_ == _chat && data.message_id_ == _pinnedCurrent) fetchPinnedMessage();
       break;
     }
     case api::updateMessageEdited::ID: {
@@ -409,12 +520,16 @@ void ChatView::updated(api::Update &update) {
       auto &data = static_cast<api::updateMessageIsPinned &>(update);
       if (data.chat_id_ != _chat) break;
       if (const auto item = find(data.message_id_)) item->data->is_pinned_ = data.is_pinned_;
+      pinnedChanged(data.message_id_, data.is_pinned_);
       break;
     }
     case api::updateDeleteMessages::ID: {
       auto &data = static_cast<api::updateDeleteMessages &>(update);
       // Not permanent: TDLib only dropped them from its memory, or they were being sent.
-      if (data.chat_id_ == _chat && data.is_permanent_) remove(data.message_ids_);
+      if (data.chat_id_ == _chat && data.is_permanent_) {
+        remove(data.message_ids_);
+        for (const auto id : data.message_ids_) pinnedChanged(id, false);
+      }
       break;
     }
     default: break;
@@ -469,6 +584,467 @@ void ChatView::refreshHeader() {
   if (const auto action = Td::TypingText(*known, _store); !action.empty()) status = action;
   adw_window_title_set_title(ADW_WINDOW_TITLE(_title), name.c_str());
   adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), status.c_str());
+}
+
+// --- pinned messages -------------------------------------------------------------
+
+void ChatView::buildPinnedBar() {
+  // A GtkImage keeps its size whatever the picture: a GtkPicture's height follows its width, which the bar's layout
+  // must not depend on.
+  _pinnedPreview = gtk_image_new();
+  gtk_image_set_pixel_size(GTK_IMAGE(_pinnedPreview), kPinnedPreviewSize);
+  gtk_widget_set_size_request(_pinnedPreview, kPinnedPreviewSize, kPinnedPreviewSize);
+  gtk_widget_add_css_class(_pinnedPreview, "pinned-preview");
+  gtk_widget_set_overflow(_pinnedPreview, GTK_OVERFLOW_HIDDEN);
+  gtk_widget_set_visible(_pinnedPreview, FALSE);
+  _pinnedListButton = MakeIconButton(
+      "view-list-bullet-symbolic",
+      Translated("All Pinned Messages", "Все закреплённые сообщения", "Усі закріплені повідомлення").c_str(), "flat");
+  gtk_widget_add_css_class(_pinnedListButton, "circular");
+  _signals.clicked(_pinnedListButton, [this] { showPinnedList(); });
+  _pinnedClose = MakeIconButton("window-close-symbolic", Tr("lng_pinned_hide_all_hide").c_str(), "flat");
+  gtk_widget_add_css_class(_pinnedClose, "circular");
+  _signals.clicked(_pinnedClose, [this] { pinnedCloseClicked(); });
+  const auto token = _lifetime.token();
+  _pinnedBar = MakeTopBar("pinned-bar", _pinnedPreview, &_pinnedTitle, &_pinnedText, {_pinnedListButton, _pinnedClose},
+                          [this, token] {
+                            if (!token.expired()) pinnedBarClicked();
+                          });
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _pinnedBar);
+}
+
+// All the ids, a page after another: a chat rarely has more than a few, and the bar counts and walks them.
+void ChatView::loadPinned() {
+  _pinnedLifetime.reset();
+  _pinnedTimer.cancel();
+  const auto first = std::make_shared<bool>(true);
+  // The request waiting for its answer holds the loop; the loop itself holds nothing.
+  const auto next = std::make_shared<std::function<void(std::int64_t)>>();
+  *next = [this, first, weak = std::weak_ptr(next)](std::int64_t from) {
+    const auto strong = weak.lock();
+    if (!strong) return;
+    _store.client().request<api::foundChatMessages>(
+        SearchPinned(_chat, topicObject(), from), _pinnedLifetime,
+        [this, first, strong](api::foundChatMessages &found) {
+          pinnedPage(found, std::exchange(*first, false));
+          if (found.next_from_message_id_ && !found.messages_.empty()
+              && int(_pinnedIds.size()) < found.total_count_) {
+            (*strong)(found.next_from_message_id_);
+          }
+        },
+        [](api::error &) {});
+  };
+  (*next)(0);
+}
+
+void ChatView::pinnedPage(api::foundChatMessages &found, bool first) {
+  if (first) _pinnedIds.clear();
+  for (const auto &message : found.messages_) {
+    if (message) _pinnedIds.push_back(message->id_);
+  }
+  std::ranges::sort(_pinnedIds);
+  const auto [end, last] = std::ranges::unique(_pinnedIds);
+  _pinnedIds.erase(end, last);
+  _pinnedTotal = std::max(found.total_count_, int(_pinnedIds.size()));
+  _pinnedLoaded = true;
+  updatePinnedViewer();
+  refreshPinnedBar();
+}
+
+void ChatView::pinnedChanged(std::int64_t id, bool pinned) {
+  if (!_pinnedLoaded) return;
+  if (_topic) {
+    // Which topic the message is in isn't told: the topic's pinned ones are asked for again, once for many changes.
+    if (pinned || std::ranges::binary_search(_pinnedIds, id)) _pinnedTimer.callOnce(300);
+    return;
+  }
+  const auto i = std::ranges::lower_bound(_pinnedIds, id);
+  const auto has = i != _pinnedIds.end() && *i == id;
+  if (pinned == has) return;
+  if (pinned) {
+    _pinnedIds.insert(i, id);
+    ++_pinnedTotal;
+  } else {
+    _pinnedIds.erase(i);
+    _pinnedTotal = std::max(_pinnedTotal - 1, int(_pinnedIds.size()));
+    if (_pinnedClicked == id) _pinnedClicked = 0;
+  }
+  updatePinnedViewer();
+  refreshPinnedBar();
+}
+
+// The bar shows the last message pinned above the bottom of the screen (HistoryWidget::updatePinnedViewer).
+void ChatView::updatePinnedViewer() {
+  auto lessThan = kNoMessage;
+  if (_initialLoaded && !_stickToBottom && !atBottom()) {
+    auto bottom = std::int64_t(0);
+    const auto page = gtk_adjustment_get_page_size(_adjustment);
+    for (const auto row : visibleRows()) {
+      for (const auto item : row->items()) {
+        if (item->local() || item->id() <= bottom) continue;
+        auto *widget = row->widgetFor(item);
+        double y = 0;
+        const auto height = widget ? gtk_widget_get_height(widget) : 0;
+        if (height > 0 && WidgetViewportY(widget, _scroll, y) && y + height > 0 && y < page) bottom = item->id();
+      }
+    }
+    // None on the screen: it is in the room above the rows, older ones are on the way. The bar stays.
+    lessThan = bottom ? bottom + 1 : _pinnedAround;
+  }
+  if (_pinnedClicked && !_scrollTarget && lessThan <= _pinnedClicked) {
+    // Scrolled above the message shown with the bar.
+    _pinnedClicked = 0;
+  }
+  if (_pinnedClicked && !_pinnedIds.empty() && _pinnedIds.front() >= _pinnedClicked) {
+    // The oldest one was shown: round to the newest again.
+    setPinnedAround(kNoMessage);
+  } else {
+    setPinnedAround(_pinnedClicked ? std::min(lessThan, _pinnedClicked) : lessThan);
+  }
+}
+
+void ChatView::setPinnedAround(std::int64_t around) {
+  _pinnedAround = around;
+  auto current = std::int64_t(0);
+  if (!_pinnedIds.empty()) {
+    const auto i = std::ranges::lower_bound(_pinnedIds, around);
+    current = (i != _pinnedIds.begin()) ? *(i - 1) : _pinnedIds.front();
+  }
+  if (current == _pinnedCurrent) return;
+  _pinnedCurrent = current;
+  if (!current) {
+    _pinnedMessage = nullptr;
+    setPinnedPreview();
+    refreshPinnedBar();
+    return;
+  }
+  // The bar keeps showing the one before until this one comes: no blink on a tap.
+  fetchPinnedMessage();
+}
+
+void ChatView::fetchPinnedMessage() {
+  const auto id = _pinnedCurrent;
+  _store.client().send(
+      api::make_object<api::getMessage>(_chat, id),
+      [this, id](Td::ObjectPtr object) {
+        if (id != _pinnedCurrent) return;
+        if (!object || object->get_id() != api::message::ID) {
+          // Gone, or not available any more: the bar goes on to another one.
+          pinnedChanged(id, false);
+          return;
+        }
+        _pinnedMessage = api::move_object_as<api::message>(object);
+        setPinnedPreview();
+        refreshPinnedBar();
+      },
+      _lifetime);
+}
+
+int ChatView::pinnedIndex() const {
+  if (!_pinnedMessage) return 0;
+  const auto i = std::ranges::lower_bound(_pinnedIds, _pinnedMessage->id_);
+  return int(i - _pinnedIds.begin());
+}
+
+void ChatView::refreshPinnedBar() {
+  const auto shown = _pinnedMessage && _pinnedCurrent && !pinnedHiddenByUser();
+  gtk_revealer_set_reveal_child(GTK_REVEALER(_pinnedBar), shown);
+  if (!shown) return;
+  // As Telegram Desktop titles them: the newest, the other of two, or the number of an older one.
+  const auto count = std::max(_pinnedTotal, 1);
+  const auto index = std::clamp(pinnedIndex(), 0, count - 1);
+  const auto title = (index + 1 >= count) ? Tr("lng_pinned_message")
+                     : (count == 2)       ? Tr("lng_pinned_previous")
+                                          : Tr("lng_pinned_message") + " #" + std::to_string(index + 1);
+  gtk_label_set_text(GTK_LABEL(_pinnedTitle), title.c_str());
+  gtk_label_set_text(GTK_LABEL(_pinnedText), Td::OneLine(Td::MessagePreview(*_pinnedMessage, _store)).c_str());
+  // Several pinned: the list of them; one: unpin it (or hide the bar, without the right to unpin).
+  gtk_widget_set_visible(_pinnedListButton, _pinnedTotal > 1);
+  gtk_widget_set_visible(_pinnedClose, _pinnedTotal <= 1);
+}
+
+void ChatView::setPinnedPreview() {
+  _pinnedFile = 0;
+  gtk_image_clear(GTK_IMAGE(_pinnedPreview));
+  gtk_widget_set_visible(_pinnedPreview, FALSE);
+  if (!_pinnedMessage) return;
+  const auto pixels = kPinnedPreviewSize * gtk_widget_get_scale_factor(_pinnedBar);
+  const auto picture = PinnedPictureOf(*_pinnedMessage, pixels);
+  if (const auto mini = picture.mini; mini && !mini->data_.empty()) {
+    // A JPEG of a few hundred bytes, shown at once while the file comes.
+    auto *bytes = g_bytes_new(mini->data_.data(), mini->data_.size());
+    if (auto *texture = gdk_texture_new_from_bytes(bytes, nullptr)) {
+      gtk_image_set_from_paintable(GTK_IMAGE(_pinnedPreview), GDK_PAINTABLE(texture));
+      g_object_unref(texture);
+      gtk_widget_set_visible(_pinnedPreview, TRUE);
+    }
+    g_bytes_unref(bytes);
+  }
+  const auto file = picture.file;
+  if (!file) return;
+  if (file->local_ && file->local_->is_downloading_completed_ && !file->local_->path_.empty()) {
+    showPinnedPicture(file->local_->path_);
+  } else if (const auto known = _store.file(file->id_); known && known->complete && !known->path.empty()) {
+    showPinnedPicture(known->path);
+  } else {
+    _pinnedFile = file->id_;
+    _store.download(file->id_, 16);
+  }
+}
+
+// Decoded right here at the bar's size (a thumbnail of a few KB) and cut to its square: a few KB of texture.
+void ChatView::showPinnedPicture(const std::string &path) {
+  const auto pixels = kPinnedPreviewSize * gtk_widget_get_scale_factor(_pinnedBar);
+  const auto options = DecodeOptions{.pixbufFallback = false, .waitForLarge = false};
+  auto *decoded = DecodePictureFile(path.c_str(), pixels, pixels, options);
+  if (!decoded) return;
+  const auto width = gdk_pixbuf_get_width(decoded), height = gdk_pixbuf_get_height(decoded);
+  const auto side = std::min(width, height);
+  auto *square = gdk_pixbuf_new_subpixbuf(decoded, (width - side) / 2, (height - side) / 2, side, side);
+  auto *scaled = gdk_pixbuf_scale_simple(square, pixels, pixels, GDK_INTERP_BILINEAR);
+  g_object_unref(square);
+  g_object_unref(decoded);
+  if (!scaled) return;
+  auto *texture = TextureFromPixbuf(scaled);
+  gtk_image_set_from_paintable(GTK_IMAGE(_pinnedPreview), GDK_PAINTABLE(texture));
+  g_object_unref(texture);
+  gtk_widget_set_visible(_pinnedPreview, TRUE);
+}
+
+void ChatView::pinnedBarClicked() {
+  const auto id = _pinnedCurrent;
+  if (!id) return;
+  _pinnedClicked = id;
+  // A pinned message of an album: the album is shown, the bar goes on before all of it.
+  if (const auto item = find(id); item && item->data->media_album_id_) {
+    for (const auto &other : _items) {
+      if (!other->local() && other->data->media_album_id_ == item->data->media_album_id_) {
+        _pinnedClicked = std::min(_pinnedClicked, other->id());
+      }
+    }
+  }
+  showAt(id);
+  updatePinnedViewer();
+}
+
+void ChatView::pinnedCloseClicked() {
+  const auto id = _pinnedCurrent;
+  if (!id) return;
+  _store.client().request<api::messageProperties>(
+      api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
+      [this, id](api::messageProperties &properties) {
+        if (properties.can_be_pinned_) confirmUnpin(id);
+        else confirmHidePinned();
+      },
+      [this](api::error &) { confirmHidePinned(); });
+}
+
+bool ChatView::canPinMessages() const {
+  const auto known = _store.chat(_chat);
+  return known && _store.canPin(*known);
+}
+
+bool ChatView::pinnedHiddenByUser() const {
+  if (canPinMessages() || _pinnedIds.empty()) return false;
+  return HiddenPinnedMessage(_chat, _topic) == _pinnedIds.back();
+}
+
+void ChatView::confirmPin(std::int64_t id) {
+  const auto known = _store.chat(_chat);
+  if (!known) return;
+  const auto old = !_pinnedIds.empty() && id < _pinnedIds.back();
+  const auto group = known->kind == Td::ChatKind::Group;
+  auto *dialog = adw_alert_dialog_new(
+      Tr(old ? "lng_pinned_pin_old_sure" : group ? "lng_pinned_pin_sure_group" : "lng_pinned_pin_sure").c_str(),
+      nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "pin",
+                                 Tr("lng_pinned_pin").c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "pin", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "pin");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  // As PinMessageBox: for the other person too in a chat with a user, the members notified in a group.
+  GtkWidget *forPeer = nullptr;
+  GtkWidget *notify = nullptr;
+  if (known->kind == Td::ChatKind::Private && known->peerId != _store.selfId()) {
+    const auto user = _store.user(known->peerId);
+    forPeer = gtk_check_button_new_with_label(
+        Tr("lng_pinned_also_for_other", {{"user", user ? user->firstName : known->title}}).c_str());
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), forPeer);
+  } else if (!old && group) {
+    notify = gtk_check_button_new_with_label(Tr("lng_pinned_notify").c_str());
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(notify), TRUE);
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), notify);
+  }
+  // The answer may come after the chat is closed.
+  auto &client = _store.client();
+  const auto chat = _chat;
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=, &client](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "pin") != 0) return;
+    const auto silent = notify && !gtk_check_button_get_active(GTK_CHECK_BUTTON(notify));
+    const auto onlyForSelf = forPeer && !gtk_check_button_get_active(GTK_CHECK_BUTTON(forPeer));
+    client.send(api::make_object<api::pinChatMessage>(chat, id, silent, onlyForSelf), [](Td::ObjectPtr object) {
+      if (object && object->get_id() == api::error::ID) ShowToast(static_cast<api::error &>(*object).message_);
+    });
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+void ChatView::confirmUnpin(std::int64_t id) {
+  auto *dialog = adw_alert_dialog_new(Tr("lng_pinned_unpin_sure").c_str(), nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "unpin",
+                                 Tr("lng_pinned_unpin").c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "unpin", ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  auto &client = _store.client();
+  const auto chat = _chat;
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=, &client](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "unpin") != 0) return;
+    client.send(api::make_object<api::unpinChatMessage>(chat, id), [](Td::ObjectPtr object) {
+      if (object && object->get_id() == api::error::ID) ShowToast(static_cast<api::error &>(*object).message_);
+    });
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+void ChatView::confirmUnpinAll() {
+  auto *dialog = adw_alert_dialog_new(Tr("lng_pinned_unpin_all_sure").c_str(), nullptr);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "unpin",
+                                 Tr("lng_pinned_unpin").c_str(), nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "unpin", ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  auto &client = _store.client();
+  const auto chat = _chat;
+  const auto topic = _topic;
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=, &client](AdwAlertDialog *, const char *response) {
+    if (g_strcmp0(response, "unpin") != 0) return;
+    auto function = topic ? Td::FunctionPtr(api::make_object<api::unpinAllForumTopicMessages>(chat, topic))
+                          : Td::FunctionPtr(api::make_object<api::unpinAllChatMessages>(chat));
+    client.send(std::move(function), [](Td::ObjectPtr object) {
+      if (object && object->get_id() == api::error::ID) ShowToast(static_cast<api::error &>(*object).message_);
+    });
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+// Without the right to unpin: the bar goes away until something new is pinned (HidePinnedBar).
+void ChatView::confirmHidePinned() {
+  auto *dialog = adw_alert_dialog_new(nullptr, Tr("lng_pinned_hide_all_sure").c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "hide",
+                                 Tr("lng_pinned_hide_all_hide").c_str(), nullptr);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  const auto token = _lifetime.token();
+  const auto chat = _chat;
+  const auto topic = _topic;
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=, this](AdwAlertDialog *, const char *response) {
+    if (token.expired() || g_strcmp0(response, "hide") != 0 || _pinnedIds.empty()) return;
+    SetHiddenPinnedMessage(chat, topic, _pinnedIds.back());
+    refreshPinnedBar();
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+// All the pinned messages of the chat, newest first; a tap shows one.
+void ChatView::showPinnedList() {
+  if (_pinnedDialog) return;
+  auto *dialog = adw_dialog_new();
+  _pinnedDialog = GTK_WIDGET(dialog);
+  adw_dialog_set_content_width(ADW_DIALOG(dialog), 480);
+  adw_dialog_set_content_height(ADW_DIALOG(dialog), 900);
+  auto *view = adw_toolbar_view_new();
+  auto *header = adw_header_bar_new();
+  auto *title = adw_window_title_new(Tr("lng_pinned_message").c_str(), nullptr);
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), title);
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
+  auto *list = gtk_list_box_new();
+  gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_NONE);
+  gtk_widget_add_css_class(list, "boxed-list");
+  gtk_widget_set_valign(list, GTK_ALIGN_START);
+  SetMarginAll(list, 12);
+  auto *clamp = adw_clamp_new();
+  adw_clamp_set_child(ADW_CLAMP(clamp), list);
+  auto *scroll = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), clamp);
+  gtk_widget_set_vexpand(scroll, TRUE);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), scroll);
+  // Unpin them all, or (without the right to) hide the bar.
+  const auto canPin = canPinMessages();
+  auto *action = gtk_button_new_with_label(
+      (canPin ? TrCount("lng_pinned_unpin_all", std::max(_pinnedTotal, 1)) : Tr("lng_pinned_hide_all")).c_str());
+  gtk_widget_add_css_class(action, "pill");
+  gtk_widget_add_css_class(action, canPin ? "destructive-action" : "flat");
+  gtk_widget_set_halign(action, GTK_ALIGN_CENTER);
+  SetMarginAll(action, 12);
+  adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(view), action);
+  adw_dialog_set_child(ADW_DIALOG(dialog), view);
+  g_object_set_data(G_OBJECT(dialog), "contrail-list", list);
+  g_object_set_data(G_OBJECT(dialog), "contrail-action", action);
+  g_object_set_data(G_OBJECT(dialog), "contrail-title", title);
+
+  // The requests end with the dialog.
+  struct State {
+    Td::Lifetime lifetime;
+    std::int64_t next = 0;  // Where the next page starts, 0 when there is none.
+    bool loading = false;
+  };
+  auto *state = AttachData(dialog, "contrail-pinned-list", std::make_unique<State>());
+  const auto token = _lifetime.token();
+  Connect<void(AdwDialog *)>(dialog, "closed", [this, token](AdwDialog *) {
+    if (!token.expired()) _pinnedDialog = nullptr;
+  });
+  Connect<void(GtkButton *)>(action, "clicked", [this, token, dialog, canPin](GtkButton *) {
+    adw_dialog_close(ADW_DIALOG(dialog));
+    if (token.expired()) return;
+    if (canPin) confirmUnpinAll();
+    else confirmHidePinned();
+  });
+  Connect<void(GtkListBox *, GtkListBoxRow *)>(list, "row-activated", [this, token, dialog](GtkListBox *, GtkListBoxRow *row) {
+    const auto id = *static_cast<std::int64_t *>(g_object_get_data(G_OBJECT(row), "contrail-message"));
+    adw_dialog_close(ADW_DIALOG(dialog));
+    if (token.expired() || !id) return;
+    _pinnedClicked = id;
+    showAt(id);
+    updatePinnedViewer();
+  });
+  const auto load = std::make_shared<std::function<void(std::int64_t)>>();
+  *load = [this, token, state, list, title](std::int64_t from) {
+    if (state->loading || token.expired()) return;
+    state->loading = true;
+    _store.client().request<api::foundChatMessages>(
+        SearchPinned(_chat, topicObject(), from), state->lifetime,
+        [this, token, state, list, title](api::foundChatMessages &found) {
+          state->loading = false;
+          if (token.expired()) return;
+          state->next = found.messages_.empty() ? 0 : found.next_from_message_id_;
+          if (found.total_count_ > 0) {
+            adw_window_title_set_title(ADW_WINDOW_TITLE(title),
+                                       TrCount("lng_pinned_messages_title", found.total_count_).c_str());
+          }
+          for (const auto &message : found.messages_) {
+            if (!message) continue;
+            auto name = std::string();
+            auto color = 0;
+            DescribeSender(_store, *message, name, color);
+            auto *row = adw_action_row_new();
+            adw_preferences_row_set_title(ADW_PREFERENCES_ROW(row),
+                                          Escape(name + " · " + Td::FormatListDate(message->date_)).c_str());
+            adw_action_row_set_subtitle(ADW_ACTION_ROW(row),
+                                        Escape(Td::OneLine(Td::MessagePreview(*message, _store))).c_str());
+            adw_action_row_set_subtitle_lines(ADW_ACTION_ROW(row), 2);
+            gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
+            AttachData(row, "contrail-message", std::make_unique<std::int64_t>(message->id_));
+            gtk_list_box_append(GTK_LIST_BOX(list), row);
+          }
+        },
+        [state](api::error &) { state->loading = false; });
+  };
+  // The next page near the end of the list.
+  Connect<void(GtkScrolledWindow *, GtkPositionType)>(scroll, "edge-reached",
+                                                      [state, load](GtkScrolledWindow *, GtkPositionType position) {
+    if (position == GTK_POS_BOTTOM && state->next) (*load)(state->next);
+  });
+  (*load)(0);
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
 }
 
 // --- the list ----------------------------------------------------------------
@@ -1132,7 +1708,14 @@ bool ChatView::scrollIdleIgnoringShift() const {
 }
 
 void ChatView::scrolled() {
+  const auto value = gtk_adjustment_get_value(_adjustment);
+  const auto down = value > _lastScrollValue;
+  _lastScrollValue = value;
   if (_adjustingScroll || _applyingPage || !_initialLoaded) return;
+  if (down && _pinnedClicked && !_scrollTarget) {
+    // Scrolled down by hand: the bar follows the screen again.
+    _pinnedClicked = 0;
+  }
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto bottom = atBottom();
@@ -1213,6 +1796,7 @@ void ChatView::updateViewport() {
     return;
   }
   _adjustingScroll = true;
+  const auto before = gtk_adjustment_get_value(_adjustment);
   if (_scrollTarget) {
     const auto item = find(_scrollTarget);
     if (const auto row = item ? rowFor(item) : nullptr) {
@@ -1237,6 +1821,9 @@ void ChatView::updateViewport() {
   gtk_widget_set_visible(_toBottom, !atBottom() && upper > page);
   preloadVisibleEdges();
   updateNearPictures();
+  // The rows are where the new position puts them only after the next allocation: the bar looks at them then.
+  if (gtk_adjustment_get_value(_adjustment) != before) scheduleViewportUpdate();
+  else updatePinnedViewer();
   if (!_readTimer.active()) _readTimer.callOnce(300);
 }
 
@@ -1742,7 +2329,8 @@ void ChatView::sendText(const std::string &text) {
 void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y) {
   const auto id = item.id();
   // What may be done with a message is TDLib's to say. A message being sent has nothing to ask about.
-  const auto show = [this, id, widget, x, y](bool canEdit, bool canForward, bool forAll, bool onlyForSelf) {
+  const auto show = [this, id, widget, x, y](bool canEdit, bool canForward, bool canPin, bool forAll,
+                                             bool onlyForSelf) {
     const auto found = find(id);
     if (!found || !gtk_widget_get_mapped(widget)) return;
     const auto known = _store.chat(_chat);
@@ -1757,6 +2345,10 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     if (!text.empty()) g_menu_append(menu, Tr("lng_context_copy_text").c_str(), "msg.copy");
     if (canForward && !found->local() && !service) {
       g_menu_append(menu, Tr("lng_context_forward_msg").c_str(), "msg.forward");
+    }
+    if (canPin && !found->local() && !service) {
+      g_menu_append(menu, Tr(found->data->is_pinned_ ? "lng_context_unpin_msg" : "lng_context_pin_msg").c_str(),
+                    found->data->is_pinned_ ? "msg.unpin" : "msg.pin");
     }
     if (canEdit) g_menu_append(menu, Tr("lng_context_edit_msg").c_str(), "msg.edit");
     if (forAll || onlyForSelf) g_menu_append(menu, Tr("lng_context_delete_msg").c_str(), "msg.delete");
@@ -1793,22 +2385,24 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     add("edit", [this, id] {
       if (const auto item = find(id)) edit(*item);
     });
+    add("pin", [this, id] { confirmPin(id); });
+    add("unpin", [this, id] { confirmUnpin(id); });
     add("delete", [this, id, forAll, onlyForSelf] { confirmDelete(id, forAll, onlyForSelf); });
     gtk_widget_insert_action_group(popover, "msg", G_ACTION_GROUP(group));
     g_object_unref(group);
     gtk_popover_popup(GTK_POPOVER(popover));
   };
   if (item.local()) {
-    show(false, false, false, true);
+    show(false, false, false, false, true);
     return;
   }
   _store.client().request<api::messageProperties>(
       api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
       [show](api::messageProperties &properties) {
-        show(properties.can_be_edited_, properties.can_be_forwarded_, properties.can_be_deleted_for_all_users_,
-             properties.can_be_deleted_only_for_self_);
+        show(properties.can_be_edited_, properties.can_be_forwarded_, properties.can_be_pinned_,
+             properties.can_be_deleted_for_all_users_, properties.can_be_deleted_only_for_self_);
       },
-      [show](api::error &) { show(false, false, false, false); });
+      [show](api::error &) { show(false, false, false, false, false); });
 }
 
 void ChatView::confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf) {
@@ -2094,6 +2688,85 @@ void ChatView::debugForwardMenu() {
 void ChatView::debugDelete() {
   if (const auto newest = newestId()) {
     _store.client().send(api::make_object<api::deleteMessages>(_chat, std::vector<std::int64_t>{newest}, true));
+  }
+}
+
+// The message of this server number among the loaded ones, the newest without one.
+void ChatView::debugMessageMenu(std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  const auto row = item ? rowFor(item) : nullptr;
+  if (!row) {
+    g_message("chat menu: message %lld isn't loaded", (long long)number);
+    return;
+  }
+  showMessageMenu(*item, row->widgetFor(item), 10, 10);
+}
+
+void ChatView::debugPin(std::int64_t number, bool pin) {
+  const auto id = number ? (number << 20) : newestId();
+  if (!id) return;
+  // As the menu does: only a message that can be pinned.
+  _store.client().request<api::messageProperties>(
+      api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
+      [this, id, pin](api::messageProperties &properties) {
+        if (!properties.can_be_pinned_) g_message("chat pinned: message %lld can't be pinned", (long long)(id >> 20));
+        else if (pin) confirmPin(id);
+        else confirmUnpin(id);
+      },
+      [](api::error &) {});
+}
+
+void ChatView::debugPinnedBar(const std::string &what) {
+  if (what == "tap") {
+    pinnedBarClicked();
+  } else if (what == "close") {
+    pinnedCloseClicked();
+  } else if (what == "list") {
+    showPinnedList();
+  } else {
+    auto ids = std::string();
+    for (const auto id : _pinnedIds) ids += (ids.empty() ? "" : ",") + std::to_string(id >> 20);
+    // The picture's own size: the bar's square for a decoded file, the blurred one's for that.
+    auto *paintable = gtk_image_get_paintable(GTK_IMAGE(_pinnedPreview));
+    const auto pictureWidth = paintable ? gdk_paintable_get_intrinsic_width(paintable) : 0;
+    const auto pictureHeight = paintable ? gdk_paintable_get_intrinsic_height(paintable) : 0;
+    g_message("chat pinned: loaded=%d ids=[%s] total=%d current=%lld clicked=%lld shown=%d hidden=%d canPin=%d "
+              "title=\"%s\" text=\"%s\" preview=%d %dx%d picture=%dx%d bar=%dx%d list=%d close=%d",
+              int(_pinnedLoaded), ids.c_str(), _pinnedTotal, (long long)(_pinnedCurrent >> 20),
+              (long long)(_pinnedClicked >> 20), int(gtk_revealer_get_reveal_child(GTK_REVEALER(_pinnedBar))),
+              int(pinnedHiddenByUser()), int(canPinMessages()), gtk_label_get_text(GTK_LABEL(_pinnedTitle)),
+              gtk_label_get_text(GTK_LABEL(_pinnedText)), int(gtk_widget_get_visible(_pinnedPreview)),
+              gtk_widget_get_width(_pinnedPreview), gtk_widget_get_height(_pinnedPreview), pictureWidth, pictureHeight,
+              gtk_widget_get_width(_pinnedBar), gtk_widget_get_height(_pinnedBar),
+              int(gtk_widget_get_visible(_pinnedListButton)), int(gtk_widget_get_visible(_pinnedClose)));
+  }
+}
+
+void ChatView::debugPinnedList(const std::string &what) {
+  if (!_pinnedDialog) {
+    g_message("pinned list: none");
+    return;
+  }
+  auto *list = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_pinnedDialog), "contrail-list"));
+  auto *action = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_pinnedDialog), "contrail-action"));
+  if (what.starts_with("pick ")) {
+    if (auto *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), std::atoi(what.c_str() + 5))) {
+      g_signal_emit_by_name(list, "row-activated", row);
+    }
+  } else if (what == "action") {
+    gtk_widget_activate(action);
+  } else {
+    auto rows = std::string();
+    auto count = 0;
+    for (auto *row = gtk_widget_get_first_child(list); row; row = gtk_widget_get_next_sibling(row), ++count) {
+      if (!ADW_IS_ACTION_ROW(row)) continue;
+      rows += std::string(" [\"") + adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)) + "\" \""
+          + adw_action_row_get_subtitle(ADW_ACTION_ROW(row)) + "\"]";
+    }
+    auto *title = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_pinnedDialog), "contrail-title"));
+    g_message("pinned list: title=\"%s\" rows=%d action=\"%s\"%s",
+              adw_window_title_get_title(ADW_WINDOW_TITLE(title)), count, gtk_button_get_label(GTK_BUTTON(action)),
+              rows.c_str());
   }
 }
 

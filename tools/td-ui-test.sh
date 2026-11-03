@@ -6,7 +6,10 @@
 #   4. a group with topics: its list of topics, a topic with only its messages, a message sent and one received
 #      landing only in their topics, the list closed when the group stops having topics;
 #   5. forwarding: the chats to choose from (Saved Messages first, a search), a topic asked for, the message
-#      waiting in the chosen place, sent with a comment and the sender's name, or alone as a copy.
+#      waiting in the chosen place, sent with a comment and the sender's name, or alone as a copy;
+#   6. pinned messages: the bar shows the newest, a tap goes back through them and round, the picture in it keeps
+#      its size, the list of them, unpinning and pinning with the questions, a bar hidden in a topic where only
+#      admins pin until a new message is pinned there.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -191,6 +194,71 @@ line=$(asked 'chat forward:' state)
 c send 1.5
 line=$(asked 'chat forward:' state)
 [[ $line == *'waiting=0 '*' ["Message 120"]' && $line != *from=* ]] || fail "sent as a copy: $line"
+echo "   ok"
+stop
+echo "6. Pinned messages"
+start 120
+c 'chat 0' 3
+pinned() { asked 'chat pinned:' pinned-state; }
+line=$(pinned)
+[[ $line == *'ids=[30,70,100] total=3 current=100 '*'title="Pinned message" text="Message 100" preview=0 '*' list=1 close=0' ]] \
+  || fail "the bar: $line"
+height=$(sed -n 's/.* bar=[0-9]*x\([0-9]*\) .*/\1/p' <<< "$line")
+c pinned-bar 1.5
+line=$(pinned)
+[[ $line == *'current=70 clicked=100 '*'title="Pinned message #2" text="Photo, Pinned photo" preview=1 36x36 picture=36x36 '* ]] \
+  || fail "the second tap: $line"
+[[ $line == *" bar=410x$height "* ]] || fail "the picture changed the bar's height ($height): $line"
+c pinned-bar 1.5
+line=$(pinned)
+[[ $line == *'current=30 clicked=70 '*'title="Pinned message #1" text="Message 30" preview=0 '* ]] || fail "the oldest: $line"
+c pinned-bar 1.5
+line=$(pinned)
+[[ $line == *'current=100 clicked=30 '* ]] || fail "not round to the newest: $line"
+# Jumping down to the newest goes on with the one before it.
+c pinned-bar 1.5
+line=$(pinned)
+[[ $line == *'current=70 clicked=100 '* ]] || fail "after the newest: $line"
+c pinned-list 1.5
+line=$(asked 'pinned list:' pinned-list-state)
+[[ $line == *'title="3 pinned messages" rows=3 action="Unpin all 3 messages" '*'"Message 100"]'*'"Photo, Pinned photo"]'*'"Message 30"]' ]] \
+  || fail "the list: $line"
+c 'pinned-list-pick 2' 2
+line=$(pinned)
+[[ $line == *'clicked=30 '* ]] || fail "picked from the list: $line"
+c 'unpin 100' 1
+line=$(asked 'dialog:' dialog)
+[[ $line == *'heading="Would you like to unpin this message?"'* ]] || fail "the question: $line"
+c 'dialog-answer unpin' 1
+line=$(pinned)
+[[ $line == *'ids=[30,70] total=2 '* ]] || fail "unpinned: $line"
+c 'scroll bottom' 1
+c 'pin 110' 1
+line=$(asked 'dialog:' dialog)
+[[ $line == *'heading="Would you like to pin this message?" body="" check="Also pin for Friend" checked=0' ]] \
+  || fail "the question: $line"
+c 'dialog-answer pin' 1.5
+line=$(pinned)
+[[ $line == *'ids=[30,70,110] total=3 current=110 '*'text="Message 110"'* ]] || fail "pinned: $line"
+# Only admins pin in the group: the bar can be hidden, until something new is pinned.
+c 'chat 40' 2
+c 'topic 2' 2
+line=$(pinned)
+[[ $line == *'ids=[103] total=1 current=103 clicked=0 shown=1 hidden=0 canPin=0 '*' close=1' ]] || fail "in the topic: $line"
+c pinned-close 1
+line=$(asked 'dialog:' dialog)
+[[ $line == *'body="Do you want to hide the pinned message bar?'* ]] || fail "the question: $line"
+c 'dialog-answer hide' 1
+line=$(pinned)
+[[ $line == *'shown=0 hidden=1 '* ]] || fail "not hidden: $line"
+c 'chat 0' 2
+c 'chat 40' 2
+c 'topic 2' 2
+line=$(pinned)
+[[ $line == *'ids=[103] '*'shown=0 hidden=1 '* ]] || fail "back after leaving: $line"
+c 'send /pin 20' 1.5
+line=$(pinned)
+[[ $line == *'ids=[103,203] total=2 current=203 clicked=0 shown=1 hidden=0 '* ]] || fail "a new one pinned: $line"
 echo "   ok"
 stop
 echo "PASS"
