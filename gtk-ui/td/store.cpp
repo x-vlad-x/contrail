@@ -83,6 +83,13 @@ std::int32_t LastSeen(api::UserStatus *status) {
   return 0;
 }
 
+// Any of the kinds of files the attach dialog sends.
+bool CanSendFiles(const api::chatPermissions *permissions) {
+  return permissions && (permissions->can_send_documents_ || permissions->can_send_photos_
+                         || permissions->can_send_videos_ || permissions->can_send_audios_
+                         || permissions->can_send_voice_notes_);
+}
+
 // What this account may do, from its status in a group or a channel.
 void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool channel) {
   group.member = true;
@@ -90,6 +97,9 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
   group.manageTopics = false;
   group.canPin = false;
   group.pinAsMembers = !channel;
+  group.admin = false;
+  group.canSendFiles = true;
+  group.filesAsMembers = true;
   if (!status) return;
   switch (status->get_id()) {
     case api::chatMemberStatusCreator::ID:
@@ -98,6 +108,8 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
       group.manageTopics = true;
       group.canPin = true;
       group.pinAsMembers = false;
+      group.admin = true;
+      group.filesAsMembers = false;
       break;
     case api::chatMemberStatusAdministrator::ID: {
       const auto &rights = static_cast<const api::chatMemberStatusAdministrator &>(*status).rights_;
@@ -106,6 +118,8 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
       // In a channel pinning goes with editing messages.
       group.canPin = rights && (channel ? rights->can_edit_messages_ : rights->can_pin_messages_);
       group.pinAsMembers = false;
+      group.admin = true;
+      group.filesAsMembers = false;
       break;
     }
     case api::chatMemberStatusRestricted::ID: {
@@ -114,6 +128,8 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
       group.canPost = restricted.permissions_ && restricted.permissions_->can_send_basic_messages_;
       group.canPin = restricted.permissions_ && restricted.permissions_->can_pin_messages_;
       group.pinAsMembers = false;
+      group.canSendFiles = CanSendFiles(restricted.permissions_.get());
+      group.filesAsMembers = false;
       break;
     }
     case api::chatMemberStatusLeft::ID:
@@ -121,6 +137,8 @@ void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool chan
       group.member = false;
       group.canPost = false;
       group.pinAsMembers = false;
+      group.canSendFiles = false;
+      group.filesAsMembers = false;
       break;
     default: break;
   }
@@ -181,6 +199,33 @@ bool Store::canWrite(const Chat &chat) const {
   const auto known = group(chat);
   if (chat.kind == ChatKind::Channel) return known && known->canPost;
   return chat.canSendBasic && (!known || known->canPost);
+}
+
+bool Store::canSendFiles(const Chat &chat) const {
+  if (chat.kind == ChatKind::Private || chat.kind == ChatKind::Secret) return true;
+  if (!canWrite(chat)) return false;
+  const auto known = group(chat);
+  if (!known) return chat.canSendFilesAll;
+  return known->filesAsMembers ? chat.canSendFilesAll : known->canSendFiles;
+}
+
+void Store::setSupergroupFullInfo(std::int64_t supergroup, const api::supergroupFullInfo &info) {
+  auto &known = _supergroups[supergroup];
+  known.slowModeDelay = info.slow_mode_delay_;
+  const auto left = info.slow_mode_delay_expires_in_;
+  known.slowModeUntil = left > 0 ? g_get_monotonic_time() + std::int64_t(left * 1e6) : 0;
+}
+
+bool Store::slowModeApplies(const Chat &chat) const {
+  if (chat.kind != ChatKind::Group || !chat.supergroup) return false;
+  const auto known = group(chat);
+  return known && !known->admin && known->slowModeDelay > 0;
+}
+
+int Store::slowModeLeft(const Chat &chat) const {
+  if (!slowModeApplies(chat)) return 0;
+  const auto left = group(chat)->slowModeUntil - g_get_monotonic_time();
+  return left > 0 ? int((left + 999999) / 1000000) : 0;
 }
 
 bool Store::canPin(const Chat &chat) const {
@@ -433,6 +478,7 @@ void Store::addChat(api::chat &source) {
   chat.draftReplyTo = DraftReplyTo(source.draft_message_);
   chat.canSendBasic = !source.permissions_ || source.permissions_->can_send_basic_messages_;
   chat.canPinAll = source.permissions_ && source.permissions_->can_pin_messages_;
+  chat.canSendFilesAll = !source.permissions_ || CanSendFiles(source.permissions_.get());
   if (const auto type = source.type_.get()) {
     switch (type->get_id()) {
       case api::chatTypePrivate::ID:
@@ -610,6 +656,11 @@ void Store::updated(api::Update &update) {
       groupChanged(group.id_, true);
       break;
     }
+    case api::updateSupergroupFullInfo::ID: {
+      auto &data = static_cast<api::updateSupergroupFullInfo &>(update);
+      if (data.supergroup_full_info_) setSupergroupFullInfo(data.supergroup_id_, *data.supergroup_full_info_);
+      break;
+    }
     case api::updateBasicGroup::ID: {
       const auto &group = *static_cast<api::updateBasicGroup &>(update).basic_group_;
       auto &known = _basicGroups[group.id_];
@@ -623,6 +674,7 @@ void Store::updated(api::Update &update) {
       withChat(data.chat_id_, [&](Chat &chat) {
         chat.canSendBasic = !data.permissions_ || data.permissions_->can_send_basic_messages_;
         chat.canPinAll = data.permissions_ && data.permissions_->can_pin_messages_;
+        chat.canSendFilesAll = !data.permissions_ || CanSendFiles(data.permissions_.get());
       });
       break;
     }

@@ -464,6 +464,38 @@ void DescribeMenu(GMenuModel *model, std::string &out) {
   }
 }
 
+// Saves waiting for their downloads. They outlive the chat that asked, as in 0.3.1: the download goes on and the
+// file is saved when it ends, wherever the window is.
+struct PendingSave {
+  std::string name;  // Empty: the downloaded file's.
+  bool photo = false;
+};
+struct PendingSaves {
+  Td::Lifetime lifetime;
+  std::unordered_map<Td::FileId, PendingSave> files;
+};
+PendingSaves &Saves() {
+  static auto saves = PendingSaves();
+  return saves;
+}
+
+void SaveWhenLoaded(Td::Store &store, Td::FileId file, std::string name, bool photo) {
+  auto &saves = Saves();
+  if (saves.files.empty()) {
+    // The first one since the last ended: the session's store is the one to listen to.
+    saves.lifetime.reset();
+    store.onFile([](const Td::File &file) {
+      auto &saves = Saves();
+      const auto i = saves.files.find(file.id);
+      if (i == saves.files.end() || !file.complete) return;
+      const auto save = std::move(i->second);
+      saves.files.erase(i);
+      CopySaved(file.path, save.name, save.photo);
+    }, saves.lifetime);
+  }
+  saves.files[file] = {std::move(name), photo};
+}
+
 }  // namespace
 
 void ChatView::Timer::callOnce(guint ms) {
@@ -514,6 +546,14 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
 
   // TDLib keeps a chat's messages up to date while it is open, and needs that to count views.
   _store.client().send(api::make_object<api::openChat>(_chat));
+  // Its slow mode comes with the full info (updateSupergroupFullInfo), which TDLib then keeps up to date.
+  if (const auto known = _store.chat(_chat); known && known->supergroup && known->kind == Td::ChatKind::Group) {
+    const auto supergroup = known->peerId;
+    _store.client().request<api::supergroupFullInfo>(
+        api::make_object<api::getSupergroupFullInfo>(supergroup), _lifetime,
+        [this, supergroup](api::supergroupFullInfo &full) { _store.setSupergroupFullInfo(supergroup, full); },
+        [](api::error &) {});
+  }
   if (!_topic) {
     start();
     return;
@@ -609,10 +649,6 @@ void ChatView::subscribe() {
         // It wasn't here: a second tap opens it.
         _openWhenLoaded.erase(i);
       }
-    }
-    if (const auto i = _saveWhenLoaded.find(file.id); i != _saveWhenLoaded.end() && file.complete) {
-      CopySaved(file.path, i->second.name, i->second.photo);
-      _saveWhenLoaded.erase(i);
     }
     if (_sponsoredWaiting.contains(file.id) && file.complete) {
       _sponsoredWaiting.erase(file.id);
@@ -2973,7 +3009,7 @@ void ChatView::saveFile(std::int64_t id) {
     return;
   }
   // As in 0.3.1: the download starts, and the file is saved when it ends.
-  _saveWhenLoaded[saved.file->id_] = {saved.name, saved.photo};
+  SaveWhenLoaded(_store, saved.file->id_, saved.name, saved.photo);
   _store.download(saved.file->id_, 32);
   ShowToast(Tr("lng_downloads_section"));
 }
@@ -3591,6 +3627,12 @@ void ChatView::openAttach(const std::vector<std::string> &paths, GdkTexture *ima
     pasteText(textOnCancel);
     return;
   }
+  if (!_store.canSendFiles(*known)) {
+    ShowToast(Tr("lng_forward_send_files_cant"));
+    g_clear_object(&image);
+    pasteText(textOnCancel);
+    return;
+  }
   if (const auto open = _attach.lock()) open->close();
   // Where the files go is fixed now: the chat, the topic and the reply.
   const auto replyTo = _replyToId;
@@ -3616,6 +3658,17 @@ void ChatView::openAttach(const std::vector<std::string> &paths, GdkTexture *ima
   });
 }
 
+namespace {
+
+// Ui::FormatDurationWordsSlowmode: "42 seconds", or "1 min 30 s".
+std::string SlowModeDuration(int seconds) {
+  if (seconds < 60) return TrCount("lng_slowmode_seconds", seconds);
+  return Tr("lng_duration_minutes_seconds", {{"minutes_count", TrCount("lng_duration_minsec_minutes", seconds / 60)},
+                                              {"seconds_count", TrCount("lng_duration_minsec_seconds", seconds % 60)}});
+}
+
+}  // namespace
+
 // As SendFilesBox did for 0.3.1: the files go in albums of up to ten, the caption with the last one. TDLib sends the
 // media of a chat in the order they were given (its queue of unsent media), keeps them while it is closed, and
 // uploads in the background.
@@ -3625,8 +3678,18 @@ bool ChatView::sendAttachments(const std::vector<AttachFile> &files, bool compre
     ShowToast(TrCount("lng_caption_limit_reached", over));
     return false;
   }
-  auto groups = DivideAttachments(files, compress, group);
+  const auto known = _store.chat(_chat);
+  if (const auto left = known ? _store.slowModeLeft(*known) : 0) {
+    ShowToast(Tr("lng_slowmode_enabled", {{"left", SlowModeDuration(left)}}));
+    return false;
+  }
+  // In slow mode the files go as one message (one album) or not at all, as in 0.3.1.
+  auto groups = DivideAttachments(files, compress, group || (known && _store.slowModeApplies(*known)));
   if (groups.empty()) return false;
+  if (groups.size() > 1 && known && _store.slowModeApplies(*known)) {
+    ShowToast(Tr("lng_slowmode_no_many"));
+    return false;
+  }
   const auto captioned = CaptionIndex(groups.back());
   for (std::size_t g = 0; g != groups.size(); ++g) {
     const auto &files = groups[g].files;

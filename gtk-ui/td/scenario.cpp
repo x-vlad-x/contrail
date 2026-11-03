@@ -1877,6 +1877,7 @@ class ScenarioTransport final : public Transport {
 
   // As outgoing(), but confirmed once its upload is done.
   api::object_ptr<api::message> uploading(std::int64_t chatId, const Entry &entry) {
+    if (chatId == kPlacesId) placesSlowMode(30);
     const auto index = Count(chatId) + ++_sentExtra[chatId];
     const auto id = index * kIdStep;
     _entries[{chatId, id}] = entry;
@@ -2199,6 +2200,10 @@ class ScenarioTransport final : public Transport {
       return api::make_object<api::error>(400, "Not a Telegram link");
     }
     if (link.starts_with("tg://socks?")) return proxyLink(link);
+    if (link.starts_with("tg://settings")) return api::make_object<api::internalLinkTypeSettings>();
+    if (path.starts_with("+") || path.starts_with("joinchat/") || link.starts_with("tg://join?")) {
+      return api::make_object<api::internalLinkTypeChatInvite>(link);
+    }
     const auto slash = path.find('/');
     const auto name = path.substr(0, slash);
     if (slash != std::string::npos) return api::make_object<api::internalLinkTypeMessage>(link);
@@ -2264,6 +2269,34 @@ class ScenarioTransport final : public Transport {
       case api::getInternalLinkType::ID:
         answer(id, internalLink(static_cast<api::getInternalLinkType &>(function).link_));
         return true;
+      case api::checkChatInviteLink::ID: {
+        // t.me/+places: a chat joined already; t.me/+hikers: one to join; anything else has expired.
+        const auto &link = static_cast<api::checkChatInviteLink &>(function).invite_link_;
+        auto info = api::make_object<api::chatInviteLinkInfo>();
+        info->type_ = api::make_object<api::inviteLinkChatTypeSupergroup>();
+        if (link.ends_with("+places")) {
+          info->chat_id_ = kPlacesId;
+          info->title_ = "Places";
+          info->member_count_ = 3;
+        } else if (link.ends_with("+hikers")) {
+          info->title_ = "Hikers";
+          info->description_ = "Weekend walks";
+          info->member_count_ = 7;
+        } else {
+          answer(id, api::make_object<api::error>(400, "INVITE_HASH_EXPIRED"));
+          return true;
+        }
+        answer(id, std::move(info));
+        return true;
+      }
+      case api::joinChatByInviteLink::ID: {
+        g_message("Scenario: joined by %s", static_cast<api::joinChatByInviteLink &>(function).invite_link_.c_str());
+        // The chat joined: the scenario's showcase stands in for it.
+        auto chat = api::make_object<api::chat>();
+        chat->id_ = kShowcaseId;
+        answer(id, std::move(chat));
+        return true;
+      }
       case api::getMessageLinkInfo::ID:
         answer(id, messageLinkInfo(static_cast<api::getMessageLinkInfo &>(function).url_));
         return true;
@@ -2435,6 +2468,11 @@ class ScenarioTransport final : public Transport {
     chat->id_ = kForumId;
     chat->type_ = api::make_object<api::chatTypeSupergroup>(kForumGroupId, false);
     chat->title_ = "Contrail Club";
+    // Its members write, but send no media: the attach dialog doesn't open there.
+    chat->permissions_ = api::make_object<api::chatPermissions>();
+    chat->permissions_->can_send_basic_messages_ = true;
+    chat->permissions_->can_send_other_messages_ = true;
+    chat->permissions_->can_add_link_previews_ = true;
     chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
     chat->notification_settings_->use_default_mute_for_ = true;
     chat->last_message_ = forumLastMessage();
@@ -2717,6 +2755,21 @@ class ScenarioTransport final : public Transport {
     if (g_getenv("CONTRAIL_SCENARIO_LIVE")) activeLive();
   }
 
+  // Places has slow mode: 30 seconds between messages, from the files sent there on.
+  api::object_ptr<api::supergroupFullInfo> placesFullInfo() const {
+    auto full = api::make_object<api::supergroupFullInfo>();
+    full->description_ = "Where we meet";
+    full->member_count_ = 3;
+    full->slow_mode_delay_ = 30;
+    const auto left = (_placesSlowModeUntil - g_get_monotonic_time()) / 1e6;
+    full->slow_mode_delay_expires_in_ = left > 0 ? left : 0;
+    return full;
+  }
+  void placesSlowMode(int seconds) {
+    _placesSlowModeUntil = g_get_monotonic_time() + std::int64_t(seconds) * 1000000;
+    update(api::make_object<api::updateSupergroupFullInfo>(kPlacesGroupId, placesFullInfo()));
+  }
+
   bool placeLive(const Place &place) const {
     return place.text.empty() && place.period && !place.stopped
            && (place.period == 0x7FFFFFFF || place.date + place.period > RealNow());
@@ -2799,7 +2852,9 @@ class ScenarioTransport final : public Transport {
     } else if (content && content->get_id() == api::inputMessageText::ID) {
       place.text = static_cast<api::inputMessageText *>(content)->text_->text_;
     } else {
+      // A file: slow mode holds from it on (the attach dialog checks it).
       place.text = "?";
+      placesSlowMode(30);
     }
     g_message("Scenario: sent to Places: %s %s %s \"%s\" period %d", place.text.c_str(), Ascii(place.lat).c_str(),
               Ascii(place.lon).c_str(), place.title.c_str(), place.period);
@@ -2945,10 +3000,7 @@ class ScenarioTransport final : public Transport {
       }
       case api::getSupergroupFullInfo::ID: {
         if (static_cast<api::getSupergroupFullInfo &>(function).supergroup_id_ != kPlacesGroupId) return false;
-        auto full = api::make_object<api::supergroupFullInfo>();
-        full->description_ = "Where we meet";
-        full->member_count_ = 3;
-        answer(id, std::move(full));
+        answer(id, placesFullInfo());
         return true;
       }
       case api::getSupergroupMembers::ID: {
@@ -3317,6 +3369,7 @@ class ScenarioTransport final : public Transport {
   unsigned _burstSeed = 1;
   int _burstUpdates = 0;
   std::vector<Place> _places;  // The "Places" group's messages, the sent ones too.
+  std::int64_t _placesSlowModeUntil = 0;  // g_get_monotonic_time(): when this account may send there again.
   int _mapFiles = 0;
   // Section media-view.
   struct MediaDownload {
