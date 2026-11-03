@@ -8,6 +8,7 @@
 #include "login.hpp"
 #include "memory_guard.hpp"
 #include "memory_trim.hpp"
+#include "notifications.hpp"
 #include "settings.hpp"
 #include "td/message_text.hpp"
 #include "td/session.hpp"
@@ -153,6 +154,7 @@ MainWindow::~MainWindow() {
 void MainWindow::clearChats() {
   clearViews();
   _forwardDrafts.clear();
+  _notifier = nullptr;
   _unreadLifetime.reset();
   _unreadUnmuted = 0;
   updateTray();
@@ -267,6 +269,8 @@ void MainWindow::authorization(api::AuthorizationState &state) {
   }
   if (!_stringsReady) return;
   _authorized = state.get_id() == api::authorizationStateReady::ID;
+  if (_authorized && !_notifier) _notifier = std::make_unique<Notifier>(*_store, *this);
+  if (!_authorized) _notifier = nullptr;
   if (!_window) {
     // Without the window only signing in again needs it back: Telegram ended the session in the background.
     if (_authorized || state.get_id() == api::authorizationStateLoggingOut::ID

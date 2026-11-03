@@ -3,6 +3,7 @@
 #include "contrail_version.h"
 #include "local_state.hpp"
 #include "main_window.hpp"
+#include "notifications.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
 #include "userpics.hpp"
@@ -133,6 +134,7 @@ void SettingsView::switched(const std::string &key, bool value) {
   SetSettings(settings);
   syncSensitive();
   if (key == "background") _window.backgroundChanged();
+  if (key == "notify" && _window.notifier()) _window.notifier()->settingsChanged();
 }
 
 // Sound and the text of a message mean nothing without notifications.

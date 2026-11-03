@@ -2067,6 +2067,11 @@ class ScenarioTransport final : public Transport {
 
   // --- settings and the app in the background ------------------------------------
 
+  template <typename Type>
+  static Type *As(api::Object *object) {
+    return object && object->get_id() == Type::ID ? static_cast<Type *>(object) : nullptr;
+  }
+
   bool backgroundRequest(std::uint64_t id, api::Function &function) {
     switch (function.get_id()) {
       case api::loadChats::ID:
@@ -2083,6 +2088,46 @@ class ScenarioTransport final : public Transport {
         answer(id, std::move(me));
         return true;
       }
+      case api::setOption::ID: {
+        auto &request = static_cast<api::setOption &>(function);
+        if (request.name_ == "notification_group_count_max") {
+          const auto value = As<api::optionValueInteger>(request.value_.get());
+          _notificationsOn = value && value->value_ > 0;
+        }
+        return false;
+      }
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        const auto input = As<api::inputMessageText>(request.input_message_content_.get());
+        const auto text = input && input->text_ ? input->text_->text_ : std::string();
+        // "/notify" or "/notify2": a message or two come to Friend 5 a second later, with their notifications.
+        if (text == "/notify" || text == "/notify2") {
+          later(1000, [this, count = text == "/notify2" ? 2 : 1] {
+            for (auto i = 0; i != count; ++i) notifyIncoming();
+          });
+        }
+        if (request.chat_id_ == kNotifyChat) {
+          const auto reply = As<api::inputMessageReplyToMessage>(request.reply_to_.get());
+          g_message("scenario: sent to %lld \"%s\" reply_to=%lld", static_cast<long long>(request.chat_id_),
+                    text.c_str(), static_cast<long long>(reply ? reply->message_id_ : 0));
+        }
+        return false;
+      }
+      case api::viewMessages::ID: {
+        auto &request = static_cast<api::viewMessages &>(function);
+        // Read here or anywhere: TDLib takes the chat's notifications away.
+        if (request.chat_id_ == kNotifyChat && !_notes.empty()) {
+          update(api::make_object<api::updateNotificationGroup>(
+              kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), kNotifyChat, kNotifyChat, 1, 0,
+              std::vector<api::object_ptr<api::notification>>(), std::exchange(_notes, {})));
+        }
+        return false;
+      }
+      case api::removeNotificationGroup::ID:
+        g_message("scenario: notifications removed");
+        _notes.clear();
+        answer(id, api::make_object<api::ok>());
+        return true;
       case api::logOut::ID:
         // As TDLib does: the session ends and its data goes; the program starts a new client.
         answer(id, api::make_object<api::ok>());
@@ -2094,7 +2139,36 @@ class ScenarioTransport final : public Transport {
     }
   }
 
+  // A message from Friend 5, and its notification when the program asked for them.
+  void notifyIncoming() {
+    const auto chat = kNotifyChat;
+    const auto index = MessagesInChat() + 2000 + (++_notified);
+    const auto text = "Are you coming tonight? " + std::to_string(_notified);
+    _orders[chat].first = std::int64_t(3000 + _notified) << 32;
+    auto positions = std::vector<api::object_ptr<api::chatPosition>>();
+    positions.push_back(api::make_object<api::chatPosition>(ListObject(false), _orders[chat].first, false, nullptr));
+    update(api::make_object<api::updateNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text)));
+    update(api::make_object<api::updateChatLastMessage>(chat, MakeMessage(chat, index * kIdStep, chat, kNow, text),
+                                                        std::move(positions)));
+    update(api::make_object<api::updateChatReadInbox>(chat, (MessagesInChat() - 1) * kIdStep, int(_notes.size()) + 1));
+    if (!_notificationsOn) return;
+    const auto notification = 100 + _notified;
+    auto added = std::vector<api::object_ptr<api::notification>>();
+    added.push_back(api::make_object<api::notification>(
+        notification, kNow, false,
+        api::make_object<api::notificationTypeNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text), true)));
+    _notes.push_back(notification);
+    update(api::make_object<api::updateNotificationGroup>(
+        kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), chat, chat, 1, int(_notes.size()),
+        std::move(added), std::vector<std::int32_t>()));
+  }
+
+  static constexpr auto kNotifyChat = std::int64_t(5);
+  static constexpr auto kNotifyGroup = std::int32_t(1);
   bool _unreadCountSent = false;
+  bool _notificationsOn = false;
+  int _notified = 0;
+  std::vector<std::int32_t> _notes;  // The notifications of Friend 5 not read yet.
 
   const bool _fullList;
   Sink _sink;

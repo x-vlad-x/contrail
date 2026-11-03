@@ -18,6 +18,7 @@ class ChatList;
 class ChatView;
 class LoginView;
 class MemoryGuard;
+class Notifier;
 class SettingsView;
 class TrayIcon;
 class TopicList;
@@ -78,6 +79,7 @@ class MainWindow final {
   void closeToBackground();
   [[nodiscard]] bool isActive() const;
   [[nodiscard]] TrayIcon *tray() const { return _tray.get(); }
+  [[nodiscard]] Notifier *notifier() const { return _notifier.get(); }
   [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
   void releaseMemory(MemoryLevel level);
 
@@ -135,6 +137,7 @@ class MainWindow final {
   GtkApplication *_application = nullptr;
   std::unique_ptr<SettingsView> _settings;
   std::unique_ptr<TrayIcon> _tray;
+  std::unique_ptr<Notifier> _notifier;  // While signed in, with or without the window.
   std::unique_ptr<MemoryGuard> _memoryGuard;
   std::optional<SavedChat> _saved;  // The chat the window had when it went.
   Td::Lifetime _unreadLifetime;

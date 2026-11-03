@@ -421,6 +421,8 @@
 {"lng_month_day9", "September", nullptr},
 {"lng_month_day_year", "{month} {day}, {year}", nullptr},
 {"lng_months", "{count} months", "{count} month"},
+{"lng_notification_preview", "You have a new message", nullptr},
+{"lng_notification_reply", "Reply", nullptr},
 {"lng_open_from_tray", "Open Telegram", nullptr},
 {"lng_open_link", "Open", nullptr},
 {"lng_phone_desc", "Please confirm your country code\nand enter your phone number.", nullptr},

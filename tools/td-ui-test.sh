@@ -529,7 +529,54 @@ section_background() {
   [[ $(asked 'mem-guard:' mem-guard) == *'level=normal'* ]] || fail "no memory guard"
   c 'mem-simulate low' 0.5
   grep -q 'memory low, .* freeing what can be freed' "$WORK/log.txt" || fail "low memory isn't handled"
+  # Notifications: two messages to a chat that isn't open, the window closed; one notification for both.
+  notes() { grep -c "^$1" "$desktop" || true; }
+  c 'chat 0' 2
+  [[ $(bg) != *' chat=5' ]] || fail "the chat that gets messages is open"
+  c 'send /notify2' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=Are you coming tonight? 1\nAre you coming tonight? 2 '* ]] \
+    || fail "the notification: $line"
+  [[ $line == *'actions=default,mark-read,inline-reply '*'sound=message-new-instant'* ]] || fail "its buttons: $line"
+  (( $(notes notify) == 2 )) && [[ $line == *' replaces='[1-9]* ]] || fail "not one notification for the chat: $line"
+  local id
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  [[ $(asked 'notify:' notify-state) == *"[group=1 chat=5 shown=$id count=2 adopted=0]"* ]] || fail "$(asked 'notify:' notify-state)"
+  # Answered from the notification: sent to the chat, which is read then, and the notification goes.
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Reply "$id" 'On my way' > /dev/null
+  sleep 1
+  grep -q 'scenario: sent to 5 "On my way" reply_to=0' "$WORK/log.txt" || fail "the answer wasn't sent"
+  grep -q "^close id=$id" "$desktop" || fail "the notification stayed after the chat was read"
+  [[ $(bg) == *'window=0 '* ]] || fail "answering opened the window"
+  # Without the text of messages; a tap opens the chat.
+  c bg-open 2
   c settings 1
+  c 'settings-set preview 0' 0.3
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=You have a new message '* ]] || fail "the text is shown: $line"
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Invoke "$id" default > /dev/null
+  sleep 2
+  [[ $(bg) == *'window=1 visible=1 '*' chat=5' ]] || fail "a tap didn't open the chat: $(bg)"
+  # Turned off: nothing comes.
+  c settings 1
+  c 'settings-set preview 1' 0.3
+  c 'settings-set notify 0' 0.3
+  local before
+  before=$(notes notify)
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 2.5
+  (( $(notes notify) == before )) || fail "a notification came with them turned off"
+  c settings 1
+  c 'settings-set notify 1' 0.3
   c 'settings-set background 0' 1
   [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "the tray icon stayed: $(bg)"
   # Logging out asks first; then a new session starts, without "you were logged out".

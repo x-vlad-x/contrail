@@ -3,6 +3,7 @@
 #include "local_state.hpp"
 #include "main_window.hpp"
 #include "memory_guard.hpp"
+#include "notifications.hpp"
 #include "settings.hpp"
 #include "tray.hpp"
 
@@ -41,6 +42,18 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
     g_message("mem-guard: %s", window.memoryGuard().debugState().c_str());
   } else if (name == "mem-simulate") {
     window.memoryGuard().debugSimulate(rest == "critical" ? MemoryLevel::Critical : MemoryLevel::Low);
+  } else if (name == "notify-state") {
+    if (const auto *notifier = window.notifier()) notifier->debugState();
+    else g_message("notify: none");
+  } else if (name == "notify-do") {
+    // notify-do CHAT open|read|reply TEXT: as the notification's buttons do.
+    const auto gap = rest.find(' ');
+    const auto action = gap == std::string::npos ? std::string("open") : rest.substr(gap + 1);
+    const auto space = action.find(' ');
+    if (auto *notifier = window.notifier()) {
+      notifier->debugAction(std::atoll(rest.c_str()), action.substr(0, space),
+                            space == std::string::npos ? std::string() : action.substr(space + 1));
+    }
   } else {
     return false;
   }
