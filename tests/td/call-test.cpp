@@ -1,5 +1,7 @@
 #include <glib.h>
 #include "call_backend.hpp"
+#include "call_camera.hpp"
+#include <glib/gstdio.h>
 #undef NDEBUG
 #include <cassert>
 #include <cstdio>
@@ -12,10 +14,17 @@ struct Script final : Td::Transport {
   int discarded = 0;
   int discardId = 0;
   int debugSent = 0;
+  int ratings = 0;
+  std::string comment;
   bool muted = false;
   void start(Sink value) override { sink = std::move(value); }
   void send(std::uint64_t id, Td::FunctionPtr function) override {
     switch (function->get_id()) {
+      case api::sendCallRating::ID:
+        ++ratings;
+        comment = static_cast<api::sendCallRating &>(*function).comment_;
+        sink(id, api::make_object<api::ok>());
+        break;
       case api::sendCallDebugInformation::ID:
         ++debugSent;
         sink(id, api::make_object<api::ok>());
@@ -51,6 +60,21 @@ struct Script final : Td::Transport {
 };
 
 int main() {
+  g_unsetenv("CONTRAIL_SCENARIO");
+  auto *directory = g_dir_make_tmp("contrail-camera-test-XXXXXX", nullptr);
+  g_assert_nonnull(directory);
+  g_setenv("CONTRAIL_TD_DIR", directory, true);
+  const auto cameras = std::vector<Calls::Camera>{{"front", "Front Camera"}, {"back", "Back Camera"}, {"macro", "Back Camera 2"}};
+  assert(PreferredCallCamera(cameras) == "front");
+  RememberCallCamera("back");
+  assert(PreferredCallCamera(cameras) == "back");
+  assert(NextCallCamera(cameras, "front") == "back");
+  assert(NextCallCamera(cameras, "back") == "front");
+  assert(NextCallCamera(cameras, "macro") == "front");
+  assert(PreferredCallCamera({{"front", "Front Camera"}}) == "front");
+  g_remove((std::string(directory) + "/call-camera.ini").c_str());
+  g_rmdir(directory);
+  g_free(directory);
   g_setenv("CONTRAIL_SCENARIO", "1", true);
   auto script = std::make_unique<Script>();
   auto *raw = script.get();
@@ -100,6 +124,10 @@ int main() {
   assert(backend.snapshot().muted);
   backend.setCamera("scenario-back");
   assert(backend.snapshot().camera == "scenario-back");
+  raw->sink(0, api::make_object<api::updateNewCallSignalingData>(12, "camera-failed"));
+  assert(backend.active() && backend.snapshot().camera.empty());
+  backend.setCamera("scenario-back");
+  assert(backend.snapshot().camera == "scenario-back" && backend.snapshot().error.empty());
   raw->sink(0, api::make_object<api::updateNewCallSignalingData>(12, "reconnecting"));
   assert(backend.snapshot().stage == S::Reconnecting);
   raw->sink(0, api::make_object<api::updateNewCallSignalingData>(12, "established"));
@@ -114,8 +142,12 @@ int main() {
   raw->sink(0, api::make_object<api::updateNewCallSignalingData>(14, "failed"));
   assert(!backend.active() && backend.snapshot().stage == S::Failed);
   raw->update(14, false, api::make_object<api::callStateDiscarded>(
-      api::make_object<api::callDiscardReasonHungUp>(), false, true, false));
+      api::make_object<api::callDiscardReasonHungUp>(), true, true, false));
   assert(raw->debugSent == 1);
+  backend.rate(5, "Not sent with five stars");
+  assert(raw->ratings == 1 && raw->comment.empty());
+  backend.rate(2, "Already rated");
+  assert(raw->ratings == 1);
   // An old terminal update must not replace the last call or open a window.
   raw->update(13, true, api::make_object<api::callStateError>(api::make_object<api::error>(400, "old")));
   assert(backend.snapshot().id == 14);
@@ -128,6 +160,10 @@ int main() {
   earlyFailure->encryption_key_ = std::string(256, 'c');
   raw->update(15, false, std::move(earlyFailure));
   assert(!backend.active() && backend.snapshot().stage == S::Failed);
+  raw->update(15, false, api::make_object<api::callStateDiscarded>(
+      api::make_object<api::callDiscardReasonHungUp>(), true, false, false));
+  backend.rate(2, "The sound broke up");
+  assert(raw->ratings == 2 && raw->comment == "The sound broke up");
   // A factory can fail synchronously before returning its Media.
   auto anotherScript = std::make_unique<Script>();
   auto *another = anotherScript.get();

@@ -1,6 +1,7 @@
 #include "call_media.hpp"
 
 #include "media/openal_adm.hpp"
+#include "media/openal_devices.hpp"
 #include "video_frame.hpp"
 
 #include <tgcalls/InstanceImpl.h>
@@ -12,6 +13,7 @@
 #include <modules/video_capture/video_capture_factory.h>
 #include <modules/video_capture/video_capture_options.h>
 #include <rtc_base/ref_counted_object.h>
+#include <rtc_base/ssl_adapter.h>
 
 #include <glib.h>
 #include <algorithm>
@@ -202,7 +204,8 @@ class TgcallsMedia final : public Media {
     if (_instance) _instance->receiveSignalingData(std::vector<std::uint8_t>(data.begin(), data.end()));
   }
   void setMuted(bool muted) override { if (_instance) _instance->setMuteMicrophone(muted); }
-  void setOutputDevice(const std::string &device) override {
+  void setOutputDevice(const std::string &description) override {
+    const auto device = media::OpenAlOutputId(description);
     {
       const auto lock = std::lock_guard(_shared->soundMutex);
       _shared->outputDevice = device;
@@ -269,6 +272,10 @@ class TgcallsMedia final : public Media {
 }  // namespace
 
 std::unique_ptr<Media> StartMedia(Parameters parameters, Callbacks callbacks) {
+  // Initialize on the main thread before WebRTC's static worker pool: OpenSSL's exit cleanup must run after
+  // those workers and their thread-local error/random state have gone away.
+  static const auto initialized = rtc::InitializeSSL();
+  if (!initialized) return nullptr;
   auto media = std::make_unique<TgcallsMedia>();
   return media->start(std::move(parameters), std::move(callbacks)) ? std::move(media) : nullptr;
 }

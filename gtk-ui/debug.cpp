@@ -23,8 +23,9 @@
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
 //   edit-last (the up arrow in the empty field)
 //   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
-//   call-state|hide|present|speaker | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
+//   call-state|hide|present|speaker|camera-failed | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
 //   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
+//   call-tone incoming|outgoing|connecting|ended|busy|stop (plays only a call tone, without calling)
 #include "debug.hpp"
 
 #include "chat_list.hpp"

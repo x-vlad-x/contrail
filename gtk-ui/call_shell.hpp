@@ -53,8 +53,7 @@ private:
   bool _wanted = false;
 };
 
-// Whether the phone rings by itself (feedbackd is there): the core then doesn't play its own ringtone
-// for an incoming call (see patches/).
+// Whether feedbackd already owns its bus name: the call view uses the phone's ringtone then.
 bool SystemRingtone();
 
 } // namespace Contrail

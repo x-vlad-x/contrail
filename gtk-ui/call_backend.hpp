@@ -41,6 +41,7 @@ class CallBackend final {
   void setCamera(std::string id);
   void setOutputDevice(const std::string &id);
   void rate(int rating, const std::string &comment);
+  void dismissRating();
   void setChanged(std::function<void()> callback) { _changed = std::move(callback); }
   void setFrames(std::function<void(Calls::Frame, bool local)> callback) { _frame = std::move(callback); }
   [[nodiscard]] const Snapshot &snapshot() const { return _call; }

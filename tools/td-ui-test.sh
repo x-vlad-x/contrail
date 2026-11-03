@@ -468,6 +468,7 @@ stop
 section_calls() {
   echo "calls. Incoming and outgoing calls"
   start 120
+  c close 0.3
   c 'call-incoming' 0.5
   local line
   line=$(asked 'call-state:' call-state)
@@ -491,7 +492,7 @@ section_calls() {
   [[ $(asked 'call-state:' call-state) == *'shield=1'* ]] || fail "no proximity shield"
   c 'call-near 0' 0.2
   c 'call-hangup' 0.3
-  [[ $(asked 'call-state:' call-state) == *'active=0'*'shield=0'* ]] || fail "the call did not finish"
+  [[ $(asked 'call-state:' call-state) == *'active=0'*'visible=0 shield=0'* ]] || fail "the call did not finish"
   c 'call-incoming-video' 0.3
   c 'call-accept' 1
   line=$(asked 'call-state:' call-state)
@@ -502,6 +503,10 @@ section_calls() {
   [[ $(asked 'call-state:' call-state) == *'camera= remote=160 local=0'* ]] || fail "camera did not stop"
   c 'call-camera' 0.3
   [[ $(asked 'call-state:' call-state) == *'local=160'* ]] || fail "camera did not start"
+  c 'call-camera-failed' 0.2
+  [[ $(asked 'call-state:' call-state) == *'active=1'*'camera= remote=160 local=0'* ]] || fail "failed camera did not stop"
+  c 'call-camera' 0.3
+  [[ $(asked 'call-state:' call-state) == *'local=160'* ]] || fail "camera did not retry after an error"
   c 'call-remote-video-off' 0.3
   [[ $(asked 'call-state:' call-state) == *'remote=0 local=160'* ]] || fail "remote video did not stop"
   c 'call-hangup' 0.2

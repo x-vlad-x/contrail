@@ -765,7 +765,7 @@ void ChatView::buildHeader() {
   const auto user = known ? _store.user(known->peerId) : nullptr;
   if (known && known->kind == Td::ChatKind::Private && known->peerId != _store.selfId()
       && (!user || (!user->bot && !user->deleted))) {
-    auto *call = MakeIconButton("call-start-symbolic", Tr("lng_call_box_title").c_str());
+    auto *call = MakeIconButton("call-start-symbolic", Tr("lng_call_start").c_str(), "flat");
     _signals.clicked(call, [this, id = known->peerId] { _window.startCall(id); });
     adw_header_bar_pack_end(ADW_HEADER_BAR(header), call);
   }

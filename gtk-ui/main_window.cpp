@@ -177,6 +177,7 @@ void MainWindow::detach() {
 }
 
 void MainWindow::attach(Td::Session &session, const std::string &language) {
+  gtk_window_set_hide_on_close(GTK_WINDOW(_window), FALSE);
   clearChats();
   _session = &session;
   _sessionLifetime.reset();
@@ -259,6 +260,8 @@ void MainWindow::showLogin(api::AuthorizationState &state) {
 }
 
 void MainWindow::showChats() {
+  // Section calls: closing the ready window keeps signaling alive. A background handler may release its GUI.
+  gtk_window_set_hide_on_close(GTK_WINDOW(_window), TRUE);
   if (!_chatList) {
     _chatList = std::make_unique<ChatList>(*_store, Td::ListKind::Main, *this);
     adw_navigation_view_add(_sidebarNav, _chatList->page());

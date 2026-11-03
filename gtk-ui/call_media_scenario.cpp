@@ -62,6 +62,7 @@ class ScenarioMedia final : public Media {
     if (data == "reconnecting" && self->callbacks.state) self->callbacks.state(State::Reconnecting);
     else if (data == "established" && self->callbacks.state) self->callbacks.state(State::Established);
     else if (data == "failed" && self->callbacks.state) self->callbacks.state(State::Failed);
+    else if (data == "camera-failed" && self->callbacks.cameraFailed) self->callbacks.cameraFailed();
     else if (data == "remote-muted" && self->callbacks.remoteMedia) self->callbacks.remoteMedia(true, self->remoteVideo);
     else if (data == "remote-video-off" && self->callbacks.videoStopped) {
       self->remoteVideo = false;
