@@ -1610,6 +1610,7 @@ class ScenarioTransport final : public Transport {
     if (!link.starts_with("tg:") && link.find("t.me/") == std::string::npos) {
       return api::make_object<api::error>(400, "Not a Telegram link");
     }
+    if (link.starts_with("tg://socks?")) return proxyLink(link);
     const auto slash = path.find('/');
     const auto name = path.substr(0, slash);
     if (slash != std::string::npos) return api::make_object<api::internalLinkTypeMessage>(link);
@@ -2244,6 +2245,17 @@ class ScenarioTransport final : public Transport {
     later(1500, [this] {
       update(api::make_object<api::updateConnectionState>(api::make_object<api::connectionStateReady>()));
     });
+  }
+  // tg://socks?server=S&port=P, as TDLib reads it.
+  ObjectPtr proxyLink(const std::string &link) {
+    const auto value = [&](const std::string &key) {
+      const auto at = link.find(key + "=");
+      if (at == std::string::npos) return std::string();
+      const auto from = at + key.size() + 1;
+      return link.substr(from, link.find('&', from) - from);
+    };
+    return api::make_object<api::internalLinkTypeProxy>(api::make_object<api::proxy>(
+        value("server"), std::atoi(value("port").c_str()), api::make_object<api::proxyTypeSocks5>("", "")));
   }
   std::vector<Proxy> _proxies;
   std::int32_t _proxyIds = 0;

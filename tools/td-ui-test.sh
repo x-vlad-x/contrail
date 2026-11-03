@@ -617,6 +617,14 @@ section_background() {
   [[ $(proxies) == *'use=0 [0 HTTP good.example:8080 status="available (ping: 42 ms)"]' ]] || fail "turned off: $(proxies)"
   c 'proxy-use 1' 2.5
   [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="online"]' ]] || fail "turned on again: $(proxies)"
+  # A proxy link asks first.
+  c 'proxy-link tg://socks?server=link.example&port=1081' 1
+  [[ $(asked 'dialog:' dialog) == *'heading="Enable proxy" body="link.example:1081 (SOCKS5)"'* ]] \
+    || fail "no question for a proxy link: $(asked 'dialog:' dialog)"
+  c 'dialog-answer connect' 1
+  c back 0.5
+  c proxy 1.5
+  [[ $(proxies) == *'[1 SOCKS5 link.example:1081 enabled status="'* ]] || fail "the link's proxy: $(proxies)"
   c back 0.5
   c back 0.5
   # Logging out asks first; then a new session starts, without "you were logged out".

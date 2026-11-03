@@ -7,6 +7,7 @@
 #include "network.hpp"
 #include "notifications.hpp"
 #include "proxy.hpp"
+#include "text.hpp"
 #include "settings.hpp"
 #include "tray.hpp"
 
@@ -62,6 +63,9 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
       notifier->debugAction(std::atoll(rest.c_str()), action.substr(0, space),
                             space == std::string::npos ? std::string() : action.substr(space + 1));
     }
+  } else if (name == "proxy-link") {
+    // As a tap on the link in a message.
+    OpenTelegramLink(rest);
   } else if (name == "proxy") {
     window.openProxy();
   } else if (name.starts_with("proxy-")) {
