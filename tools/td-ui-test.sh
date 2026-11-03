@@ -18,6 +18,11 @@
 #      opening by itself, a file stopped and opened with a second tap, a GIF and a sticker opened, links, mentions,
 #      a spoiler and a bot command among emoji, Save and Copy in the menu, a menu closed with its chat, a failed
 #      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
+#   9. places: a place, a venue and a live location in a chat with their maps, a location's map with the distance,
+#      the picker sending the device's position, a place nearby, a place found by name and a point on the map;
+#      live locations: the bar, one's own sent, moved, on the shared map and stopped there, and going on after a
+#      restart; the chat's card with a group's members, a member's card, muting from it; the contacts with a
+#      search; About;
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -167,7 +172,7 @@ start 120
 c 'chat 1' 3
 c forward 1
 line=$(asked 'forward picker:' forward-picker)
-[[ $line == *'page=chats forum=0 shown=42 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
+[[ $line == *'page=chats forum=0 shown=43 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
   || fail "the chats to forward to: $line"
 c 'forward-search club' 0.5
 line=$(asked 'forward picker:' forward-picker)
@@ -464,11 +469,287 @@ c 'tap-text 2 #contrail' 1
 c tree 0.5
 grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
+
+# Section places: locations in a chat, their map, the picker.
+section_places() {
+  echo "9. Places"
+  start 150
+  c 'chat 43' 3
+  [[ $(asked 'chat media:' 'media 2') == *'location map='*' shown'* ]] || fail "no map of the place: $(asked 'chat media:' 'media 2')"
+  [[ $(asked 'chat media:' 'media 4') == *'live="updated 2 minutes ago" left="4'?'m"'* ]] \
+    || fail "the live location: $(asked 'chat media:' 'media 4')"
+  c tree 0.5
+  grep -q 'GtkLabel "Red Square"' "$WORK/log.txt" || fail "no venue's name"
+  # A place on the map: how far it is only after "my location".
+  c 'tap 2' 1
+  [[ $(asked 'Location viewer:' loc-state) == *'"Location" "" details="55.75580, 37.61730" distance="" '*'watching=0'* ]] \
+    || fail "the place's map: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-mine 0.3
+  c 'loc-fix 55.7558 37.6273 8' 0.3
+  [[ $(asked 'Location viewer:' loc-state) == *'distance="626 m away"'*'watching=1'* ]] \
+    || fail "no distance: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  c 'tap 4' 1
+  [[ $(asked 'Location viewer:' loc-state) == *'"Live Location" "Boris Places" details="updated 2 minutes ago"'* ]] \
+    || fail "the live location's map: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  # The picker: the device's position, places nearby, a place found by name, a point on the map.
+  c loc-picker 1
+  [[ $(asked 'Location picker:' loc-state) == *'sensitive=1'*'watching=1'* ]] \
+    || fail "the picker: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c 'loc-fix 55.7000 37.6000 12' 1.5
+  [[ $(asked 'Location picker:' loc-state) == *'send="Send My Current Location" "Accurate to 12 m" sensitive=1 pin=0 follow=1 venues=3'* ]] \
+    || fail "the position in the picker: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c 'loc-venue 1' 1
+  [[ $(asked 'chat media:' 'media 6') == *'location map='* ]] || fail "the place nearby wasn't sent"
+  grep -q 'Scenario: sent to Places:  55.70200 37.60000 "City Park"' "$WORK/log.txt" || fail "not the place chosen"
+  c loc-picker 1
+  c 'loc-search Pizza' 1.5
+  grep -q 'Scenario: places near 55.70000 37.60000 "Pizza"' "$WORK/log.txt" || fail "no search by name"
+  c 'loc-move 55.8000 37.7000' 1.5
+  [[ $(asked 'Location picker:' loc-state) == *'send="Send This Location" "55.80000, 37.70000" sensitive=1 pin=1 follow=0'* ]] \
+    || fail "a point on the map: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c loc-send 1
+  grep -q 'Scenario: sent to Places:  55.80000 37.70000 "" period 0' "$WORK/log.txt" || fail "the point wasn't sent"
+  c 'loc-state' 0.3
+  grep -q 'Location: no dialog shown' "$WORK/log.txt" || fail "the picker stayed"
+  # Live locations: Boris's in the bar, one's own started from the picker, moved, seen on the shared map, stopped there.
+  [[ $(asked 'Live bar:' live-bar) == *'revealed=1 text="Boris" stop=0 active=1' ]] || fail "no bar with Boris"
+  c loc-picker 1
+  c 'loc-fix 55.7000 37.6000 12' 1
+  c loc-live 1
+  c 'dialog-answer 15m' 1.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris and you" stop=1 active=2' ]] \
+    || fail "one's own live location isn't in the bar: $(grep 'Live bar:' "$WORK/log.txt" | tail -1)"
+  [[ $(asked 'chat media:' 'media 8') == *'live="updated just now" left="1'?'m"'* ]] \
+    || fail "the live location sent: $(grep 'chat media:' "$WORK/log.txt" | tail -1)"
+  c live-update 0.3
+  c 'loc-fix 55.7100 37.6100 10' 1
+  grep -q 'Scenario: live location 8 moved to 55.71000 37.61000' "$WORK/log.txt" || fail "the live location didn't move"
+  c live-bar-tap 1.5
+  [[ $(asked 'Live map:' live-state) == *'pins=2 share="Stop Sharing My Location" watching=1 moved=0 rows: ["You" "updated just now"] ["Boris Places" "updated 2 minutes ago · '* ]] \
+    || fail "the shared map: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c live-share 1
+  grep -q 'Scenario: live location 8 stopped' "$WORK/log.txt" || fail "not stopped from the shared map"
+  [[ $(asked 'Live map:' live-state) == *'pins=1 share="Share My Live Location"'* ]] \
+    || fail "the shared map after stopping: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris" stop=0 active=1' ]] || fail "the bar after stopping"
+  # The chat's card: the group's description and members, a member's card, muting from it.
+  c profile 1.5
+  [[ $(asked 'Profile: name' profile-state) == *'name="Places" status="3 members" mute=0 info: [Description=Where we meet] members: "Vlad" "Anna Places" "Boris Places"'* ]] \
+    || fail "the group's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
+  c 'profile-member 1' 1.5
+  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places" status="last seen '*'mute=0 info: [Mobile=+79990001001] [Bio=Loves maps]'* ]] \
+    || fail "a member's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
+  c profile-mute 1
+  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places"'*' mute=1 '* ]] || fail "not muted from the card"
+  c loc-close 0.5
+  c back 1
+  # The contacts: all of them, a search with the server's answer, a tap opening the chat; About.
+  c contacts 1.5
+  [[ $(asked 'Contacts:' contacts-state) == *'rows: "Anna Places" "Boris Places" "Friend 1" "Friend 2" "Friend 3"' ]] \
+    || fail "the contacts: $(grep 'Contacts:' "$WORK/log.txt" | tail -1)"
+  c 'contacts-search bor' 1.5
+  [[ $(asked 'Contacts:' contacts-state) == *'query="bor" empty="" rows: "Boris Places"' ]] \
+    || fail "the contacts found: $(grep 'Contacts:' "$WORK/log.txt" | tail -1)"
+  c 'contacts-open 0' 2
+  [[ $(asked 'chat topic=' state) == *' id=3002'* ]] || fail "the contact's chat didn't open"
+  c about 1
+  grep -q 'About: shown' "$WORK/log.txt" || fail "no About"
+  stop
+  # After a restart TDLib tells about one's own live location still shared: it goes on.
+  CONTRAIL_SCENARIO_LIVE=1 start 150
+  [[ $(asked 'Live locations: shares' live-locations) == *'shares=1 waiting=1 '*'[-700/6 period=2147483647 '* ]] \
+    || fail "the live location of the last run: $(grep 'Live locations: shares' "$WORK/log.txt" | tail -1)"
+  c 'loc-fix 55.7700 37.6300 8' 1
+  grep -q 'Scenario: live location 6 moved to 55.77000 37.63000' "$WORK/log.txt" || fail "it didn't go on"
+  stop
+}
+section_places
+# Section background: the settings, the app without its window, the tray icon, notifications, the proxy. A fake
+# notification server and tray watcher (td-fake-desktop.py) stand for the desktop.
+section_background() {
+  echo "10. Settings and the app in the background"
+  local desktop=$WORK/desktop.txt fake
+  : > "$desktop"
+  "$(dirname "$(realpath "$0")")/td-fake-desktop.py" "$desktop" &
+  fake=$!
+  for _ in $(seq 50); do grep -q '^ready' "$desktop" && break; sleep 0.1; done
+  grep -q '^ready' "$desktop" || fail "the fake desktop didn't start"
+  bg() { asked 'bg: ' bg-state; }
+  clean() { ! grep -E 'CRITICAL|Gtk-WARNING' "$WORK/log.txt" | grep -v 'Vulkan' | head -3 | grep . || fail "GTK complained"; }
+  start 120
+  c settings 1.5
+  local line
+  line=$(asked 'settings:' settings-state)
+  [[ $line == *'notify=1 sound=1 preview=1 background=0 account="Vlad" phone=15550001000'* ]] \
+    || fail "the settings: $line"
+  c tree 0.5
+  for text in 'Notifications and Sounds' 'Desktop notifications' 'Allow sound' 'Show message text' \
+      'Run in the background' 'About Contrail' 'Log out' 'Saved Messages' '+15550001000'; do
+    grep -q "\"$text\"" "$WORK/log.txt" || fail "no \"$text\" in the settings"
+  done
+  c 'settings-set notify 0' 0.3
+  c tree 0.5
+  grep 'AdwSwitchRow "Allow sound"' "$WORK/log.txt" | tail -1 | grep -q insensitive \
+    || fail "the sound can be turned on without notifications"
+  c 'settings-set notify 1' 0.3
+  # In the background: the tray icon with the unread chats, the window closed and opened again on the same chat.
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "a tray icon without the background: $(bg)"
+  c 'settings-set background 1' 1.5
+  line=$(bg)
+  [[ $line == *'background=1 tray=registered unread=10'* ]] || fail "no tray icon: $line"
+  grep -q '^tray-register' "$desktop" || fail "the tray icon didn't register with the watcher"
+  local item="org.kde.StatusNotifierItem-$P-1"
+  [[ $(gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+      --method org.freedesktop.DBus.Properties.Get org.kde.StatusNotifierItem Title) == *"Contrail (10)"* ]] \
+    || fail "the tray icon's title has no unread chats"
+  c back 0.5
+  c 'chat 3' 2
+  local chat place
+  chat=$(bg | sed -n 's/.* chat=\([-0-9]*\).*/\1/p')
+  [[ -n $chat && $chat != 0 ]] || fail "no chat opened: $(bg)"
+  # Up from the end: the window built again comes back to the same place, not to the end.
+  for _ in 1 2 3; do c 'scroll -900' 0.5; done
+  sleep 1
+  place=$(bg | sed -n 's/.* place=\([0-9]*\/[0-9]*\) .*/\1/p')
+  [[ -n $place && $place != 0/* ]] || fail "no place up in the chat: $(bg)"
+  c bg-close 2
+  line=$(bg)
+  [[ $line == *'window=0 '*'chat=0'* ]] || fail "the window stayed: $line"
+  kill -0 "$P" || fail "it quit instead of staying in the background"
+  grep -q 'background: the window is released' "$WORK/log.txt" || fail "the interface wasn't released"
+  gdbus call --session --dest "$item" --object-path /StatusNotifierItem \
+    --method org.kde.StatusNotifierItem.Activate 0 0 > /dev/null
+  sleep 2
+  line=$(bg)
+  [[ $line == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
+  c bg-close 2
+  c bg-open 2
+  [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  clean
+  # A network gone and back: TDLib is told once each time.
+  [[ $(asked 'network:' net-state) == *'sent=0'* ]] || fail "the network type sent at the start: $(asked 'network:' net-state)"
+  c 'net-simulate none' 0.2
+  c 'net-simulate none' 0.2
+  c 'net-simulate mobile' 0.5
+  (( $(grep -c 'scenario: network' "$WORK/log.txt") == 2 )) || fail "the network changes weren't told once each"
+  # The settings stay for the next start.
+  kill "$P"; wait "$P" 2>/dev/null || true; P=
+  start 120
+  [[ $(bg) == *'background=1 tray=registered'* ]] || fail "the background setting was lost: $(bg)"
+  [[ $(asked 'mem-guard:' mem-guard) == *'level=normal'* ]] || fail "no memory guard"
+  c 'mem-simulate low' 0.5
+  grep -q 'memory low, .* freeing what can be freed' "$WORK/log.txt" || fail "low memory isn't handled"
+  # Notifications: two messages to a chat that isn't open, the window closed; one notification for both.
+  notes() { grep -c "^$1" "$desktop" || true; }
+  c 'chat 0' 2
+  [[ $(bg) != *' chat=5' ]] || fail "the chat that gets messages is open"
+  c 'send /notify2' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=Are you coming tonight? 1\nAre you coming tonight? 2 '* ]] \
+    || fail "the notification: $line"
+  [[ $line == *'actions=default,mark-read,inline-reply '*'sound=message-new-instant'* ]] || fail "its buttons: $line"
+  (( $(notes notify) == 2 )) && [[ $line == *' replaces='[1-9]* ]] || fail "not one notification for the chat: $line"
+  local id
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  [[ $(asked 'notify:' notify-state) == *"[group=1 chat=5 shown=$id count=2 adopted=0]"* ]] || fail "$(asked 'notify:' notify-state)"
+  # Answered from the notification: sent to the chat, which is read then, and the notification goes.
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Reply "$id" 'On my way' > /dev/null
+  sleep 1
+  grep -q 'scenario: sent to 5 "On my way" reply_to=0' "$WORK/log.txt" || fail "the answer wasn't sent"
+  grep -q "^close id=$id" "$desktop" || fail "the notification stayed after the chat was read"
+  [[ $(bg) == *'window=0 '* ]] || fail "answering opened the window"
+  # Without the text of messages; a tap opens the chat.
+  c bg-open 2
+  c settings 1
+  c 'settings-set preview 0' 0.3
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  [[ $line == *'summary=Friend 5 body=You have a new message '* ]] || fail "the text is shown: $line"
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
+    --method org.contrail.FakeDesktop.Invoke "$id" default > /dev/null
+  sleep 2
+  [[ $(bg) == *'window=1 visible=1 '*' chat=5' ]] || fail "a tap didn't open the chat: $(bg)"
+  # Turned off: nothing comes.
+  c settings 1
+  c 'settings-set preview 1' 0.3
+  c 'settings-set notify 0' 0.3
+  local before
+  before=$(notes notify)
+  c back 0.5
+  c 'chat 0' 2
+  c 'send /notify' 2.5
+  (( $(notes notify) == before )) || fail "a notification came with them turned off"
+  c settings 1
+  c 'settings-set notify 1' 0.3
+  c 'settings-set background 0' 1
+  [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "the tray icon stayed: $(bg)"
+  # The proxies: added through the dialog, used, checked, edited, removed, turned off and on.
+  proxies() { asked 'proxy: use' proxy-state; }
+  c settings 1
+  c proxy 1
+  [[ $(proxies) == *'proxy: use=0' ]] || fail "proxies before any was added: $(proxies)"
+  c 'proxy-add socks5 good.example 1080 user secret' 0.5
+  line=$(proxies)
+  [[ $line == *'use=1 [0 SOCKS5 good.example:1080 enabled status="connecting…"]' ]] || fail "not used: $line"
+  sleep 2
+  [[ $(proxies) == *'[0 SOCKS5 good.example:1080 enabled status="online"]' ]] || fail "not connected: $(proxies)"
+  c 'proxy-add mtproto down.example 443' 0.5
+  grep -q 'proxy: dialog save=0' "$WORK/log.txt" || fail "an MTProto proxy without a secret can be saved"
+  c 'proxy-add mtproto down.example 443 dd0123456789abcdef' 2.5
+  line=$(proxies)
+  [[ $line == *'[0 SOCKS5 good.example:1080 status="available (ping: 42 ms)"] [1 MTProto down.example:443 enabled status="online"]' ]] \
+    || fail "two proxies: $line"
+  c 'proxy-enable 0' 2.5
+  [[ $(proxies) == *'enabled status="online"] [1 MTProto down.example:443 status="not available"]' ]] \
+    || fail "the other one: $(proxies)"
+  c 'proxy-edit 0 http good.example 8080' 1
+  c 'proxy-remove 1' 1
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="'* ]] || fail "edited and removed: $(proxies)"
+  [[ $(proxies) != *'[1 '* ]] || fail "not removed: $(proxies)"
+  c 'proxy-use 0' 1
+  [[ $(proxies) == *'use=0 [0 HTTP good.example:8080 status="available (ping: 42 ms)"]' ]] || fail "turned off: $(proxies)"
+  c 'proxy-use 1' 2.5
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="online"]' ]] || fail "turned on again: $(proxies)"
+  # A proxy link asks first.
+  c 'proxy-link tg://socks?server=link.example&port=1081' 1
+  [[ $(asked 'dialog:' dialog) == *'heading="Enable proxy" body="link.example:1081 (SOCKS5)"'* ]] \
+    || fail "no question for a proxy link: $(asked 'dialog:' dialog)"
+  c 'dialog-answer connect' 1
+  c back 0.5
+  c proxy 1.5
+  [[ $(proxies) == *'[1 SOCKS5 link.example:1081 enabled status="'* ]] || fail "the link's proxy: $(proxies)"
+  c back 0.5
+  c back 0.5
+  # Logging out asks first; then a new session starts, without "you were logged out".
+  c settings-logout 0.5
+  [[ $(asked 'dialog:' dialog) == *'heading="Are you sure you want to log out?"'* ]] || fail "no question before logging out"
+  c 'dialog-answer logout' 3
+  grep -q 'You were logged out' "$WORK/log.txt" && fail "logging out was taken for a lost session"
+  c tree 0.5
+  grep -q '"Friend 1"' <(sed -n '/tree$/,$p' "$WORK/log.txt" | tail -400) || fail "no chats after logging out"
+  clean
+  stop
+  kill "$fake" 2>/dev/null || true
+  echo "   ok"
+}
+section_background
 # Section calls: 1:1 signaling, audio/video controls and return from any chat.
 section_calls() {
   echo "calls. Incoming and outgoing calls"
   start 120
-  c close 0.3
+  c settings 0.5
+  c 'settings-set background 1' 0.5
+  c close 0.5
+  [[ $(asked 'bg: ' bg-state) == *'window=0 '* ]] || fail "the incoming call test needs a released window"
   c 'call-incoming' 0.5
   local line
   line=$(asked 'call-state:' call-state)
@@ -479,10 +760,12 @@ section_calls() {
   c 'call-mute' 0.2
   [[ $(asked 'call-state:' call-state) == *'muted=1'* ]] || fail "microphone not muted"
   c 'call-hide' 0.2
+  c bg-open 0.5
   c 'chat 0' 1
   [[ $(asked 'call-state:' call-state) == *'active=1'*'visible=0'* ]] || fail "navigation ended or showed the call"
   c close 0.3
   [[ $(asked 'call-state:' call-state) == *'active=1'* ]] || fail "closing the chat window ended the call"
+  [[ $(asked 'bg: ' bg-state) == *'window=0 '* ]] || fail "the active call kept the chat window"
   c 'call-present' 0.2
   [[ $(asked 'call-state:' call-state) == *'visible=1'* ]] || fail "no return to the call"
   c 'call-reconnecting' 0.2
@@ -523,6 +806,7 @@ section_calls() {
   c 'call-start 1' 1.2
   c 'call-rated' 0.3
   c 'call-rate 5' 0.3
+  ! grep -E 'CRITICAL|Gtk-WARNING' "$WORK/log.txt" | grep -v 'Vulkan' | head -3 | grep . || fail "GTK complained during a call"
   stop
 }
 section_calls

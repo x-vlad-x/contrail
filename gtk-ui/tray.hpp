@@ -1,8 +1,8 @@
 #pragma once
 
 #include <gio/gio.h>
-#include <QtCore/QString>
 #include <functional>
+#include <string>
 
 namespace Contrail {
 
@@ -23,6 +23,9 @@ public:
 
   // The number of unread chats: a badge on the icon and in its tooltip.
   void setUnread(int count);
+  [[nodiscard]] int unread() const { return _unread; }
+  // Registered with the panel's watcher: "Contrail (3)" on the desktop.
+  [[nodiscard]] bool shown() const { return _registered; }
 
 private:
   static void HandleMethod(GDBusConnection *, const char *, const char *, const char *interface, const char *method,
@@ -33,19 +36,20 @@ private:
   void registerWithWatcher();
   void emit(const char *path, const char *interface, const char *signal, GVariant *parameters = nullptr);
   [[nodiscard]] GVariant *menuLayout() const;
-  [[nodiscard]] QString openLabel() const;
-  [[nodiscard]] QString quitLabel() const;
+  [[nodiscard]] std::string openLabel() const;
+  [[nodiscard]] std::string quitLabel() const;
 
   Callbacks _callbacks;
   GDBusConnection *_bus = nullptr;
   GCancellable *_cancellable = nullptr;
-  QString _serviceName;
+  std::string _serviceName;
   guint _itemId = 0;
   guint _menuId = 0;
   guint _ownerId = 0;
   guint _watcherId = 0;
   guint _menuRevision = 1;
   int _unread = 0;
+  bool _registered = false;
 };
 
 } // namespace Contrail

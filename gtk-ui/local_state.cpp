@@ -10,6 +10,7 @@ namespace Contrail {
 namespace {
 
 constexpr char kHiddenPinned[] = "hidden-pinned";
+constexpr char kSettings[] = "settings";
 
 [[nodiscard]] const std::string &StatePath() {
   static const auto result = Td::DataDirectory() + "/contrail-state.ini";
@@ -38,7 +39,42 @@ void Save() {
   return topic ? std::to_string(chat) + "-" + std::to_string(topic) : std::to_string(chat);
 }
 
+bool Flag(const char *key, bool fallback) {
+  GError *error = nullptr;
+  const auto value = g_key_file_get_boolean(State(), kSettings, key, &error);
+  if (!error) return value;
+  g_error_free(error);
+  return fallback;
+}
+
+// Read once; the page changes it only through SetSettings.
+AppSettings &CurrentSettings() {
+  static auto result = [] {
+    const auto defaults = AppSettings();
+    return AppSettings{
+        .notify = Flag("notify", defaults.notify),
+        .sound = Flag("sound", defaults.sound),
+        .preview = Flag("preview", defaults.preview),
+        .background = Flag("background", defaults.background),
+    };
+  }();
+  return result;
+}
+
 }  // namespace
+
+const AppSettings &Settings() {
+  return CurrentSettings();
+}
+
+void SetSettings(const AppSettings &settings) {
+  CurrentSettings() = settings;
+  g_key_file_set_boolean(State(), kSettings, "notify", settings.notify);
+  g_key_file_set_boolean(State(), kSettings, "sound", settings.sound);
+  g_key_file_set_boolean(State(), kSettings, "preview", settings.preview);
+  g_key_file_set_boolean(State(), kSettings, "background", settings.background);
+  Save();
+}
 
 std::int64_t HiddenPinnedMessage(std::int64_t chat, std::int32_t topic) {
   return g_key_file_get_int64(State(), kHiddenPinned, ChatKey(chat, topic).c_str(), nullptr);

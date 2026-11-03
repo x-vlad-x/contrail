@@ -26,11 +26,29 @@
 //   call-state|hide|present|speaker|camera-failed | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
 //   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
 //   call-tone incoming|outgoing|connecting|ended|busy|stop (plays only a call tone, without calling)
+//   loc-picker (sending a location to the open chat) | loc-fix LAT LON [ACCURACY] (a position, as from the device)
+//   loc-service | in the picker: loc-send, loc-venue N, loc-search TEXT, loc-move LAT LON, loc-mine, loc-state |
+//   on a location's map (tap N on its message): loc-mine, loc-state, loc-stop | loc-close (the dialog shown)
+//   loc-live (the picker's live location row) | profile [CHAT_ID] (the card of the open chat) | profile-state
+//   profile-member N | profile-mute | contacts | contacts-state | contacts-search TEXT | contacts-open N | about
+//   live-locations (what is shared from here) | live-update (a fix taken and sent now) | live-bar | live-bar-tap
+//   live-map (of the open chat) | on the shared map: live-state, live-share (its button), live-row N
+//   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
+//   launcher) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
+//   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
+//   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
+//   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
+//   proxy-enable N | proxy-remove N | proxy-link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
 #include "debug.hpp"
+
+#include "background_debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "dialogs.hpp"
 #include "forward.hpp"
+#include "live_map.hpp"
+#include "location_ui.hpp"
 #include "main_window.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
@@ -114,7 +132,15 @@ void Run(MainWindow &window, const std::string &command) {
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
   if (name.starts_with("call-")) {
     window.debugCall(name.substr(5), rest);
-  } else if (name == "mem") {
+    return;
+  }
+  if (RunBackgroundCommand(window, name, rest)) return;
+  // Without its window (the app in the background) only what needs none.
+  if (!window.widget() && name != "mem" && name != "mem-arenas" && name != "trim") {
+    g_message("debug: no window for %s", command.c_str());
+    return;
+  }
+  if (name == "mem") {
     // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
     // is the main arena's only.
     const auto info = mallinfo2();
@@ -273,6 +299,11 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name == "loc-picker" && window.chatView()) {
+    window.chatView()->chooseLocation();
+  } else if (LocationDebugCommand(window, name, rest)) {
+  } else if (ProfileDebugCommand(window, name, rest)) {
+  } else if (LiveMapDebugCommand(window, name, rest)) {
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));

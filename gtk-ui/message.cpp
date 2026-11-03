@@ -2,6 +2,8 @@
 
 #include "chat_view.hpp"
 #include "layout.hpp"
+#include "location_ui.hpp"
+#include "map_view.hpp"
 #include "device_scale.hpp"
 #include "media_progress.hpp"
 #include "picture_decode.hpp"
@@ -631,6 +633,7 @@ MessageWidget::~MessageWidget() {
   if (_highlightTimeout) {
     g_source_remove(_highlightTimeout);
   }
+  if (_liveTimer) g_source_remove(_liveTimer);
   g_object_set_data(G_OBJECT(_row), "contrail-message", nullptr);
   if (auto *parent = gtk_widget_get_parent(_row)) {
     gtk_list_box_remove(GTK_LIST_BOX(parent), _row);
@@ -999,6 +1002,9 @@ GtkWidget *MessageWidget::buildMedia(Cell &cell, int maxWidth) {
       const auto &poll = static_cast<const api::messagePoll *>(content)->poll_;
       return poll ? buildPoll(*poll) : nullptr;
     }
+    case api::messageLocation::ID:
+    case api::messageLiveLocation::ID:
+    case api::messageVenue::ID: return buildLocation(cell);
     default: return nullptr;
   }
 }
@@ -1817,6 +1823,11 @@ std::string MessageWidget::debugDescribe() const {
       const auto icon = gtk_button_get_icon_name(GTK_BUTTON(cell->documentButton));
       out += std::string(" icon=") + (icon ? icon : "");
     }
+    if (cell->location) {
+      out += " location map=" + std::to_string(cell->pictureFile) + (cell->sourcePath.empty() ? "" : " shown");
+      if (cell->liveStatus) out += std::string(" live=\"") + gtk_label_get_text(GTK_LABEL(cell->liveStatus)) + "\"";
+      if (cell->liveRemaining) out += std::string(" left=\"") + gtk_label_get_text(GTK_LABEL(cell->liveRemaining)) + "\"";
+    }
     out += "]";
   }
   return out;
@@ -1833,6 +1844,120 @@ void MessageWidget::debugTap(int index) {
 
 bool MessageWidget::debugTapText(const std::string &part) {
   return TapTextIn(_row, part);
+}
+
+// --- locations ---------------------------------------------------------------
+
+namespace {
+
+// A location's map, as Telegram's servers draw it (at twice the size for sharp screens).
+constexpr auto kMapWidth = 280;
+constexpr auto kMapHeight = 150;
+constexpr auto kMapZoom = 15;
+constexpr auto kMapScale = 2;
+
+}  // namespace
+
+// A location: the map with the pin (a live location: with the avatar of whoever shares it, and the time left),
+// the venue's name and address, or "Live Location" and when it was updated. A tap opens it on a map.
+GtkWidget *MessageWidget::buildLocation(Cell &cell) {
+  auto info = LocationInfo();
+  if (!MessageLocation(*cell.item->data, &info)) return nullptr;
+  const auto item = cell.item;
+  const auto live = LiveLocationActive(*item->data);
+  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(box, "location");
+
+  auto *overlay = gtk_overlay_new();
+  cell.picture = MakeMediaPicture(kMapWidth, kMapHeight);
+  cell.width = kMapWidth;
+  cell.height = kMapHeight;
+  cell.kind = PictureKind::Photo;
+  gtk_widget_add_css_class(cell.picture, "message-photo");
+  gtk_widget_add_css_class(cell.picture, "location-map");
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), MakeMediaFrame(cell.picture, kMapWidth, kMapHeight));
+  cell.location = std::make_shared<char>();
+  // TDLib asks Telegram's servers for the picture of the map and keeps it as a file.
+  const auto weak = std::weak_ptr<char>(cell.location);
+  auto *raw = &cell;
+  _chat.store().client().request<api::file>(
+      api::make_object<api::getMapThumbnailFile>(api::make_object<api::location>(info.lat, info.lon, 0.), kMapZoom,
+                                                 kMapWidth, kMapHeight, kMapScale, item->data->chat_id_),
+      _chat.lifetime(),
+      [this, weak, raw](api::file &file) {
+        if (weak.expired()) return;
+        raw->pictureFile = file.id_;
+        watchPicture(*raw, &file);
+      },
+      [](api::error &) {});
+  auto *pin = MakeMapPin(live ? MakeSenderAvatar(_chat.store(), *item->data, 30) : nullptr);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), pin);
+  if (live) {
+    cell.liveRemaining = gtk_label_new(nullptr);
+    gtk_widget_add_css_class(cell.liveRemaining, "osd");
+    gtk_widget_add_css_class(cell.liveRemaining, "media-status");
+    gtk_widget_add_css_class(cell.liveRemaining, "numeric");
+    gtk_widget_set_halign(cell.liveRemaining, GTK_ALIGN_END);
+    gtk_widget_set_valign(cell.liveRemaining, GTK_ALIGN_START);
+    gtk_widget_set_can_target(cell.liveRemaining, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), cell.liveRemaining);
+  }
+  const auto open = [this, item] {
+    if (TapAllowed()) _chat.openLocation(*item);
+  };
+  _taps.push_back(open);
+  auto *click = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      click, "released", [open](GtkGestureClick *, int, double, double) { open(); });
+  gtk_widget_add_controller(overlay, GTK_EVENT_CONTROLLER(click));
+  gtk_box_append(GTK_BOX(box), overlay);
+
+  const auto addLabel = [&](const std::string &text, const char *cssClass) {
+    auto *label = gtk_label_new(text.c_str());
+    gtk_widget_add_css_class(label, cssClass);
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(label), 36);
+    gtk_box_append(GTK_BOX(box), label);
+    return label;
+  };
+  if (live) {
+    addLabel(Tr("lng_live_location"), "heading");
+    cell.liveStatus = addLabel(std::string(), "dim-label");
+    gtk_widget_add_css_class(cell.liveStatus, "caption");
+  } else if (!info.title.empty()) {
+    addLabel(info.title, "heading");
+    if (!info.address.empty()) gtk_widget_add_css_class(addLabel(info.address, "dim-label"), "caption");
+  }
+  refreshLive();
+  return box;
+}
+
+// A live location's "updated N minutes ago" and the time left go on by themselves; when its time is over it
+// becomes a plain location.
+void MessageWidget::refreshLive() {
+  auto any = false;
+  for (const auto &cell : _cells) {
+    if (!cell->liveStatus || !cell->item->data) continue;
+    if (!LiveLocationActive(*cell->item->data)) {
+      refresh();
+      return;
+    }
+    any = true;
+    gtk_label_set_text(GTK_LABEL(cell->liveStatus), LiveLocationUpdated(*cell->item->data).c_str());
+    if (cell->liveRemaining) {
+      gtk_label_set_text(GTK_LABEL(cell->liveRemaining), LiveLocationRemaining(*cell->item->data).c_str());
+    }
+  }
+  if (any && !_liveTimer) {
+    _liveTimer = g_timeout_add_seconds(30, +[](gpointer data) -> gboolean {
+      static_cast<MessageWidget *>(data)->refreshLive();
+      return G_SOURCE_CONTINUE;
+    }, this);
+  } else if (!any && _liveTimer) {
+    g_source_remove(std::exchange(_liveTimer, 0));
+  }
 }
 
 }  // namespace Contrail

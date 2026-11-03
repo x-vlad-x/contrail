@@ -78,6 +78,13 @@ constexpr auto kDownloadStepMs = 200u;
 constexpr auto kDownloadStep = std::int64_t(128 * 1024);
 constexpr auto kSlowSendMs = 1500u;
 constexpr auto kCommandChat = std::int64_t(3);
+// "Places": a group with a place, a venue and live locations (locations, the shared map, the chat's card).
+constexpr auto kPlacesId = std::int64_t(-700);
+constexpr auto kPlacesGroupId = std::int64_t(700);
+constexpr auto kPlacesOrder = std::int64_t(1) << 28;
+constexpr auto kPlacesUsers = std::int64_t(3001);  // Anna and Boris.
+constexpr auto kVenueBotId = std::int64_t(3100);
+constexpr auto kMapFileIds = 4000000;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -383,8 +390,9 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
-    if (callRequest(id, *function) || showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
-        || reactionRequest(id, *function)) {
+    if (callRequest(id, *function) || placesRequest(id, *function) || showcaseRequest(id, *function)
+        || forumRequest(id, *function) || pinnedRequest(id, *function) || reactionRequest(id, *function)
+        || backgroundRequest(id, *function)) {
       return;
     }
     switch (function->get_id()) {
@@ -574,6 +582,7 @@ class ScenarioTransport final : public Transport {
     addForum();
     addReactionsChannel();
     addShowcase();
+    addPlaces();
     update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("\xE2\x9D\xA4")));
     if (!_fullList) return;
     addOtherChats();
@@ -1610,6 +1619,7 @@ class ScenarioTransport final : public Transport {
     if (!link.starts_with("tg:") && link.find("t.me/") == std::string::npos) {
       return api::make_object<api::error>(400, "Not a Telegram link");
     }
+    if (link.starts_with("tg://socks?")) return proxyLink(link);
     const auto slash = path.find('/');
     const auto name = path.substr(0, slash);
     if (slash != std::string::npos) return api::make_object<api::internalLinkTypeMessage>(link);
@@ -2099,9 +2109,6 @@ class ScenarioTransport final : public Transport {
   }
   bool callRequest(std::uint64_t id, api::Function &function) {
     switch (function.get_id()) {
-      case api::getProxies::ID:
-        answer(id, api::make_object<api::addedProxies>());
-        return true;
       case api::createCall::ID: {
         const auto &request = static_cast<const api::createCall &>(function);
         ++_callId; _callUser = request.user_id_; _callVideo = request.is_video_;
@@ -2154,6 +2161,545 @@ class ScenarioTransport final : public Transport {
   bool _callOutgoing = false;
   bool _callVideo = false;
   bool _callActive = false;
+  // --- places: locations, live locations, the chat's card ---------------------
+
+  struct Place {
+    std::int64_t sender = 0;
+    std::string text;           // A text message when there is no position.
+    double lat = 0.;
+    double lon = 0.;
+    std::string title;          // A venue.
+    std::string address;
+    std::int32_t period = 0;    // A live location.
+    std::int32_t date = 0;
+    std::int32_t editDate = 0;
+    bool stopped = false;
+  };
+
+  // With a dot whatever the language.
+  static std::string Ascii(double value) {
+    char buffer[G_ASCII_DTOSTR_BUF_SIZE];
+    return g_ascii_formatd(buffer, sizeof(buffer), "%.5f", value);
+  }
+
+  static std::int32_t RealNow() {
+    return std::int32_t(g_get_real_time() / G_USEC_PER_SEC);
+  }
+
+  void addPlaces() {
+    update(api::make_object<api::updateUser>(MakeUser(kPlacesUsers, "Anna", "Places")));
+    update(api::make_object<api::updateUser>(MakeUser(kPlacesUsers + 1, "Boris", "Places")));
+    auto bot = MakeUser(kVenueBotId, "Foursquare", "");
+    update(api::make_object<api::updateUser>(std::move(bot)));
+    auto group = api::make_object<api::supergroup>();
+    group->id_ = kPlacesGroupId;
+    group->member_count_ = 3;
+    group->status_ = api::make_object<api::chatMemberStatusMember>(0);
+    update(api::make_object<api::updateSupergroup>(std::move(group)));
+    // Live locations need the time of now: a fixed date would have them over long ago.
+    const auto now = RealNow();
+    _places = {
+        {.sender = kSelfId, .text = "Where shall we meet?", .date = now - 3600},
+        {.sender = kPlacesUsers, .lat = 55.7558, .lon = 37.6173, .date = now - 3000},
+        {.sender = kSelfId, .lat = 55.7539, .lon = 37.6208, .title = "Red Square", .address = "Moscow, Russia",
+         .date = now - 2400},
+        {.sender = kPlacesUsers + 1, .lat = 55.7520, .lon = 37.6175, .period = 3600, .date = now - 600,
+         .editDate = now - 120},
+        {.sender = kPlacesUsers, .text = "On my way", .date = now - 60},
+    };
+    // CONTRAIL_SCENARIO_LIVE=1: as after a restart, this account still shares a live location here.
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) {
+      _places.push_back({.sender = kSelfId, .lat = 55.7600, .lon = 37.6200, .period = 0x7FFFFFFF, .date = now - 900});
+    }
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kPlacesId;
+    chat->type_ = api::make_object<api::chatTypeSupergroup>(kPlacesGroupId, false);
+    chat->title_ = "Places";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->last_message_ = placeMessage(int(_places.size()));
+    chat->last_read_inbox_message_id_ = std::int64_t(_places.size()) * kIdStep;
+    chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kPlacesOrder, false, nullptr));
+    _orders[kPlacesId] = {kPlacesOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) activeLive();
+  }
+
+  bool placeLive(const Place &place) const {
+    return place.text.empty() && place.period && !place.stopped
+           && (place.period == 0x7FFFFFFF || place.date + place.period > RealNow());
+  }
+
+  // What TDLib tells about this account's own live locations whenever their list changes.
+  void activeLive() {
+    auto messages = std::vector<api::object_ptr<api::message>>();
+    for (auto index = 1; index <= int(_places.size()); ++index) {
+      const auto &place = _places[std::size_t(index - 1)];
+      if (place.sender == kSelfId && placeLive(place)) messages.push_back(placeMessage(index));
+    }
+    update(api::make_object<api::updateActiveLiveLocationMessages>(std::move(messages)));
+  }
+
+  ObjectPtr editLive(api::editMessageLiveLocation &request) {
+    const auto index = int(request.message_id_ / kIdStep);
+    if (index < 1 || index > int(_places.size()) || !_places[std::size_t(index - 1)].period) {
+      return api::make_object<api::error>(400, "MESSAGE_ID_INVALID");
+    }
+    auto &place = _places[std::size_t(index - 1)];
+    if (!placeLive(place)) return api::make_object<api::error>(400, "MESSAGE_NOT_MODIFIED");
+    const auto now = RealNow();
+    if (!request.location_ || !request.location_->location_) {
+      // Stopped: the server shortens it to the time it went on.
+      place.stopped = true;
+      place.period = std::max(now - place.date, 1);
+      g_message("Scenario: live location %d stopped", index);
+    } else {
+      place.lat = request.location_->location_->latitude_;
+      place.lon = request.location_->location_->longitude_;
+      g_message("Scenario: live location %d moved to %s %s", index, Ascii(place.lat).c_str(), Ascii(place.lon).c_str());
+    }
+    place.editDate = now;
+    update(api::make_object<api::updateMessageContent>(kPlacesId, request.message_id_,
+                                                         std::move(placeMessage(index)->content_)));
+    update(api::make_object<api::updateMessageEdited>(kPlacesId, request.message_id_, now, nullptr));
+    if (place.stopped) activeLive();
+    return placeMessage(index);
+  }
+
+  api::object_ptr<api::message> placeMessage(int index) {
+    const auto &place = _places[std::size_t(index - 1)];
+    auto message = MakeMessage(kPlacesId, index * kIdStep, place.sender, place.date, place.text);
+    message->edit_date_ = place.editDate;
+    if (!place.text.empty()) return message;
+    auto location = api::make_object<api::location>(place.lat, place.lon, 0.);
+    if (place.period) {
+      const auto left = (place.period == 0x7FFFFFFF) ? place.period : std::max(place.date + place.period - RealNow(), 0);
+      message->content_ = api::make_object<api::messageLiveLocation>(
+          api::make_object<api::liveLocation>(std::move(location), place.period, 0, 0),
+          place.stopped ? 0 : left);
+    } else if (!place.title.empty()) {
+      message->content_ = api::make_object<api::messageVenue>(
+          api::make_object<api::venue>(std::move(location), place.title, place.address, "foursquare", "4b", ""));
+    } else {
+      message->content_ = api::make_object<api::messageLocation>(std::move(location));
+    }
+    return message;
+  }
+
+  api::object_ptr<api::message> placeSent(api::sendMessage &request) {
+    auto place = Place{.sender = kSelfId, .date = RealNow()};
+    const auto content = request.input_message_content_.get();
+    if (content && content->get_id() == api::inputMessageLocation::ID) {
+      const auto &location = static_cast<api::inputMessageLocation *>(content)->location_;
+      place.lat = location->latitude_;
+      place.lon = location->longitude_;
+    } else if (content && content->get_id() == api::inputMessageLiveLocation::ID) {
+      const auto &live = static_cast<api::inputMessageLiveLocation *>(content)->location_;
+      place.lat = live->location_->latitude_;
+      place.lon = live->location_->longitude_;
+      place.period = live->live_period_;
+    } else if (content && content->get_id() == api::inputMessageVenue::ID) {
+      const auto &venue = static_cast<api::inputMessageVenue *>(content)->venue_;
+      place.lat = venue->location_->latitude_;
+      place.lon = venue->location_->longitude_;
+      place.title = venue->title_;
+      place.address = venue->address_;
+    } else if (content && content->get_id() == api::inputMessageText::ID) {
+      place.text = static_cast<api::inputMessageText *>(content)->text_->text_;
+    } else {
+      place.text = "?";
+    }
+    g_message("Scenario: sent to Places: %s %s %s \"%s\" period %d", place.text.c_str(), Ascii(place.lat).c_str(),
+              Ascii(place.lon).c_str(), place.title.c_str(), place.period);
+    _places.push_back(std::move(place));
+    const auto index = int(_places.size());
+    const auto temporary = index * kIdStep + 1;
+    const auto pending = [&] {
+      auto message = placeMessage(index);
+      message->id_ = temporary;
+      message->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
+      return message;
+    };
+    update(api::make_object<api::updateNewMessage>(pending()));
+    later(200, [this, index, temporary] {
+      update(api::make_object<api::updateMessageSendSucceeded>(placeMessage(index), temporary));
+      update(api::make_object<api::updateChatLastMessage>(kPlacesId, placeMessage(index),
+                                                          std::vector<api::object_ptr<api::chatPosition>>()));
+      if (_places[std::size_t(index - 1)].period) activeLive();
+    });
+    return pending();
+  }
+
+  api::object_ptr<api::file> mapFile(const api::getMapThumbnailFile &request) {
+    const auto id = kMapFileIds + (++_mapFiles);
+    auto local = api::make_object<api::localFile>();
+    local->path_ = PhotoFile(7, request.width_ * request.scale_, request.height_ * request.scale_);
+    local->can_be_downloaded_ = true;
+    local->is_downloading_completed_ = true;
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->local_ = std::move(local);
+    file->remote_ = api::make_object<api::remoteFile>();
+    return file;
+  }
+
+  // The requests about locations and the "Places" group; false for anything else.
+  bool placesRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::getMapThumbnailFile::ID: {
+        auto file = mapFile(static_cast<api::getMapThumbnailFile &>(function));
+        update(api::make_object<api::updateFile>(mapFile(static_cast<api::getMapThumbnailFile &>(function))));
+        answer(id, std::move(file));
+        return true;
+      }
+      case api::getOption::ID:
+        if (static_cast<api::getOption &>(function).name_ != "venue_search_bot_username") return false;
+        answer(id, api::make_object<api::optionValueString>("foursquare"));
+        return true;
+      case api::searchPublicChat::ID: {
+        if (static_cast<api::searchPublicChat &>(function).username_ != "foursquare") return false;
+        auto chat = api::make_object<api::chat>();
+        chat->id_ = kVenueBotId;
+        chat->type_ = api::make_object<api::chatTypePrivate>(kVenueBotId);
+        chat->title_ = "Foursquare";
+        chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+        answer(id, std::move(chat));
+        return true;
+      }
+      case api::getInlineQueryResults::ID: {
+        const auto &request = static_cast<api::getInlineQueryResults &>(function);
+        auto result = api::make_object<api::inlineQueryResults>();
+        const auto lat = request.user_location_ ? request.user_location_->latitude_ : 0.;
+        const auto lon = request.user_location_ ? request.user_location_->longitude_ : 0.;
+        const char *names[] = {"Coffee House", "City Park", "Old Bookshop"};
+        for (auto i = 0; i < 3; ++i) {
+          const auto title = request.query_.empty() ? std::string(names[i]) : request.query_ + " " + std::to_string(i + 1);
+          result->results_.push_back(api::make_object<api::inlineQueryResultVenue>(
+              "venue" + std::to_string(i),
+              api::make_object<api::venue>(api::make_object<api::location>(lat + 0.001 * (i + 1), lon, 0.), title,
+                                           "Street " + std::to_string(i + 1), "foursquare", "4b" + std::to_string(i), ""),
+              nullptr));
+        }
+        g_message("Scenario: places near %s %s \"%s\"", Ascii(lat).c_str(), Ascii(lon).c_str(), request.query_.c_str());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        answer(id, placeSent(request));
+        return true;
+      }
+      case api::getChatHistory::ID: {
+        const auto &request = static_cast<api::getChatHistory &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        auto result = api::make_object<api::messages>();
+        const auto count = int(_places.size());
+        auto newest = request.from_message_id_ ? int(request.from_message_id_ / kIdStep) : count + 1;
+        newest -= request.offset_;
+        if (request.offset_ == 0) --newest;
+        newest = std::min(newest, count);
+        for (auto index = newest; index >= 1 && int(result->messages_.size()) < request.limit_; --index) {
+          result->messages_.push_back(placeMessage(index));
+        }
+        result->total_count_ = count;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::editMessageLiveLocation::ID: {
+        auto &request = static_cast<api::editMessageLiveLocation &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        answer(id, editLive(request));
+        return true;
+      }
+      case api::searchChatRecentLocationMessages::ID: {
+        auto result = api::make_object<api::messages>();
+        if (static_cast<api::searchChatRecentLocationMessages &>(function).chat_id_ == kPlacesId) {
+          for (auto index = int(_places.size()); index >= 1; --index) {
+            if (placeLive(_places[std::size_t(index - 1)])) result->messages_.push_back(placeMessage(index));
+          }
+        }
+        result->total_count_ = int(result->messages_.size());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getContacts::ID: {
+        answer(id, api::make_object<api::users>(5, std::vector<std::int64_t>{1, 2, 3, kPlacesUsers, kPlacesUsers + 1}));
+        return true;
+      }
+      case api::searchContacts::ID: {
+        // The server finds Boris by his last name too.
+        const auto &query = static_cast<api::searchContacts &>(function).query_;
+        auto ids = std::vector<std::int64_t>();
+        if (query.find("Plac") != std::string::npos) ids = {kPlacesUsers, kPlacesUsers + 1};
+        g_message("Scenario: contacts searched for \"%s\"", query.c_str());
+        answer(id, api::make_object<api::users>(int(ids.size()), std::move(ids)));
+        return true;
+      }
+      case api::getUser::ID: {
+        const auto user = static_cast<api::getUser &>(function).user_id_;
+        auto result = (user >= kPlacesUsers && user <= kPlacesUsers + 1)
+                          ? MakeUser(user, user == kPlacesUsers ? "Anna" : "Boris", "Places")
+                          : MakeUser(user, "Friend", std::to_string(user));
+        result->phone_number_ = "7999000" + std::to_string(1000 + user % 1000);
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getUserFullInfo::ID: {
+        auto full = api::make_object<api::userFullInfo>();
+        full->bio_ = Formatted("Loves maps");
+        answer(id, std::move(full));
+        return true;
+      }
+      case api::getSupergroupFullInfo::ID: {
+        if (static_cast<api::getSupergroupFullInfo &>(function).supergroup_id_ != kPlacesGroupId) return false;
+        auto full = api::make_object<api::supergroupFullInfo>();
+        full->description_ = "Where we meet";
+        full->member_count_ = 3;
+        answer(id, std::move(full));
+        return true;
+      }
+      case api::getSupergroupMembers::ID: {
+        if (static_cast<api::getSupergroupMembers &>(function).supergroup_id_ != kPlacesGroupId) return false;
+        auto result = api::make_object<api::chatMembers>();
+        const auto member = [&](std::int64_t user, api::object_ptr<api::ChatMemberStatus> status) {
+          result->members_.push_back(api::make_object<api::chatMember>(
+              api::make_object<api::messageSenderUser>(user), std::string(), 0, 0, std::move(status)));
+        };
+        member(kSelfId, api::make_object<api::chatMemberStatusCreator>(false, true));
+        member(kPlacesUsers, api::make_object<api::chatMemberStatusAdministrator>(false, nullptr));
+        member(kPlacesUsers + 1, api::make_object<api::chatMemberStatusMember>(0));
+        result->total_count_ = 3;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::createPrivateChat::ID: {
+        const auto user = static_cast<api::createPrivateChat &>(function).user_id_;
+        if (user != kPlacesUsers && user != kPlacesUsers + 1) return false;
+        const auto make = [&] {
+          auto chat = api::make_object<api::chat>();
+          chat->id_ = user;
+          chat->type_ = api::make_object<api::chatTypePrivate>(user);
+          chat->title_ = user == kPlacesUsers ? "Anna Places" : "Boris Places";
+          chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+          return chat;
+        };
+        update(api::make_object<api::updateNewChat>(make()));
+        answer(id, make());
+        return true;
+      }
+      case api::getMessage::ID: {
+        const auto &request = static_cast<api::getMessage &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        const auto index = int(request.message_id_ / kIdStep);
+        if (index >= 1 && index <= int(_places.size())) answer(id, placeMessage(index));
+        else answer(id, api::make_object<api::error>(404, "Not Found"));
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // --- settings and the app in the background ------------------------------------
+
+  template <typename Type>
+  static const Type *As(const api::Object *object) {
+    return object && object->get_id() == Type::ID ? static_cast<const Type *>(object) : nullptr;
+  }
+
+  bool backgroundRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::loadChats::ID:
+        // The badge of the tray icon: the friends with unread messages (every fourth), none of them muted.
+        if (!_unreadCountSent) {
+          _unreadCountSent = true;
+          const auto unread = kChatCount / 4;
+          update(api::make_object<api::updateUnreadChatCount>(ListObject(false), kChatCount, unread, unread, 0, 0));
+        }
+        return false;
+      case api::getMe::ID: {
+        auto me = MakeUser(kSelfId, "Vlad", "");
+        me->phone_number_ = "15550001000";
+        answer(id, std::move(me));
+        return true;
+      }
+      case api::setOption::ID: {
+        auto &request = static_cast<api::setOption &>(function);
+        if (request.name_ == "notification_group_count_max") {
+          const auto value = As<api::optionValueInteger>(request.value_.get());
+          _notificationsOn = value && value->value_ > 0;
+        }
+        return false;
+      }
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        const auto input = As<api::inputMessageText>(request.input_message_content_.get());
+        const auto text = input && input->text_ ? input->text_->text_ : std::string();
+        // "/notify" or "/notify2": a message or two come to Friend 5 a second later, with their notifications.
+        if (text == "/notify" || text == "/notify2") {
+          later(1000, [this, count = text == "/notify2" ? 2 : 1] {
+            for (auto i = 0; i != count; ++i) notifyIncoming();
+          });
+        }
+        if (request.chat_id_ == kNotifyChat) {
+          const auto reply = As<api::inputMessageReplyToMessage>(request.reply_to_.get());
+          g_message("scenario: sent to %lld \"%s\" reply_to=%lld", static_cast<long long>(request.chat_id_),
+                    text.c_str(), static_cast<long long>(reply ? reply->message_id_ : 0));
+        }
+        return false;
+      }
+      case api::viewMessages::ID: {
+        auto &request = static_cast<api::viewMessages &>(function);
+        // Read here or anywhere: TDLib takes the chat's notifications away.
+        if (request.chat_id_ == kNotifyChat && !_notes.empty()) {
+          update(api::make_object<api::updateNotificationGroup>(
+              kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), kNotifyChat, kNotifyChat, 1, 0,
+              std::vector<api::object_ptr<api::notification>>(), std::exchange(_notes, {})));
+        }
+        return false;
+      }
+      case api::removeNotificationGroup::ID:
+        g_message("scenario: notifications removed");
+        _notes.clear();
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::setNetworkType::ID:
+        g_message("scenario: network %d", static_cast<api::setNetworkType &>(function).type_->get_id());
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::getProxies::ID:
+        answer(id, addedProxies());
+        return true;
+      case api::addProxy::ID:
+      case api::editProxy::ID: {
+        const auto edit = function.get_id() == api::editProxy::ID;
+        auto &proxy = edit ? static_cast<api::editProxy &>(function).proxy_ : static_cast<api::addProxy &>(function).proxy_;
+        const auto enable = edit ? static_cast<api::editProxy &>(function).enable_ : static_cast<api::addProxy &>(function).enable_;
+        auto it = edit ? std::ranges::find(_proxies, static_cast<api::editProxy &>(function).proxy_id_, &Proxy::id)
+                       : _proxies.end();
+        if (edit && it == _proxies.end()) {
+          answer(id, api::make_object<api::error>(400, "PROXY_NOT_FOUND"));
+          return true;
+        }
+        if (!edit) it = _proxies.insert(_proxies.end(), Proxy{.id = ++_proxyIds});
+        it->proxy = CopyProxy(*proxy);
+        if (enable) useProxy(it->id);
+        answer(id, addedProxy(*it));
+        return true;
+      }
+      case api::enableProxy::ID:
+        useProxy(static_cast<api::enableProxy &>(function).proxy_id_);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::disableProxy::ID:
+        useProxy(0);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::removeProxy::ID:
+        std::erase_if(_proxies, [&](const Proxy &proxy) { return proxy.id == static_cast<api::removeProxy &>(function).proxy_id_; });
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::pingProxy::ID: {
+        // A server named "down..." doesn't answer.
+        const auto &proxy = static_cast<api::pingProxy &>(function).proxy_;
+        if (proxy && proxy->server_.starts_with("down")) answer(id, api::make_object<api::error>(400, "Connection refused"));
+        else answer(id, api::make_object<api::seconds>(0.042));
+        return true;
+      }
+      case api::logOut::ID:
+        // As TDLib does: the session ends and its data goes; the program starts a new client.
+        answer(id, api::make_object<api::ok>());
+        authorization(api::make_object<api::authorizationStateLoggingOut>());
+        later(300, [this] { authorization(api::make_object<api::authorizationStateClosed>()); });
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // A message from Friend 5, and its notification when the program asked for them.
+  void notifyIncoming() {
+    const auto chat = kNotifyChat;
+    const auto index = MessagesInChat() + 2000 + (++_notified);
+    const auto text = "Are you coming tonight? " + std::to_string(_notified);
+    _orders[chat].first = std::int64_t(3000 + _notified) << 32;
+    auto positions = std::vector<api::object_ptr<api::chatPosition>>();
+    positions.push_back(api::make_object<api::chatPosition>(ListObject(false), _orders[chat].first, false, nullptr));
+    update(api::make_object<api::updateNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text)));
+    update(api::make_object<api::updateChatLastMessage>(chat, MakeMessage(chat, index * kIdStep, chat, kNow, text),
+                                                        std::move(positions)));
+    update(api::make_object<api::updateChatReadInbox>(chat, (MessagesInChat() - 1) * kIdStep, int(_notes.size()) + 1));
+    if (!_notificationsOn) return;
+    const auto notification = 100 + _notified;
+    auto added = std::vector<api::object_ptr<api::notification>>();
+    added.push_back(api::make_object<api::notification>(
+        notification, kNow, false,
+        api::make_object<api::notificationTypeNewMessage>(MakeMessage(chat, index * kIdStep, chat, kNow, text), true)));
+    _notes.push_back(notification);
+    update(api::make_object<api::updateNotificationGroup>(
+        kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), chat, chat, 1, int(_notes.size()),
+        std::move(added), std::vector<std::int32_t>()));
+  }
+
+  struct Proxy {
+    std::int32_t id = 0;
+    api::object_ptr<api::proxy> proxy;
+    bool enabled = false;
+    std::int32_t lastUsed = 0;
+  };
+  static api::object_ptr<api::proxy> CopyProxy(const api::proxy &proxy) {
+    auto type = api::object_ptr<api::ProxyType>();
+    if (const auto socks = As<api::proxyTypeSocks5>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeSocks5>(socks->username_, socks->password_);
+    } else if (const auto http = As<api::proxyTypeHttp>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeHttp>(http->username_, http->password_, http->http_only_);
+    } else if (const auto mtproto = As<api::proxyTypeMtproto>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeMtproto>(mtproto->secret_);
+    }
+    return api::make_object<api::proxy>(proxy.server_, proxy.port_, std::move(type));
+  }
+  api::object_ptr<api::addedProxy> addedProxy(const Proxy &proxy) {
+    return api::make_object<api::addedProxy>(proxy.id, proxy.lastUsed, proxy.enabled, std::string(),
+                                             CopyProxy(*proxy.proxy));
+  }
+  api::object_ptr<api::addedProxies> addedProxies() {
+    auto result = api::make_object<api::addedProxies>();
+    for (const auto &proxy : _proxies) result->proxies_.push_back(addedProxy(proxy));
+    return result;
+  }
+  // As TDLib does when the way to the servers changes: connecting for a moment, then connected.
+  void useProxy(std::int32_t id) {
+    for (auto &proxy : _proxies) {
+      proxy.enabled = proxy.id == id;
+      if (proxy.enabled) proxy.lastUsed = kNow;
+    }
+    update(api::make_object<api::updateConnectionState>(
+        id ? api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnectingToProxy>())
+           : api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnecting>())));
+    later(1500, [this] {
+      update(api::make_object<api::updateConnectionState>(api::make_object<api::connectionStateReady>()));
+    });
+  }
+  // tg://socks?server=S&port=P, as TDLib reads it.
+  ObjectPtr proxyLink(const std::string &link) {
+    const auto value = [&](const std::string &key) {
+      const auto at = link.find(key + "=");
+      if (at == std::string::npos) return std::string();
+      const auto from = at + key.size() + 1;
+      return link.substr(from, link.find('&', from) - from);
+    };
+    return api::make_object<api::internalLinkTypeProxy>(api::make_object<api::proxy>(
+        value("server"), std::atoi(value("port").c_str()), api::make_object<api::proxyTypeSocks5>("", "")));
+  }
+  std::vector<Proxy> _proxies;
+  std::int32_t _proxyIds = 0;
+
+  static constexpr auto kNotifyChat = std::int64_t(5);
+  static constexpr auto kNotifyGroup = std::int32_t(1);
+  bool _unreadCountSent = false;
+  bool _notificationsOn = false;
+  int _notified = 0;
+  std::vector<std::int32_t> _notes;  // The notifications of Friend 5 not read yet.
 
   const bool _fullList;
   Sink _sink;
@@ -2190,6 +2736,8 @@ class ScenarioTransport final : public Transport {
   guint _burst = 0;
   unsigned _burstSeed = 1;
   int _burstUpdates = 0;
+  std::vector<Place> _places;  // The "Places" group's messages, the sent ones too.
+  int _mapFiles = 0;
 };
 
 }  // namespace

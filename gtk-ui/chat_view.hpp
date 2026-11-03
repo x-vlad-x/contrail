@@ -16,6 +16,7 @@
 
 namespace Contrail {
 
+class ChatLiveBar;
 class MainWindow;
 class MessageWidget;
 struct ForwardDraft;
@@ -63,6 +64,13 @@ class ChatView final {
   void sendText(const std::string &text);  // Bot commands from links.
   // The sponsored message's button, text or media was tapped (`media`): Telegram counts it.
   void sponsoredClicked(const MessageItem &item, bool media);
+  // Locations: the picker sends to this chat (or topic), as a reply to the message chosen; a location's message
+  // opens on a map.
+  void chooseLocation();
+  void openLocation(const MessageItem &item);
+  void sendContent(Td::api::object_ptr<Td::api::InputMessageContent> content);
+  // Who shares a live location here, under the header (null in a channel).
+  [[nodiscard]] ChatLiveBar *liveBar() const { return _liveBar.get(); }
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -95,6 +103,15 @@ class ChatView final {
   void debugMedia(std::int64_t number);
   void debugTap(std::int64_t number, int index);
   void debugTapText(std::int64_t number, const std::string &part);
+
+  // Where the screen is, to come back to it when the window is built again after the background: the first message
+  // whose top is on the screen and how far down. Empty at the end of the chat, which it opens at anyway.
+  struct Place {
+    std::int64_t message = 0;
+    double y = 0.;
+  };
+  [[nodiscard]] Place place() const;
+  void restorePlace(Place place);
   void debugSponsored() const;
 
  private:
@@ -269,6 +286,7 @@ class ChatView final {
   GtkWidget *_pinnedClose = nullptr;
   GtkWidget *_pinnedDialog = nullptr;  // The list of them while it is open.
   std::vector<GtkWidget *> _dialogs;  // holdDialog()
+  std::unique_ptr<ChatLiveBar> _liveBar;
   SignalConnections _signals;
 
   std::vector<std::unique_ptr<MessageItem>> _items;
