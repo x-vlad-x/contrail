@@ -5,6 +5,7 @@
 #include "main_window.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
+#include "photo_viewer.hpp"
 #include "picture_decode.hpp"
 #include "reactions.hpp"
 #include "scroll_helpers.hpp"
@@ -2840,8 +2841,12 @@ void ChatView::openChat(Td::ChatId chat) {
   _window.openChat(chat);
 }
 
-// The row downloads its photo by itself: a tap only puts it first and opens it when it is here.
-void ChatView::openPhoto(const MessageItem &, Td::FileId file) {
+// The row downloads its photo by itself: a tap opens the viewer, which asks for the largest size first.
+void ChatView::openPhoto(const MessageItem &item, Td::FileId file) {
+  if (const auto photo = PhotoWithFile(item.data ? item.data->content_.get() : nullptr, file)) {
+    ShowPhotoViewer(*this, item.id(), *photo);
+    return;
+  }
   if (const auto known = _store.file(file); known && known->complete) {
     OpenPath(known->path);
     return;

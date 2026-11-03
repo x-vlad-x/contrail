@@ -25,6 +25,9 @@ struct MessageItem {
   [[nodiscard]] bool local() const { return data->sending_state_ != nullptr; }  // Sending, or failed to.
 };
 
+// The photo of a message (or of its link preview) that has `file` among its sizes, null when there is none.
+[[nodiscard]] const Td::api::photo *PhotoWithFile(const Td::api::MessageContent *content, Td::FileId file);
+
 // What a reply shows of the message it answers.
 struct ReplyPreview {
   bool ready = false;     // False: "Loading..." until the message comes.

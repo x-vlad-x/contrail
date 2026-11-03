@@ -21,5 +21,8 @@ void ZoomViewSetTexture(GtkWidget *view, GdkTexture *texture);
 // point of the photo in the middle of the view, the texture's size).
 GtkWidget *ZoomViewFind(GtkWidget *root);
 std::string ZoomViewState(GtkWidget *view);
+// What a finger or the mouse does, for the debug actions: "pinch SCALE" (around the middle), "pan DX DY",
+// "double X Y" (a double tap there), "wheel DY" (Ctrl+wheel over the middle).
+void ZoomViewDebug(GtkWidget *view, const std::string &action);
 
 }  // namespace Contrail

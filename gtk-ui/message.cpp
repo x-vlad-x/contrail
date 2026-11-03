@@ -611,6 +611,19 @@ void SetRingFraction(GtkWidget *ring, double fraction) {
 
 }  // namespace
 
+const api::photo *PhotoWithFile(const api::MessageContent *content, Td::FileId file) {
+  const api::photo *photo = nullptr;
+  if (const auto message = Cast<api::messagePhoto>(content)) {
+    photo = message->photo_.get();
+  } else if (const auto text = Cast<api::messageText>(content); text && text->link_preview_) {
+    photo = PreviewPhoto(text->link_preview_->type_.get());
+  }
+  if (!photo) return nullptr;
+  const auto has = std::any_of(photo->sizes_.begin(), photo->sizes_.end(),
+                               [&](const auto &size) { return size && size->photo_ && size->photo_->id_ == file; });
+  return has ? photo : nullptr;
+}
+
 MessageWidget::MessageWidget(Items items, ChatView &chat) : _items(std::move(items)), _chat(chat) {
 
   g_assert(!_items.empty());

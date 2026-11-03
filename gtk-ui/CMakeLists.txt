@@ -69,6 +69,7 @@ add_library(contrail_core STATIC
   main_window.cpp
   memory_trim.cpp
   message.cpp
+  photo_viewer.cpp
   picture_decode.cpp
   reactions.cpp
   td/chat_row.cpp
@@ -81,7 +82,8 @@ add_library(contrail_core STATIC
   td/strings.cpp
   text.cpp
   topic_list.cpp
-  userpics.cpp)
+  userpics.cpp
+  zoom_view.cpp)
 target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
 target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS PkgConfig::CONTRAIL_IMAGE_DEPS)
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. The x86_64 test container has older headers,
@@ -116,6 +118,11 @@ if (CONTRAIL_TESTS)
   target_link_libraries(td-message-text-test PRIVATE contrail_core)
   add_executable(picture-decode-test ${ROOT}/tests/td/picture-decode-test.cpp)
   target_link_libraries(picture-decode-test PRIVATE contrail_core)
+  # The viewer's and the player's arithmetic, without a display.
+  add_executable(zoom-geometry-test ${ROOT}/tests/zoom-geometry.cpp)
+  target_include_directories(zoom-geometry-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_executable(media-progress-test ${ROOT}/tests/media-progress.cpp)
+  target_include_directories(media-progress-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(td-message-text-test PRIVATE
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()

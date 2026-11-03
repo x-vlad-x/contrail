@@ -18,6 +18,8 @@
 #      opening by itself, a file stopped and opened with a second tap, a GIF and a sticker opened, links, mentions,
 #      a spoiler and a bot command among emoji, Save and Copy in the menu, a menu closed with its chat, a failed
 #      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
+#   M1. the photo viewer: the full size shown, a pinch up to 6x and no further, a drag within the edges, a double
+#      tap and Ctrl+wheel, Save to Pictures, its textures gone once it is closed, by itself or with its chat.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -464,4 +466,57 @@ c 'tap-text 2 #contrail' 1
 c tree 0.5
 grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
+
+# Section media-view: the photo viewer.
+viewer() { asked 'viewer:' viewer-state; }
+section_media_view_viewer() {
+  echo "M1. The photo viewer"
+  start 150
+  c 'chat 42' 3
+  c 'tap 20' 1.5
+  local line
+  line=$(viewer)
+  [[ $line == *'open=1 message='*' shown=1/2 size=2560x1920 loading=0 '*'scale=1.000 '*'texture=2560x1920'* ]] \
+    || fail "the viewer didn't show the full photo: $line"
+  c tree 0.5
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  # A pinch zooms around the middle, up to 6x and no further.
+  c 'viewer-pinch 2' 0.3
+  line=$(viewer)
+  [[ $line == *'scale=2.000 '*'middle=0.5000,0.5000'* ]] || fail "the pinch: $line"
+  c 'viewer-pinch 10' 0.3
+  [[ $(viewer) == *'scale=6.000 '* ]] || fail "zoomed past 6x: $(viewer)"
+  # A drag moves the zoomed photo, never past its edge.
+  c 'viewer-pan 100 0' 0.3
+  line=$(viewer)
+  [[ $line != *'middle=0.5000,0.5000'* ]] || fail "the drag didn't move it: $line"
+  c 'viewer-pan 100000 100000' 0.3
+  [[ $(viewer) == *'photo=0.0,0.0 '* ]] || fail "dragged past the edge: $(viewer)"
+  # A double tap goes back to the whole photo, another zooms in where it was.
+  c 'viewer-double 100 100' 0.3
+  [[ $(viewer) == *'scale=1.000 '* ]] || fail "a double tap on a zoomed photo: $(viewer)"
+  c 'viewer-double 100 100' 0.3
+  [[ $(viewer) == *'scale=2.500 '* ]] || fail "a double tap: $(viewer)"
+  c 'viewer-double 100 100' 0.3
+  # Ctrl+wheel: up zooms in, down out.
+  c 'viewer-wheel -1' 0.3
+  [[ $(viewer) == *'scale=1.150 '* ]] || fail "Ctrl+wheel: $(viewer)"
+  c 'viewer-wheel 5' 0.3
+  [[ $(viewer) == *'scale=1.000 '* ]] || fail "Ctrl+wheel out: $(viewer)"
+  # Save copies the photo to Pictures.
+  c viewer-save 1
+  ls "$WORK"/pictures/photo_*.jpg > /dev/null 2>&1 || fail "Save in the viewer put nothing in Pictures"
+  # Closed, its textures go.
+  c 'viewer-close' 1.5
+  line=$(viewer)
+  [[ $line == *'open=0 textures=0'* ]] || fail "the textures stayed after closing: $line"
+  # A chat closed under the viewer takes it along.
+  c 'tap 20' 1.5
+  c back 1.5
+  [[ $(viewer) == *'open=0 textures=0'* ]] || fail "the viewer stayed with its chat closed: $(viewer)"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  echo "   ok"
+}
+section_media_view_viewer
 echo "PASS"

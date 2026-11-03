@@ -49,8 +49,10 @@ class ChatView final {
 
   // What the messages ask for.
   void openChat(Td::ChatId chat);
-  // There is no photo viewer yet: the photo opens outside, once it is downloaded.
+  // A photo opens in the viewer (photo_viewer.hpp); a picture that isn't one of a photo's sizes opens outside.
   void openPhoto(const MessageItem &item, Td::FileId file);
+  // The viewer's Save: as the menu's, the photo copied to Pictures once it is downloaded.
+  void saveFromViewer(std::int64_t id) { saveFile(id); }
   // A tap on a file: opens it if it is here, stops its download if it runs, starts one otherwise. Videos, GIFs,
   // stickers and pictures open by themselves once downloaded, as in 0.3.1; other files with a second tap.
   void openDocument(const MessageItem &item, Td::FileId file);

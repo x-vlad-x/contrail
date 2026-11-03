@@ -22,12 +22,15 @@
 //   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
 //   edit-last (the up arrow in the empty field)
+//   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
+//   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "forward.hpp"
 #include "main_window.hpp"
+#include "photo_viewer.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
 
@@ -267,6 +270,8 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name.starts_with("viewer-")) {
+    PhotoViewerDebug(window, name.substr(7) + (rest.empty() ? "" : " " + rest));
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));
