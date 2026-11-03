@@ -60,11 +60,14 @@ add_library(contrail_core STATIC
   album_layout.cpp
   app.cpp
   chat_list.cpp
+  chat_live_locations.cpp
   chat_view.cpp
   debug.cpp
   device_scale.cpp
   dialogs.cpp
   forward.cpp
+  live_location.cpp
+  live_map.cpp
   local_state.cpp
   location.cpp
   location_ui.cpp

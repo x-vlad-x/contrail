@@ -1,6 +1,8 @@
 #include "chat_view.hpp"
 
+#include "chat_live_locations.hpp"
 #include "forward.hpp"
+#include "live_location.hpp"
 #include "local_state.hpp"
 #include "location_ui.hpp"
 #include "main_window.hpp"
@@ -490,6 +492,10 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
   adw_toolbar_view_set_bottom_bar_style(ADW_TOOLBAR_VIEW(_root), ADW_TOOLBAR_RAISED);
   buildHeader();
   buildPinnedBar();
+  if (const auto known = _store.chat(_chat); known && known->kind != Td::ChatKind::Channel) {
+    _liveBar = std::make_unique<ChatLiveBar>(_window, _store, _chat);
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBar->widget());
+  }
   buildList();
   buildComposer();
   refreshHeader();
@@ -2612,6 +2618,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     if (!found->local() && SavedOf(*found->data).file) {
       g_menu_append(menu, Tr("lng_context_save_file").c_str(), "msg.save");
     }
+    if (Live().sharing(_chat, found->id())) {
+      g_menu_append(menu, Tr("lng_group_call_screen_share_stop").c_str(), "msg.stop-live");
+    }
     if (CanShowWhoReacted(*this, *found->data)) {
       g_menu_append(menu, TrCount("lng_context_seen_reacted", ReactionsCount(*found->data)).c_str(), "msg.reacted");
     }
@@ -2662,6 +2671,7 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
       ShowToast(Tr("lng_text_copied"));
     });
     add("save", [this, id] { saveFile(id); });
+    add("stop-live", [this, id] { Live().stop(_chat, id); });
     add("forward", [this, id] {
       if (const auto item = find(id)) forward(*item);
     });

@@ -196,8 +196,14 @@ void SetupTrace(GtkWidget *map) {
 
 GtkWidget *MakeMap() {
   auto *map = shumate_simple_map_new();
-  // The scenario transport has no network and asks nobody for tiles: its maps stay empty.
-  if (!g_getenv("CONTRAIL_SCENARIO")) shumate_simple_map_set_map_source(map, OpenStreetMap());
+  // The scenario transport has no network and asks nobody for tiles: its maps stay empty (a source of tiles that
+  // aren't there; libshumate needs one to place anything on the map).
+  if (g_getenv("CONTRAIL_SCENARIO")) {
+    static auto *nowhere = SHUMATE_MAP_SOURCE(shumate_raster_renderer_new_from_url("file:///nonexistent/{z}/{x}/{y}.png"));
+    shumate_simple_map_set_map_source(map, nowhere);
+  } else {
+    shumate_simple_map_set_map_source(map, OpenStreetMap());
+  }
   auto *viewport = shumate_simple_map_get_viewport(map);
   shumate_viewport_set_max_zoom_level(viewport, 19);
   // The scale would cover the attribution on a phone's width (the phone apps show none either).

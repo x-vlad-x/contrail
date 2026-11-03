@@ -2119,6 +2119,10 @@ class ScenarioTransport final : public Transport {
          .editDate = now - 120},
         {.sender = kPlacesUsers, .text = "On my way", .date = now - 60},
     };
+    // CONTRAIL_SCENARIO_LIVE=1: as after a restart, this account still shares a live location here.
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) {
+      _places.push_back({.sender = kSelfId, .lat = 55.7600, .lon = 37.6200, .period = 0x7FFFFFFF, .date = now - 900});
+    }
     auto chat = api::make_object<api::chat>();
     chat->id_ = kPlacesId;
     chat->type_ = api::make_object<api::chatTypeSupergroup>(kPlacesGroupId, false);
@@ -2129,6 +2133,48 @@ class ScenarioTransport final : public Transport {
     chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kPlacesOrder, false, nullptr));
     _orders[kPlacesId] = {kPlacesOrder, false};
     update(api::make_object<api::updateNewChat>(std::move(chat)));
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) activeLive();
+  }
+
+  bool placeLive(const Place &place) const {
+    return place.text.empty() && place.period && !place.stopped
+           && (place.period == 0x7FFFFFFF || place.date + place.period > RealNow());
+  }
+
+  // What TDLib tells about this account's own live locations whenever their list changes.
+  void activeLive() {
+    auto messages = std::vector<api::object_ptr<api::message>>();
+    for (auto index = 1; index <= int(_places.size()); ++index) {
+      const auto &place = _places[std::size_t(index - 1)];
+      if (place.sender == kSelfId && placeLive(place)) messages.push_back(placeMessage(index));
+    }
+    update(api::make_object<api::updateActiveLiveLocationMessages>(std::move(messages)));
+  }
+
+  ObjectPtr editLive(api::editMessageLiveLocation &request) {
+    const auto index = int(request.message_id_ / kIdStep);
+    if (index < 1 || index > int(_places.size()) || !_places[std::size_t(index - 1)].period) {
+      return api::make_object<api::error>(400, "MESSAGE_ID_INVALID");
+    }
+    auto &place = _places[std::size_t(index - 1)];
+    if (!placeLive(place)) return api::make_object<api::error>(400, "MESSAGE_NOT_MODIFIED");
+    const auto now = RealNow();
+    if (!request.location_ || !request.location_->location_) {
+      // Stopped: the server shortens it to the time it went on.
+      place.stopped = true;
+      place.period = std::max(now - place.date, 1);
+      g_message("Scenario: live location %d stopped", index);
+    } else {
+      place.lat = request.location_->location_->latitude_;
+      place.lon = request.location_->location_->longitude_;
+      g_message("Scenario: live location %d moved to %s %s", index, Ascii(place.lat).c_str(), Ascii(place.lon).c_str());
+    }
+    place.editDate = now;
+    update(api::make_object<api::updateMessageContent>(kPlacesId, request.message_id_,
+                                                         std::move(placeMessage(index)->content_)));
+    update(api::make_object<api::updateMessageEdited>(kPlacesId, request.message_id_, now, nullptr));
+    if (place.stopped) activeLive();
+    return placeMessage(index);
   }
 
   api::object_ptr<api::message> placeMessage(int index) {
@@ -2140,7 +2186,7 @@ class ScenarioTransport final : public Transport {
     if (place.period) {
       const auto left = (place.period == 0x7FFFFFFF) ? place.period : std::max(place.date + place.period - RealNow(), 0);
       message->content_ = api::make_object<api::messageLiveLocation>(
-          api::make_object<api::liveLocation>(std::move(location), place.stopped ? 1 : place.period, 0, 0),
+          api::make_object<api::liveLocation>(std::move(location), place.period, 0, 0),
           place.stopped ? 0 : left);
     } else if (!place.title.empty()) {
       message->content_ = api::make_object<api::messageVenue>(
@@ -2190,6 +2236,7 @@ class ScenarioTransport final : public Transport {
       update(api::make_object<api::updateMessageSendSucceeded>(placeMessage(index), temporary));
       update(api::make_object<api::updateChatLastMessage>(kPlacesId, placeMessage(index),
                                                           std::vector<api::object_ptr<api::chatPosition>>()));
+      if (_places[std::size_t(index - 1)].period) activeLive();
     });
     return pending();
   }
@@ -2267,6 +2314,23 @@ class ScenarioTransport final : public Transport {
           result->messages_.push_back(placeMessage(index));
         }
         result->total_count_ = count;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::editMessageLiveLocation::ID: {
+        auto &request = static_cast<api::editMessageLiveLocation &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        answer(id, editLive(request));
+        return true;
+      }
+      case api::searchChatRecentLocationMessages::ID: {
+        auto result = api::make_object<api::messages>();
+        if (static_cast<api::searchChatRecentLocationMessages &>(function).chat_id_ == kPlacesId) {
+          for (auto index = int(_places.size()); index >= 1; --index) {
+            if (placeLive(_places[std::size_t(index - 1)])) result->messages_.push_back(placeMessage(index));
+          }
+        }
+        result->total_count_ = int(result->messages_.size());
         answer(id, std::move(result));
         return true;
       }

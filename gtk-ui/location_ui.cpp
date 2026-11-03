@@ -1,6 +1,7 @@
 #include "location_ui.hpp"
 
 #include "geo.hpp"
+#include "live_location.hpp"
 #include "location.hpp"
 #include "main_window.hpp"
 #include "map_view.hpp"
@@ -212,6 +213,34 @@ double LiveLocationProgress(const api::message &message) {
   return std::clamp(double(info.livePeriod - elapsed) / info.livePeriod, 0., 1.);
 }
 
+api::object_ptr<api::message> CopyLocationMessage(const api::message &message) {
+  auto copy = api::make_object<api::message>();
+  copy->id_ = message.id_;
+  copy->chat_id_ = message.chat_id_;
+  copy->date_ = message.date_;
+  copy->edit_date_ = message.edit_date_;
+  copy->is_outgoing_ = message.is_outgoing_;
+  if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
+    copy->sender_id_ = api::make_object<api::messageSenderUser>(user->user_id_);
+  } else if (const auto chat = Cast<api::messageSenderChat>(message.sender_id_.get())) {
+    copy->sender_id_ = api::make_object<api::messageSenderChat>(chat->chat_id_);
+  }
+  auto info = LocationInfo();
+  if (MessageLocation(message, &info)) {
+    auto location = api::make_object<api::location>(info.lat, info.lon, 0.);
+    if (info.livePeriod) {
+      copy->content_ = api::make_object<api::messageLiveLocation>(
+          api::make_object<api::liveLocation>(std::move(location), info.livePeriod, 0, 0), 0);
+    } else if (!info.title.empty()) {
+      copy->content_ = api::make_object<api::messageVenue>(
+          api::make_object<api::venue>(std::move(location), info.title, info.address, "", "", ""));
+    } else {
+      copy->content_ = api::make_object<api::messageLocation>(std::move(location));
+    }
+  }
+  return copy;
+}
+
 std::string SenderName(const Td::Store &store, const api::message &message) {
   if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
     const auto known = store.user(user->user_id_);
@@ -258,6 +287,7 @@ class LocationPicker final {
   void showVenues(std::vector<Venue> venues, bool failed);
   void sendPoint(double lat, double lon);
   void sendVenue(const Venue &venue);
+  void shareLive();
   void done();
 
   MainWindow &_window;
@@ -268,6 +298,7 @@ class LocationPicker final {
   GtkWidget *_mapPin = nullptr;
   GtkWidget *_positionMarker = nullptr;
   GtkWidget *_sendRow = nullptr;
+  GtkWidget *_liveRow = nullptr;
   GtkWidget *_venues = nullptr;
   GtkWidget *_venuesStatus = nullptr;
   GtkWidget *_venuesSpinner = nullptr;
@@ -303,6 +334,7 @@ LocationPicker::LocationPicker(MainWindow &window, LocationTarget target)
     _closed = true;
     updateWatching();
   });
+  Live().onChanged([this] { refreshRows(); }, _lifetime);
   updateWatching();
   refreshRows();
   if (_fix) {
@@ -373,6 +405,13 @@ void LocationPicker::build() {
     if (const auto point = selected()) sendPoint(point->first, point->second);
   });
   gtk_list_box_append(GTK_LIST_BOX(list), _sendRow);
+  if (const auto chat = _store.chat(_target.chat); chat && CanShareLive(_store, *chat)) {
+    _liveRow = adw_action_row_new();
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(_liveRow), TRUE);
+    adw_action_row_add_prefix(ADW_ACTION_ROW(_liveRow), RowIcon("contrail-live-location-symbolic", "live-location"));
+    _signals.connect<void(AdwActionRow *)>(_liveRow, "activated", [this](AdwActionRow *) { shareLive(); });
+    gtk_list_box_append(GTK_LIST_BOX(list), _liveRow);
+  }
 
   // Places nearby.
   auto *venuesTitle = gtk_label_new(Tr("lng_maps_places_in_area").c_str());
@@ -552,6 +591,25 @@ void LocationPicker::refreshRows() {
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_sendRow), Escape(title).c_str());
   adw_action_row_set_subtitle(ADW_ACTION_ROW(_sendRow), Escape(subtitle).c_str());
   gtk_widget_set_sensitive(_sendRow, point.has_value() && (chooseOnMap || _fix));
+  if (_liveRow) {
+    const auto sharing = Live().sharingIn(_target.chat) != 0;
+    if (sharing) {
+      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_liveRow), Escape(Tr("lng_group_call_screen_share_stop")).c_str());
+      adw_action_row_set_subtitle(ADW_ACTION_ROW(_liveRow), Escape(Tr("lng_live_location")).c_str());
+      gtk_widget_add_css_class(_liveRow, "error");
+    } else {
+      adw_preferences_row_set_title(
+          ADW_PREFERENCES_ROW(_liveRow),
+          Escape(Translated("Share My Live Location", "Транслировать геопозицию", "Транслювати геопозицію")).c_str());
+      adw_action_row_set_subtitle(ADW_ACTION_ROW(_liveRow),
+                                  Escape(Translated("Updated in real time as you move",
+                                                    "Обновляется в реальном времени, пока вы перемещаетесь",
+                                                    "Оновлюється в реальному часі, поки ви рухаєтеся"))
+                                      .c_str());
+      gtk_widget_remove_css_class(_liveRow, "error");
+    }
+    gtk_widget_set_sensitive(_liveRow, sharing || _fix.has_value());
+  }
 }
 
 // --- places ------------------------------------------------------------------
@@ -697,6 +755,8 @@ void LocationPicker::debug(const std::string &name, const std::string &rest) {
       scheduleVenues();
     }
 #endif
+  } else if (name == "loc-live") {
+    if (_liveRow && gtk_widget_get_sensitive(_liveRow)) g_signal_emit_by_name(_liveRow, "activated");
   } else if (name == "loc-mine") {
     _follow = true;
     refreshRows();
@@ -704,12 +764,26 @@ void LocationPicker::debug(const std::string &name, const std::string &rest) {
   }
   auto venues = 0;
   for (auto *row = gtk_widget_get_first_child(_venues); row; row = gtk_widget_get_next_sibling(row)) ++venues;
-  g_message("Location picker: send=\"%s\" \"%s\" sensitive=%d pin=%d follow=%d venues=%d status=\"%s\" watching=%d",
+  g_message("Location picker: send=\"%s\" \"%s\" sensitive=%d pin=%d follow=%d venues=%d status=\"%s\" watching=%d live=\"%s\"",
             adw_preferences_row_get_title(ADW_PREFERENCES_ROW(_sendRow)),
             adw_action_row_get_subtitle(ADW_ACTION_ROW(_sendRow)), int(gtk_widget_get_sensitive(_sendRow)),
             int(_mapPin && gtk_widget_get_visible(_mapPin)), int(_follow), venues,
             gtk_widget_get_visible(_venuesStatus) ? gtk_label_get_text(GTK_LABEL(_venuesStatus)) : "",
-            int(_watch != nullptr));
+            int(_watch != nullptr), _liveRow ? adw_preferences_row_get_title(ADW_PREFERENCES_ROW(_liveRow)) : "");
+}
+
+void LocationPicker::shareLive() {
+  if (const auto sharing = Live().sharingIn(_target.chat)) {
+    Live().stop(_target.chat, sharing);
+    return;
+  }
+  if (!_fix || _done) return;
+  const auto weak = std::weak_ptr<char>(_alive);
+  ChooseLivePeriod(_dialog, [this, weak](std::int32_t period) {
+    if (weak.expired() || !_fix || _done) return;
+    Live().start(_target.chat, _target.topic, _target.replyTo, period, *_fix);
+    done();
+  });
 }
 
 void LocationPicker::done() {
@@ -747,6 +821,7 @@ class LocationViewer final {
   GtkWidget *_position = nullptr;
   GtkWidget *_details = nullptr;
   GtkWidget *_distance = nullptr;
+  GtkWidget *_stop = nullptr;
   GtkWidget *_mine = nullptr;
   std::unique_ptr<LocationService::Watch> _watch;
   std::optional<GeoFix> _fix;
@@ -759,38 +834,9 @@ class LocationViewer final {
   const std::shared_ptr<char> _alive = std::make_shared<char>();
 };
 
-api::object_ptr<api::message> CopyMessage(const api::message &message) {
-  // Only what the viewer reads: the content's location, the dates and the sender.
-  auto copy = api::make_object<api::message>();
-  copy->id_ = message.id_;
-  copy->chat_id_ = message.chat_id_;
-  copy->date_ = message.date_;
-  copy->edit_date_ = message.edit_date_;
-  copy->is_outgoing_ = message.is_outgoing_;
-  if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
-    copy->sender_id_ = api::make_object<api::messageSenderUser>(user->user_id_);
-  } else if (const auto chat = Cast<api::messageSenderChat>(message.sender_id_.get())) {
-    copy->sender_id_ = api::make_object<api::messageSenderChat>(chat->chat_id_);
-  }
-  auto info = LocationInfo();
-  if (MessageLocation(message, &info)) {
-    auto location = api::make_object<api::location>(info.lat, info.lon, 0.);
-    if (info.livePeriod) {
-      copy->content_ = api::make_object<api::messageLiveLocation>(
-          api::make_object<api::liveLocation>(std::move(location), info.livePeriod, 0, 0), 0);
-    } else if (!info.title.empty()) {
-      copy->content_ = api::make_object<api::messageVenue>(
-          api::make_object<api::venue>(std::move(location), info.title, info.address, "", "", ""));
-    } else {
-      copy->content_ = api::make_object<api::messageLocation>(std::move(location));
-    }
-  }
-  return copy;
-}
-
 LocationViewer::LocationViewer(MainWindow &window, const api::message &message)
     : _window(window), _store(*window.store()), _chat(message.chat_id_), _id(message.id_),
-      _message(CopyMessage(message)), _timer([this] { refresh(); }) {
+      _message(CopyLocationMessage(message)), _timer([this] { refresh(); }) {
   _dialog = GTK_WIDGET(adw_dialog_new());
   adw_dialog_set_content_width(ADW_DIALOG(_dialog), 1200);
   adw_dialog_set_content_height(ADW_DIALOG(_dialog), 1200);
@@ -845,6 +891,11 @@ LocationViewer::LocationViewer(MainWindow &window, const api::message &message)
   gtk_widget_add_css_class(open, "suggested-action");
   _signals.clicked(open, [this] { OpenInMapsApp(_lat, _lon); });
   gtk_box_append(GTK_BOX(actions), open);
+  _stop = gtk_button_new_with_label(Tr("lng_group_call_screen_share_stop").c_str());
+  gtk_widget_add_css_class(_stop, "pill");
+  gtk_widget_add_css_class(_stop, "destructive-action");
+  _signals.clicked(_stop, [this] { Live().stop(_chat, _id); });
+  gtk_box_append(GTK_BOX(actions), _stop);
   gtk_box_append(GTK_BOX(bottom), actions);
   auto *clamp = adw_clamp_new();
   adw_clamp_set_child(ADW_CLAMP(clamp), bottom);
@@ -858,6 +909,7 @@ LocationViewer::LocationViewer(MainWindow &window, const api::message &message)
   });
   // A live location moves as it is edited.
   _store.client().subscribe([this](api::Update &update) { updated(update); }, _lifetime);
+  Live().onChanged([this] { refresh(); }, _lifetime);
   refresh();
   MapCenterOn(_map, _lat, _lon, kPlaceZoom, false);
   g_message("Location viewer: %s", FormatCoordinates(_lat, _lon).c_str());
@@ -870,22 +922,18 @@ LocationViewer::~LocationViewer() {
 
 void LocationViewer::updated(api::Update &update) {
   switch (update.get_id()) {
-    case api::updateMessageContent::ID: {
-      auto &data = static_cast<api::updateMessageContent &>(update);
-      if (data.chat_id_ != _chat || data.message_id_ != _id || !data.new_content_) break;
-      auto copy = api::make_object<api::message>();
-      copy->content_ = std::move(data.new_content_);
-      if (MessageLocation(*copy, nullptr)) {
-        _message->content_ = std::move(copy->content_);
-        refresh();
-      }
-      break;
-    }
     case api::updateMessageEdited::ID: {
+      // A live location moved or stopped. The open chat may have taken the update's new content already: the
+      // message is asked for again (TDLib has it in memory).
       auto &data = static_cast<api::updateMessageEdited &>(update);
       if (data.chat_id_ != _chat || data.message_id_ != _id) break;
-      _message->edit_date_ = data.edit_date_;
-      refresh();
+      _store.client().request<api::message>(api::make_object<api::getMessage>(_chat, _id), _lifetime,
+                                            [this](api::message &message) {
+                                              if (message.id_ != _id || !MessageLocation(message, nullptr)) return;
+                                              _message = CopyLocationMessage(message);
+                                              refresh();
+                                            },
+                                            [](api::error &) {});
       break;
     }
     case api::updateMessageSendSucceeded::ID: {
@@ -937,6 +985,7 @@ void LocationViewer::refresh() {
   adw_window_title_set_title(ADW_WINDOW_TITLE(_title), title.c_str());
   adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), subtitle.c_str());
   gtk_label_set_text(GTK_LABEL(_details), details.c_str());
+  gtk_widget_set_visible(_stop, Live().sharing(_chat, _id));
   if (_fix) {
     auto text = Translated("{distance} away", "{distance} от вас", "{distance} від вас");
     text.replace(text.find("{distance}"), 10, FormatDistance(DistanceMeters(_fix->lat, _fix->lon, _lat, _lon)));
@@ -977,11 +1026,12 @@ void LocationViewer::toggleMyLocation() {
 // loc-mine | loc-state
 void LocationViewer::debug(const std::string &name) {
   if (name == "loc-mine") toggleMyLocation();
-  g_message("Location viewer: \"%s\" \"%s\" details=\"%s\" distance=\"%s\" at %s watching=%d",
+  if (name == "loc-stop" && gtk_widget_get_visible(_stop)) g_signal_emit_by_name(_stop, "clicked");
+  g_message("Location viewer: \"%s\" \"%s\" details=\"%s\" distance=\"%s\" at %s watching=%d stop=%d",
             adw_window_title_get_title(ADW_WINDOW_TITLE(_title)), adw_window_title_get_subtitle(ADW_WINDOW_TITLE(_title)),
             gtk_label_get_text(GTK_LABEL(_details)),
             gtk_widget_get_visible(_distance) ? gtk_label_get_text(GTK_LABEL(_distance)) : "",
-            FormatCoordinates(_lat, _lon).c_str(), int(_watch != nullptr));
+            FormatCoordinates(_lat, _lon).c_str(), int(_watch != nullptr), int(gtk_widget_get_visible(_stop)));
 }
 
 void LocationViewer::received(const GeoFix &fix) {

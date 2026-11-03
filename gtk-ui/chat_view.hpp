@@ -16,6 +16,7 @@
 
 namespace Contrail {
 
+class ChatLiveBar;
 class MainWindow;
 class MessageWidget;
 struct ForwardDraft;
@@ -68,6 +69,8 @@ class ChatView final {
   void chooseLocation();
   void openLocation(const MessageItem &item);
   void sendContent(Td::api::object_ptr<Td::api::InputMessageContent> content);
+  // Who shares a live location here, under the header (null in a channel).
+  [[nodiscard]] ChatLiveBar *liveBar() const { return _liveBar.get(); }
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -274,6 +277,7 @@ class ChatView final {
   GtkWidget *_pinnedClose = nullptr;
   GtkWidget *_pinnedDialog = nullptr;  // The list of them while it is open.
   std::vector<GtkWidget *> _dialogs;  // holdDialog()
+  std::unique_ptr<ChatLiveBar> _liveBar;
   SignalConnections _signals;
 
   std::vector<std::unique_ptr<MessageItem>> _items;

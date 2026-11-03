@@ -59,6 +59,8 @@ struct LocationInfo {
 [[nodiscard]] std::string LiveLocationUpdated(const Td::api::message &message);  // "updated 5 minutes ago"
 [[nodiscard]] std::string LiveLocationRemaining(const Td::api::message &message);  // "14m", "8h", "∞"
 [[nodiscard]] double LiveLocationProgress(const Td::api::message &message);  // The part of its time left.
+// Only what the maps read: the location, the dates and the sender (a live location's message is kept while it moves).
+[[nodiscard]] Td::api::object_ptr<Td::api::message> CopyLocationMessage(const Td::api::message &message);
 // Whoever sent it: a user, or the chat of a channel.
 [[nodiscard]] std::string SenderName(const Td::Store &store, const Td::api::message &message);
 [[nodiscard]] GtkWidget *MakeSenderAvatar(Td::Store &store, const Td::api::message &message, int size);

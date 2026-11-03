@@ -20,7 +20,9 @@
 #      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
 #   9. places: a place, a venue and a live location in a chat with their maps, a location's map with the distance,
 #      the picker sending the device's position, a place nearby, a place found by name and a point on the map;
-#      the chat's card with a group's members, a member's card, muting from it; the contacts with a search; About;
+#      live locations: the bar, one's own sent, moved, on the shared map and stopped there, and going on after a
+#      restart; the chat's card with a group's members, a member's card, muting from it; the contacts with a
+#      search; About;
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -511,6 +513,28 @@ section_places() {
   grep -q 'Scenario: sent to Places:  55.80000 37.70000 "" period 0' "$WORK/log.txt" || fail "the point wasn't sent"
   c 'loc-state' 0.3
   grep -q 'Location: no dialog shown' "$WORK/log.txt" || fail "the picker stayed"
+  # Live locations: Boris's in the bar, one's own started from the picker, moved, seen on the shared map, stopped there.
+  [[ $(asked 'Live bar:' live-bar) == *'revealed=1 text="Boris" stop=0 active=1' ]] || fail "no bar with Boris"
+  c loc-picker 1
+  c 'loc-fix 55.7000 37.6000 12' 1
+  c loc-live 1
+  c 'dialog-answer 15m' 1.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris and you" stop=1 active=2' ]] \
+    || fail "one's own live location isn't in the bar: $(grep 'Live bar:' "$WORK/log.txt" | tail -1)"
+  [[ $(asked 'chat media:' 'media 8') == *'live="updated just now" left="1'?'m"'* ]] \
+    || fail "the live location sent: $(grep 'chat media:' "$WORK/log.txt" | tail -1)"
+  c live-update 0.3
+  c 'loc-fix 55.7100 37.6100 10' 1
+  grep -q 'Scenario: live location 8 moved to 55.71000 37.61000' "$WORK/log.txt" || fail "the live location didn't move"
+  c live-bar-tap 1.5
+  [[ $(asked 'Live map:' live-state) == *'pins=2 share="Stop Sharing My Location" watching=1 moved=0 rows: ["You" "updated just now"] ["Boris Places" "updated 2 minutes ago · '* ]] \
+    || fail "the shared map: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c live-share 1
+  grep -q 'Scenario: live location 8 stopped' "$WORK/log.txt" || fail "not stopped from the shared map"
+  [[ $(asked 'Live map:' live-state) == *'pins=1 share="Share My Live Location"'* ]] \
+    || fail "the shared map after stopping: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris" stop=0 active=1' ]] || fail "the bar after stopping"
   # The chat's card: the group's description and members, a member's card, muting from it.
   c profile 1.5
   [[ $(asked 'Profile: name' profile-state) == *'name="Places" status="3 members" mute=0 info: [Description=Where we meet] members: "Vlad" "Anna Places" "Boris Places"'* ]] \
@@ -533,6 +557,13 @@ section_places() {
   [[ $(asked 'chat topic=' state) == *' id=3002'* ]] || fail "the contact's chat didn't open"
   c about 1
   grep -q 'About: shown' "$WORK/log.txt" || fail "no About"
+  stop
+  # After a restart TDLib tells about one's own live location still shared: it goes on.
+  CONTRAIL_SCENARIO_LIVE=1 start 150
+  [[ $(asked 'Live locations: shares' live-locations) == *'shares=1 waiting=1 '*'[-700/6 period=2147483647 '* ]] \
+    || fail "the live location of the last run: $(grep 'Live locations: shares' "$WORK/log.txt" | tail -1)"
+  c 'loc-fix 55.7700 37.6300 8' 1
+  grep -q 'Scenario: live location 6 moved to 55.77000 37.63000' "$WORK/log.txt" || fail "it didn't go on"
   stop
 }
 section_places

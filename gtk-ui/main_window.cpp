@@ -4,6 +4,7 @@
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "live_location.hpp"
 #include "login.hpp"
 #include "memory_trim.hpp"
 #include "td/message_text.hpp"
@@ -153,6 +154,7 @@ void MainWindow::searchChats(const std::string &query) {
 }
 
 void MainWindow::detach() {
+  Live().setStore(nullptr);
   clearChats();
   _sessionLifetime.reset();
   _session = nullptr;
@@ -163,9 +165,12 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
   _session = &session;
   _sessionLifetime.reset();
   // From the first update on: TDLib sends what it knows about chats only once.
+  Live().setStore(nullptr);
   _store = std::make_unique<Td::Store>(session.client(), [this](const api::message &message) {
     return Td::MessagePreview(message, *_store);
   });
+  // Live locations go on in the background, with or without a window on the screen.
+  Live().setStore(_store.get());
   _language = language;
   _stringsAsked = false;
   _stringsReady = false;
