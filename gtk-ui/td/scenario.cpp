@@ -78,6 +78,13 @@ constexpr auto kDownloadStepMs = 200u;
 constexpr auto kDownloadStep = std::int64_t(128 * 1024);
 constexpr auto kSlowSendMs = 1500u;
 constexpr auto kCommandChat = std::int64_t(3);
+// "Places": a group with a place, a venue and live locations (locations, the shared map, the chat's card).
+constexpr auto kPlacesId = std::int64_t(-700);
+constexpr auto kPlacesGroupId = std::int64_t(700);
+constexpr auto kPlacesOrder = std::int64_t(1) << 28;
+constexpr auto kPlacesUsers = std::int64_t(3001);  // Anna and Boris.
+constexpr auto kVenueBotId = std::int64_t(3100);
+constexpr auto kMapFileIds = 4000000;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -383,8 +390,8 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
-    if (showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
-        || reactionRequest(id, *function)) {
+    if (placesRequest(id, *function) || showcaseRequest(id, *function) || forumRequest(id, *function)
+        || pinnedRequest(id, *function) || reactionRequest(id, *function)) {
       return;
     }
     switch (function->get_id()) {
@@ -574,6 +581,7 @@ class ScenarioTransport final : public Transport {
     addForum();
     addReactionsChannel();
     addShowcase();
+    addPlaces();
     update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("\xE2\x9D\xA4")));
     if (!_fullList) return;
     addOtherChats();
@@ -2065,6 +2073,345 @@ class ScenarioTransport final : public Transport {
     }
   }
 
+  // --- places: locations, live locations, the chat's card ---------------------
+
+  struct Place {
+    std::int64_t sender = 0;
+    std::string text;           // A text message when there is no position.
+    double lat = 0.;
+    double lon = 0.;
+    std::string title;          // A venue.
+    std::string address;
+    std::int32_t period = 0;    // A live location.
+    std::int32_t date = 0;
+    std::int32_t editDate = 0;
+    bool stopped = false;
+  };
+
+  // With a dot whatever the language.
+  static std::string Ascii(double value) {
+    char buffer[G_ASCII_DTOSTR_BUF_SIZE];
+    return g_ascii_formatd(buffer, sizeof(buffer), "%.5f", value);
+  }
+
+  static std::int32_t RealNow() {
+    return std::int32_t(g_get_real_time() / G_USEC_PER_SEC);
+  }
+
+  void addPlaces() {
+    update(api::make_object<api::updateUser>(MakeUser(kPlacesUsers, "Anna", "Places")));
+    update(api::make_object<api::updateUser>(MakeUser(kPlacesUsers + 1, "Boris", "Places")));
+    auto bot = MakeUser(kVenueBotId, "Foursquare", "");
+    update(api::make_object<api::updateUser>(std::move(bot)));
+    auto group = api::make_object<api::supergroup>();
+    group->id_ = kPlacesGroupId;
+    group->member_count_ = 3;
+    group->status_ = api::make_object<api::chatMemberStatusMember>(0);
+    update(api::make_object<api::updateSupergroup>(std::move(group)));
+    // Live locations need the time of now: a fixed date would have them over long ago.
+    const auto now = RealNow();
+    _places = {
+        {.sender = kSelfId, .text = "Where shall we meet?", .date = now - 3600},
+        {.sender = kPlacesUsers, .lat = 55.7558, .lon = 37.6173, .date = now - 3000},
+        {.sender = kSelfId, .lat = 55.7539, .lon = 37.6208, .title = "Red Square", .address = "Moscow, Russia",
+         .date = now - 2400},
+        {.sender = kPlacesUsers + 1, .lat = 55.7520, .lon = 37.6175, .period = 3600, .date = now - 600,
+         .editDate = now - 120},
+        {.sender = kPlacesUsers, .text = "On my way", .date = now - 60},
+    };
+    // CONTRAIL_SCENARIO_LIVE=1: as after a restart, this account still shares a live location here.
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) {
+      _places.push_back({.sender = kSelfId, .lat = 55.7600, .lon = 37.6200, .period = 0x7FFFFFFF, .date = now - 900});
+    }
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kPlacesId;
+    chat->type_ = api::make_object<api::chatTypeSupergroup>(kPlacesGroupId, false);
+    chat->title_ = "Places";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->last_message_ = placeMessage(int(_places.size()));
+    chat->last_read_inbox_message_id_ = std::int64_t(_places.size()) * kIdStep;
+    chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kPlacesOrder, false, nullptr));
+    _orders[kPlacesId] = {kPlacesOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+    if (g_getenv("CONTRAIL_SCENARIO_LIVE")) activeLive();
+  }
+
+  bool placeLive(const Place &place) const {
+    return place.text.empty() && place.period && !place.stopped
+           && (place.period == 0x7FFFFFFF || place.date + place.period > RealNow());
+  }
+
+  // What TDLib tells about this account's own live locations whenever their list changes.
+  void activeLive() {
+    auto messages = std::vector<api::object_ptr<api::message>>();
+    for (auto index = 1; index <= int(_places.size()); ++index) {
+      const auto &place = _places[std::size_t(index - 1)];
+      if (place.sender == kSelfId && placeLive(place)) messages.push_back(placeMessage(index));
+    }
+    update(api::make_object<api::updateActiveLiveLocationMessages>(std::move(messages)));
+  }
+
+  ObjectPtr editLive(api::editMessageLiveLocation &request) {
+    const auto index = int(request.message_id_ / kIdStep);
+    if (index < 1 || index > int(_places.size()) || !_places[std::size_t(index - 1)].period) {
+      return api::make_object<api::error>(400, "MESSAGE_ID_INVALID");
+    }
+    auto &place = _places[std::size_t(index - 1)];
+    if (!placeLive(place)) return api::make_object<api::error>(400, "MESSAGE_NOT_MODIFIED");
+    const auto now = RealNow();
+    if (!request.location_ || !request.location_->location_) {
+      // Stopped: the server shortens it to the time it went on.
+      place.stopped = true;
+      place.period = std::max(now - place.date, 1);
+      g_message("Scenario: live location %d stopped", index);
+    } else {
+      place.lat = request.location_->location_->latitude_;
+      place.lon = request.location_->location_->longitude_;
+      g_message("Scenario: live location %d moved to %s %s", index, Ascii(place.lat).c_str(), Ascii(place.lon).c_str());
+    }
+    place.editDate = now;
+    update(api::make_object<api::updateMessageContent>(kPlacesId, request.message_id_,
+                                                         std::move(placeMessage(index)->content_)));
+    update(api::make_object<api::updateMessageEdited>(kPlacesId, request.message_id_, now, nullptr));
+    if (place.stopped) activeLive();
+    return placeMessage(index);
+  }
+
+  api::object_ptr<api::message> placeMessage(int index) {
+    const auto &place = _places[std::size_t(index - 1)];
+    auto message = MakeMessage(kPlacesId, index * kIdStep, place.sender, place.date, place.text);
+    message->edit_date_ = place.editDate;
+    if (!place.text.empty()) return message;
+    auto location = api::make_object<api::location>(place.lat, place.lon, 0.);
+    if (place.period) {
+      const auto left = (place.period == 0x7FFFFFFF) ? place.period : std::max(place.date + place.period - RealNow(), 0);
+      message->content_ = api::make_object<api::messageLiveLocation>(
+          api::make_object<api::liveLocation>(std::move(location), place.period, 0, 0),
+          place.stopped ? 0 : left);
+    } else if (!place.title.empty()) {
+      message->content_ = api::make_object<api::messageVenue>(
+          api::make_object<api::venue>(std::move(location), place.title, place.address, "foursquare", "4b", ""));
+    } else {
+      message->content_ = api::make_object<api::messageLocation>(std::move(location));
+    }
+    return message;
+  }
+
+  api::object_ptr<api::message> placeSent(api::sendMessage &request) {
+    auto place = Place{.sender = kSelfId, .date = RealNow()};
+    const auto content = request.input_message_content_.get();
+    if (content && content->get_id() == api::inputMessageLocation::ID) {
+      const auto &location = static_cast<api::inputMessageLocation *>(content)->location_;
+      place.lat = location->latitude_;
+      place.lon = location->longitude_;
+    } else if (content && content->get_id() == api::inputMessageLiveLocation::ID) {
+      const auto &live = static_cast<api::inputMessageLiveLocation *>(content)->location_;
+      place.lat = live->location_->latitude_;
+      place.lon = live->location_->longitude_;
+      place.period = live->live_period_;
+    } else if (content && content->get_id() == api::inputMessageVenue::ID) {
+      const auto &venue = static_cast<api::inputMessageVenue *>(content)->venue_;
+      place.lat = venue->location_->latitude_;
+      place.lon = venue->location_->longitude_;
+      place.title = venue->title_;
+      place.address = venue->address_;
+    } else if (content && content->get_id() == api::inputMessageText::ID) {
+      place.text = static_cast<api::inputMessageText *>(content)->text_->text_;
+    } else {
+      place.text = "?";
+    }
+    g_message("Scenario: sent to Places: %s %s %s \"%s\" period %d", place.text.c_str(), Ascii(place.lat).c_str(),
+              Ascii(place.lon).c_str(), place.title.c_str(), place.period);
+    _places.push_back(std::move(place));
+    const auto index = int(_places.size());
+    const auto temporary = index * kIdStep + 1;
+    const auto pending = [&] {
+      auto message = placeMessage(index);
+      message->id_ = temporary;
+      message->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
+      return message;
+    };
+    update(api::make_object<api::updateNewMessage>(pending()));
+    later(200, [this, index, temporary] {
+      update(api::make_object<api::updateMessageSendSucceeded>(placeMessage(index), temporary));
+      update(api::make_object<api::updateChatLastMessage>(kPlacesId, placeMessage(index),
+                                                          std::vector<api::object_ptr<api::chatPosition>>()));
+      if (_places[std::size_t(index - 1)].period) activeLive();
+    });
+    return pending();
+  }
+
+  api::object_ptr<api::file> mapFile(const api::getMapThumbnailFile &request) {
+    const auto id = kMapFileIds + (++_mapFiles);
+    auto local = api::make_object<api::localFile>();
+    local->path_ = PhotoFile(7, request.width_ * request.scale_, request.height_ * request.scale_);
+    local->can_be_downloaded_ = true;
+    local->is_downloading_completed_ = true;
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->local_ = std::move(local);
+    file->remote_ = api::make_object<api::remoteFile>();
+    return file;
+  }
+
+  // The requests about locations and the "Places" group; false for anything else.
+  bool placesRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::getMapThumbnailFile::ID: {
+        auto file = mapFile(static_cast<api::getMapThumbnailFile &>(function));
+        update(api::make_object<api::updateFile>(mapFile(static_cast<api::getMapThumbnailFile &>(function))));
+        answer(id, std::move(file));
+        return true;
+      }
+      case api::getOption::ID:
+        if (static_cast<api::getOption &>(function).name_ != "venue_search_bot_username") return false;
+        answer(id, api::make_object<api::optionValueString>("foursquare"));
+        return true;
+      case api::searchPublicChat::ID: {
+        if (static_cast<api::searchPublicChat &>(function).username_ != "foursquare") return false;
+        auto chat = api::make_object<api::chat>();
+        chat->id_ = kVenueBotId;
+        chat->type_ = api::make_object<api::chatTypePrivate>(kVenueBotId);
+        chat->title_ = "Foursquare";
+        chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+        answer(id, std::move(chat));
+        return true;
+      }
+      case api::getInlineQueryResults::ID: {
+        const auto &request = static_cast<api::getInlineQueryResults &>(function);
+        auto result = api::make_object<api::inlineQueryResults>();
+        const auto lat = request.user_location_ ? request.user_location_->latitude_ : 0.;
+        const auto lon = request.user_location_ ? request.user_location_->longitude_ : 0.;
+        const char *names[] = {"Coffee House", "City Park", "Old Bookshop"};
+        for (auto i = 0; i < 3; ++i) {
+          const auto title = request.query_.empty() ? std::string(names[i]) : request.query_ + " " + std::to_string(i + 1);
+          result->results_.push_back(api::make_object<api::inlineQueryResultVenue>(
+              "venue" + std::to_string(i),
+              api::make_object<api::venue>(api::make_object<api::location>(lat + 0.001 * (i + 1), lon, 0.), title,
+                                           "Street " + std::to_string(i + 1), "foursquare", "4b" + std::to_string(i), ""),
+              nullptr));
+        }
+        g_message("Scenario: places near %s %s \"%s\"", Ascii(lat).c_str(), Ascii(lon).c_str(), request.query_.c_str());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        answer(id, placeSent(request));
+        return true;
+      }
+      case api::getChatHistory::ID: {
+        const auto &request = static_cast<api::getChatHistory &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        auto result = api::make_object<api::messages>();
+        const auto count = int(_places.size());
+        auto newest = request.from_message_id_ ? int(request.from_message_id_ / kIdStep) : count + 1;
+        newest -= request.offset_;
+        if (request.offset_ == 0) --newest;
+        newest = std::min(newest, count);
+        for (auto index = newest; index >= 1 && int(result->messages_.size()) < request.limit_; --index) {
+          result->messages_.push_back(placeMessage(index));
+        }
+        result->total_count_ = count;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::editMessageLiveLocation::ID: {
+        auto &request = static_cast<api::editMessageLiveLocation &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        answer(id, editLive(request));
+        return true;
+      }
+      case api::searchChatRecentLocationMessages::ID: {
+        auto result = api::make_object<api::messages>();
+        if (static_cast<api::searchChatRecentLocationMessages &>(function).chat_id_ == kPlacesId) {
+          for (auto index = int(_places.size()); index >= 1; --index) {
+            if (placeLive(_places[std::size_t(index - 1)])) result->messages_.push_back(placeMessage(index));
+          }
+        }
+        result->total_count_ = int(result->messages_.size());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getContacts::ID: {
+        answer(id, api::make_object<api::users>(5, std::vector<std::int64_t>{1, 2, 3, kPlacesUsers, kPlacesUsers + 1}));
+        return true;
+      }
+      case api::searchContacts::ID: {
+        // The server finds Boris by his last name too.
+        const auto &query = static_cast<api::searchContacts &>(function).query_;
+        auto ids = std::vector<std::int64_t>();
+        if (query.find("Plac") != std::string::npos) ids = {kPlacesUsers, kPlacesUsers + 1};
+        g_message("Scenario: contacts searched for \"%s\"", query.c_str());
+        answer(id, api::make_object<api::users>(int(ids.size()), std::move(ids)));
+        return true;
+      }
+      case api::getUser::ID: {
+        const auto user = static_cast<api::getUser &>(function).user_id_;
+        auto result = (user >= kPlacesUsers && user <= kPlacesUsers + 1)
+                          ? MakeUser(user, user == kPlacesUsers ? "Anna" : "Boris", "Places")
+                          : MakeUser(user, "Friend", std::to_string(user));
+        result->phone_number_ = "7999000" + std::to_string(1000 + user % 1000);
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getUserFullInfo::ID: {
+        auto full = api::make_object<api::userFullInfo>();
+        full->bio_ = Formatted("Loves maps");
+        answer(id, std::move(full));
+        return true;
+      }
+      case api::getSupergroupFullInfo::ID: {
+        if (static_cast<api::getSupergroupFullInfo &>(function).supergroup_id_ != kPlacesGroupId) return false;
+        auto full = api::make_object<api::supergroupFullInfo>();
+        full->description_ = "Where we meet";
+        full->member_count_ = 3;
+        answer(id, std::move(full));
+        return true;
+      }
+      case api::getSupergroupMembers::ID: {
+        if (static_cast<api::getSupergroupMembers &>(function).supergroup_id_ != kPlacesGroupId) return false;
+        auto result = api::make_object<api::chatMembers>();
+        const auto member = [&](std::int64_t user, api::object_ptr<api::ChatMemberStatus> status) {
+          result->members_.push_back(api::make_object<api::chatMember>(
+              api::make_object<api::messageSenderUser>(user), std::string(), 0, 0, std::move(status)));
+        };
+        member(kSelfId, api::make_object<api::chatMemberStatusCreator>(false, true));
+        member(kPlacesUsers, api::make_object<api::chatMemberStatusAdministrator>(false, nullptr));
+        member(kPlacesUsers + 1, api::make_object<api::chatMemberStatusMember>(0));
+        result->total_count_ = 3;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::createPrivateChat::ID: {
+        const auto user = static_cast<api::createPrivateChat &>(function).user_id_;
+        if (user != kPlacesUsers && user != kPlacesUsers + 1) return false;
+        const auto make = [&] {
+          auto chat = api::make_object<api::chat>();
+          chat->id_ = user;
+          chat->type_ = api::make_object<api::chatTypePrivate>(user);
+          chat->title_ = user == kPlacesUsers ? "Anna Places" : "Boris Places";
+          chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+          return chat;
+        };
+        update(api::make_object<api::updateNewChat>(make()));
+        answer(id, make());
+        return true;
+      }
+      case api::getMessage::ID: {
+        const auto &request = static_cast<api::getMessage &>(function);
+        if (request.chat_id_ != kPlacesId) return false;
+        const auto index = int(request.message_id_ / kIdStep);
+        if (index >= 1 && index <= int(_places.size())) answer(id, placeMessage(index));
+        else answer(id, api::make_object<api::error>(404, "Not Found"));
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
   const bool _fullList;
   Sink _sink;
   guint _source = 0;
@@ -2100,6 +2447,8 @@ class ScenarioTransport final : public Transport {
   guint _burst = 0;
   unsigned _burstSeed = 1;
   int _burstUpdates = 0;
+  std::vector<Place> _places;  // The "Places" group's messages, the sent ones too.
+  int _mapFiles = 0;
 };
 
 }  // namespace

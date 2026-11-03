@@ -2,8 +2,8 @@
 
 #include "app.hpp"
 
-#include "base/basic_types.h"
-
+#include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -33,9 +33,9 @@ void MapRemoveMarker(GtkWidget *map, GtkWidget *marker);
 // Shows all the points (FitPoints in geo.hpp) as soon as the map has its size, with room around them for the pins.
 void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &points, double maxZoom, bool animate);
 // Calls `touched` when the user starts moving or zooming the map (not when the app moves it).
-void MapOnUserMove(GtkWidget *map, Fn<void()> touched);
+void MapOnUserMove(GtkWidget *map, std::function<void()> touched);
 // Calls `moved` when the middle of the map changes.
-void MapOnCenterChanged(GtkWidget *map, Fn<void()> moved);
+void MapOnCenterChanged(GtkWidget *map, std::function<void()> moved);
 
 #endif  // CONTRAIL_SHUMATE
 
@@ -47,8 +47,10 @@ void MapOnCenterChanged(GtkWidget *map, Fn<void()> moved);
 // "geo:" for the system's map application (GNOME Maps, Organic Maps...).
 void OpenInMapsApp(double lat, double lon);
 // 55.75580, 37.61730
-[[nodiscard]] QString FormatCoordinates(double lat, double lon);
+[[nodiscard]] std::string FormatCoordinates(double lat, double lon);
 // 120 m, 2.4 km
-[[nodiscard]] QString FormatDistance(double meters);
+[[nodiscard]] std::string FormatDistance(double meters);
+// With the language's decimal separator, or always a dot (`localized` false; only 5 or 6 decimals then).
+[[nodiscard]] std::string FormatNumber(double value, int decimals, bool localized);
 
 }  // namespace Contrail

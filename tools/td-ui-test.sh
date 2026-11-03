@@ -18,6 +18,11 @@
 #      opening by itself, a file stopped and opened with a second tap, a GIF and a sticker opened, links, mentions,
 #      a spoiler and a bot command among emoji, Save and Copy in the menu, a menu closed with its chat, a failed
 #      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
+#   9. places: a place, a venue and a live location in a chat with their maps, a location's map with the distance,
+#      the picker sending the device's position, a place nearby, a place found by name and a point on the map;
+#      live locations: the bar, one's own sent, moved, on the shared map and stopped there, and going on after a
+#      restart; the chat's card with a group's members, a member's card, muting from it; the contacts with a
+#      search; About;
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -167,7 +172,7 @@ start 120
 c 'chat 1' 3
 c forward 1
 line=$(asked 'forward picker:' forward-picker)
-[[ $line == *'page=chats forum=0 shown=42 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
+[[ $line == *'page=chats forum=0 shown=43 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
   || fail "the chats to forward to: $line"
 c 'forward-search club' 0.5
 line=$(asked 'forward picker:' forward-picker)
@@ -464,4 +469,102 @@ c 'tap-text 2 #contrail' 1
 c tree 0.5
 grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
+
+# Section places: locations in a chat, their map, the picker.
+section_places() {
+  echo "9. Places"
+  start 150
+  c 'chat 43' 3
+  [[ $(asked 'chat media:' 'media 2') == *'location map='*' shown'* ]] || fail "no map of the place: $(asked 'chat media:' 'media 2')"
+  [[ $(asked 'chat media:' 'media 4') == *'live="updated 2 minutes ago" left="4'?'m"'* ]] \
+    || fail "the live location: $(asked 'chat media:' 'media 4')"
+  c tree 0.5
+  grep -q 'GtkLabel "Red Square"' "$WORK/log.txt" || fail "no venue's name"
+  # A place on the map: how far it is only after "my location".
+  c 'tap 2' 1
+  [[ $(asked 'Location viewer:' loc-state) == *'"Location" "" details="55.75580, 37.61730" distance="" '*'watching=0'* ]] \
+    || fail "the place's map: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-mine 0.3
+  c 'loc-fix 55.7558 37.6273 8' 0.3
+  [[ $(asked 'Location viewer:' loc-state) == *'distance="626 m away"'*'watching=1'* ]] \
+    || fail "no distance: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  c 'tap 4' 1
+  [[ $(asked 'Location viewer:' loc-state) == *'"Live Location" "Boris Places" details="updated 2 minutes ago"'* ]] \
+    || fail "the live location's map: $(grep 'Location viewer:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  # The picker: the device's position, places nearby, a place found by name, a point on the map.
+  c loc-picker 1
+  [[ $(asked 'Location picker:' loc-state) == *'sensitive=1'*'watching=1'* ]] \
+    || fail "the picker: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c 'loc-fix 55.7000 37.6000 12' 1.5
+  [[ $(asked 'Location picker:' loc-state) == *'send="Send My Current Location" "Accurate to 12 m" sensitive=1 pin=0 follow=1 venues=3'* ]] \
+    || fail "the position in the picker: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c 'loc-venue 1' 1
+  [[ $(asked 'chat media:' 'media 6') == *'location map='* ]] || fail "the place nearby wasn't sent"
+  grep -q 'Scenario: sent to Places:  55.70200 37.60000 "City Park"' "$WORK/log.txt" || fail "not the place chosen"
+  c loc-picker 1
+  c 'loc-search Pizza' 1.5
+  grep -q 'Scenario: places near 55.70000 37.60000 "Pizza"' "$WORK/log.txt" || fail "no search by name"
+  c 'loc-move 55.8000 37.7000' 1.5
+  [[ $(asked 'Location picker:' loc-state) == *'send="Send This Location" "55.80000, 37.70000" sensitive=1 pin=1 follow=0'* ]] \
+    || fail "a point on the map: $(grep 'Location picker:' "$WORK/log.txt" | tail -1)"
+  c loc-send 1
+  grep -q 'Scenario: sent to Places:  55.80000 37.70000 "" period 0' "$WORK/log.txt" || fail "the point wasn't sent"
+  c 'loc-state' 0.3
+  grep -q 'Location: no dialog shown' "$WORK/log.txt" || fail "the picker stayed"
+  # Live locations: Boris's in the bar, one's own started from the picker, moved, seen on the shared map, stopped there.
+  [[ $(asked 'Live bar:' live-bar) == *'revealed=1 text="Boris" stop=0 active=1' ]] || fail "no bar with Boris"
+  c loc-picker 1
+  c 'loc-fix 55.7000 37.6000 12' 1
+  c loc-live 1
+  c 'dialog-answer 15m' 1.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris and you" stop=1 active=2' ]] \
+    || fail "one's own live location isn't in the bar: $(grep 'Live bar:' "$WORK/log.txt" | tail -1)"
+  [[ $(asked 'chat media:' 'media 8') == *'live="updated just now" left="1'?'m"'* ]] \
+    || fail "the live location sent: $(grep 'chat media:' "$WORK/log.txt" | tail -1)"
+  c live-update 0.3
+  c 'loc-fix 55.7100 37.6100 10' 1
+  grep -q 'Scenario: live location 8 moved to 55.71000 37.61000' "$WORK/log.txt" || fail "the live location didn't move"
+  c live-bar-tap 1.5
+  [[ $(asked 'Live map:' live-state) == *'pins=2 share="Stop Sharing My Location" watching=1 moved=0 rows: ["You" "updated just now"] ["Boris Places" "updated 2 minutes ago · '* ]] \
+    || fail "the shared map: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c live-share 1
+  grep -q 'Scenario: live location 8 stopped' "$WORK/log.txt" || fail "not stopped from the shared map"
+  [[ $(asked 'Live map:' live-state) == *'pins=1 share="Share My Live Location"'* ]] \
+    || fail "the shared map after stopping: $(grep 'Live map:' "$WORK/log.txt" | tail -1)"
+  c loc-close 0.5
+  [[ $(asked 'Live bar:' live-bar) == *'text="Boris" stop=0 active=1' ]] || fail "the bar after stopping"
+  # The chat's card: the group's description and members, a member's card, muting from it.
+  c profile 1.5
+  [[ $(asked 'Profile: name' profile-state) == *'name="Places" status="3 members" mute=0 info: [Description=Where we meet] members: "Vlad" "Anna Places" "Boris Places"'* ]] \
+    || fail "the group's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
+  c 'profile-member 1' 1.5
+  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places" status="last seen '*'mute=0 info: [Mobile=+79990001001] [Bio=Loves maps]'* ]] \
+    || fail "a member's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
+  c profile-mute 1
+  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places"'*' mute=1 '* ]] || fail "not muted from the card"
+  c loc-close 0.5
+  c back 1
+  # The contacts: all of them, a search with the server's answer, a tap opening the chat; About.
+  c contacts 1.5
+  [[ $(asked 'Contacts:' contacts-state) == *'rows: "Anna Places" "Boris Places" "Friend 1" "Friend 2" "Friend 3"' ]] \
+    || fail "the contacts: $(grep 'Contacts:' "$WORK/log.txt" | tail -1)"
+  c 'contacts-search bor' 1.5
+  [[ $(asked 'Contacts:' contacts-state) == *'query="bor" empty="" rows: "Boris Places"' ]] \
+    || fail "the contacts found: $(grep 'Contacts:' "$WORK/log.txt" | tail -1)"
+  c 'contacts-open 0' 2
+  [[ $(asked 'chat topic=' state) == *' id=3002'* ]] || fail "the contact's chat didn't open"
+  c about 1
+  grep -q 'About: shown' "$WORK/log.txt" || fail "no About"
+  stop
+  # After a restart TDLib tells about one's own live location still shared: it goes on.
+  CONTRAIL_SCENARIO_LIVE=1 start 150
+  [[ $(asked 'Live locations: shares' live-locations) == *'shares=1 waiting=1 '*'[-700/6 period=2147483647 '* ]] \
+    || fail "the live location of the last run: $(grep 'Live locations: shares' "$WORK/log.txt" | tail -1)"
+  c 'loc-fix 55.7700 37.6300 8' 1
+  grep -q 'Scenario: live location 6 moved to 55.77000 37.63000' "$WORK/log.txt" || fail "it didn't go on"
+  stop
+}
+section_places
 echo "PASS"

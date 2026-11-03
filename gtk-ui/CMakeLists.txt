@@ -60,13 +60,20 @@ add_library(contrail_core STATIC
   album_layout.cpp
   app.cpp
   chat_list.cpp
+  chat_live_locations.cpp
   chat_view.cpp
   debug.cpp
   device_scale.cpp
+  dialogs.cpp
   forward.cpp
+  live_location.cpp
+  live_map.cpp
   local_state.cpp
+  location.cpp
+  location_ui.cpp
   login.cpp
   main_window.cpp
+  map_view.cpp
   memory_trim.cpp
   message.cpp
   picture_decode.cpp
@@ -84,6 +91,13 @@ add_library(contrail_core STATIC
   userpics.cpp)
 target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
 target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS PkgConfig::CONTRAIL_IMAGE_DEPS)
+# Optional: maps for locations (picking a place, following a live location). Without it a location opens in
+# the system's map application.
+pkg_check_modules(CONTRAIL_SHUMATE IMPORTED_TARGET shumate-1.0)
+if (CONTRAIL_SHUMATE_FOUND)
+  target_compile_definitions(contrail_core PUBLIC CONTRAIL_SHUMATE)
+  target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_SHUMATE)
+endif()
 # GTK and libadwaita versions of FuriOS 14: warn about anything newer. The x86_64 test container has older headers,
 # which don't know these macros.
 if (CMAKE_CROSSCOMPILING)

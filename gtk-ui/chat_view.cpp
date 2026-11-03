@@ -1,7 +1,10 @@
 #include "chat_view.hpp"
 
+#include "chat_live_locations.hpp"
 #include "forward.hpp"
+#include "live_location.hpp"
 #include "local_state.hpp"
+#include "location_ui.hpp"
 #include "main_window.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
@@ -489,6 +492,10 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
   adw_toolbar_view_set_bottom_bar_style(ADW_TOOLBAR_VIEW(_root), ADW_TOOLBAR_RAISED);
   buildHeader();
   buildPinnedBar();
+  if (const auto known = _store.chat(_chat); known && known->kind != Td::ChatKind::Channel) {
+    _liveBar = std::make_unique<ChatLiveBar>(_window, _store, _chat);
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), _liveBar->widget());
+  }
   buildList();
   buildComposer();
   refreshHeader();
@@ -761,6 +768,14 @@ void ChatView::buildHeader() {
   auto *avatar = MakeAvatar(_store, _chat, 32, true);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), avatar);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), header);
+  // A tap on the name or the picture: the chat's card.
+  for (auto *widget : {_title, avatar}) {
+    auto *click = gtk_gesture_click_new();
+    _signals.connect<void(GtkGestureClick *, int, double, double)>(
+        click, "released", [this](GtkGestureClick *, int, double, double) { _window.openProfile(_chat); });
+    gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(click));
+    gtk_widget_set_cursor_from_name(widget, "pointer");
+  }
 }
 
 void ChatView::refreshHeader() {
@@ -2235,6 +2250,13 @@ void ChatView::buildComposer() {
   gtk_widget_add_css_class(inputScroll, "message-input-frame");
   gtk_box_append(GTK_BOX(field), inputScroll);
 
+  // A location, as the phone apps' attach menu has it.
+  auto *locationButton = MakeIconButton("contrail-map-pin-symbolic", Tr("lng_maps_point").c_str(), "flat");
+  gtk_widget_add_css_class(locationButton, "circular");
+  gtk_widget_set_valign(locationButton, GTK_ALIGN_END);
+  _signals.clicked(locationButton, [this] { chooseLocation(); });
+  gtk_box_prepend(GTK_BOX(field), locationButton);
+
   // Placeholder: a label over the empty field.
   const auto known = _store.chat(_chat);
   const auto broadcast = known && known->kind == Td::ChatKind::Channel;
@@ -2596,6 +2618,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     if (!found->local() && SavedOf(*found->data).file) {
       g_menu_append(menu, Tr("lng_context_save_file").c_str(), "msg.save");
     }
+    if (Live().sharing(_chat, found->id())) {
+      g_menu_append(menu, Tr("lng_group_call_screen_share_stop").c_str(), "msg.stop-live");
+    }
     if (CanShowWhoReacted(*this, *found->data)) {
       g_menu_append(menu, TrCount("lng_context_seen_reacted", ReactionsCount(*found->data)).c_str(), "msg.reacted");
     }
@@ -2646,6 +2671,7 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
       ShowToast(Tr("lng_text_copied"));
     });
     add("save", [this, id] { saveFile(id); });
+    add("stop-live", [this, id] { Live().stop(_chat, id); });
     add("forward", [this, id] {
       if (const auto item = find(id)) forward(*item);
     });
@@ -3420,6 +3446,32 @@ void ChatView::debugSponsored() const {
             int(_sponsoredAsked), int(_sponsored != nullptr), _sponsoredWaiting.size(), int(_sponsoredPlaced),
             (long long)(_sponsored ? _sponsored->sponsoredAfter >> 20 : 0), int(row != nullptr), int(_sponsoredViewed),
             _sponsoredClicks);
+}
+
+// --- locations ---------------------------------------------------------------
+
+void ChatView::chooseLocation() {
+  const auto known = _store.chat(_chat);
+  if (!known || !_store.canWrite(*known)) return;
+  ShowLocationPicker(_window, {.chat = _chat,
+                               .topic = _topic,
+                               .replyTo = _replyToId,
+                               .send = [this, token = _lifetime.token()](
+                                           api::object_ptr<api::InputMessageContent> content) {
+                                 if (!token.expired()) sendContent(std::move(content));
+                               }});
+}
+
+void ChatView::sendContent(api::object_ptr<api::InputMessageContent> content) {
+  _store.client().send(api::make_object<api::sendMessage>(_chat, topicObject(), ReplyTo(_replyToId), nullptr, nullptr,
+                                                          std::move(content)));
+  if (_replyToId) cancelReplyOrEdit();
+  if (_reachedBottom) scrollToBottom();
+  else reload(0);
+}
+
+void ChatView::openLocation(const MessageItem &item) {
+  if (item.data) ShowLocation(_window, *item.data);
 }
 
 }  // namespace Contrail
