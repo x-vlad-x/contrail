@@ -11,10 +11,15 @@ struct Script final : Td::Transport {
   Sink sink;
   int discarded = 0;
   int discardId = 0;
+  int debugSent = 0;
   bool muted = false;
   void start(Sink value) override { sink = std::move(value); }
   void send(std::uint64_t id, Td::FunctionPtr function) override {
     switch (function->get_id()) {
+      case api::sendCallDebugInformation::ID:
+        ++debugSent;
+        sink(id, api::make_object<api::ok>());
+        break;
       case api::getProxies::ID: {
         auto list = api::make_object<api::addedProxies>();
         auto proxy = api::make_object<api::addedProxy>();
@@ -108,9 +113,36 @@ int main() {
   raw->update(14, false, std::move(failureReady));
   raw->sink(0, api::make_object<api::updateNewCallSignalingData>(14, "failed"));
   assert(!backend.active() && backend.snapshot().stage == S::Failed);
+  raw->update(14, false, api::make_object<api::callStateDiscarded>(
+      api::make_object<api::callDiscardReasonHungUp>(), false, true, false));
+  assert(raw->debugSent == 1);
   // An old terminal update must not replace the last call or open a window.
   raw->update(13, true, api::make_object<api::callStateError>(api::make_object<api::error>(400, "old")));
   assert(backend.snapshot().id == 14);
+  // Failure while draining signaling received before Ready must not invalidate its queue iterator.
+  raw->update(15, false, api::make_object<api::callStatePending>(true, true));
+  raw->sink(0, api::make_object<api::updateNewCallSignalingData>(15, "failed"));
+  raw->sink(0, api::make_object<api::updateNewCallSignalingData>(15, "remote-muted"));
+  auto earlyFailure = api::make_object<api::callStateReady>();
+  earlyFailure->protocol_ = api::make_object<api::callProtocol>(true, true, 65, 92, std::vector<std::string>{"13.0.0"});
+  earlyFailure->encryption_key_ = std::string(256, 'c');
+  raw->update(15, false, std::move(earlyFailure));
+  assert(!backend.active() && backend.snapshot().stage == S::Failed);
+  // A factory can fail synchronously before returning its Media.
+  auto anotherScript = std::make_unique<Script>();
+  auto *another = anotherScript.get();
+  Td::Client anotherClient(std::move(anotherScript));
+  CallBackend immediateFailure(anotherClient, [](Calls::Parameters parameters, Calls::Callbacks callbacks) {
+    callbacks.state(Calls::State::Failed);
+    return Calls::MakeScenarioMedia(std::move(parameters), std::move(callbacks));
+  });
+  another->update(20, false, api::make_object<api::callStatePending>(true, true));
+  auto immediateReady = api::make_object<api::callStateReady>();
+  immediateReady->protocol_ = api::make_object<api::callProtocol>(true, true, 65, 92, std::vector<std::string>{"13.0.0"});
+  immediateReady->encryption_key_ = std::string(256, 'd');
+  another->update(20, false, std::move(immediateReady));
+  assert(!immediateFailure.active() && immediateFailure.snapshot().stage == S::Failed);
+  assert(immediateFailure.soundStats().empty());
   // Cancelling before createCall has returned must discard the call once its id is known.
   backend.setChanged([&] {
     if (backend.snapshot().stage == S::Requesting && !backend.snapshot().id) backend.hangup();

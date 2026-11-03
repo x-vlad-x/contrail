@@ -76,6 +76,7 @@ class CallBackend final {
   bool _startingMedia = false;
   bool _cancelCreate = false;
   std::string _outputDevice;
+  std::string _debugInfo;
   double _connectTimeout = 30.;
   double _packetTimeout = 10.;
 };

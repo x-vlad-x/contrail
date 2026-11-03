@@ -1,7 +1,11 @@
 #include "call_backend.hpp"
+#include "td/session.hpp"
 
 #include <algorithm>
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace Contrail {
 namespace api = Td::api;
@@ -46,6 +50,7 @@ void CallBackend::start(std::int64_t user, bool video) {
   stop();
   _callLifetime.reset();
   _duration = 0;
+  _debugInfo.clear();
   _call = {.user = user, .stage = Stage::Requesting, .outgoing = true, .video = video};
   _creating = true;
   _cancelCreate = false;
@@ -157,6 +162,7 @@ void CallBackend::call(const api::call &source) {
     stop();
     if (!_creating) _callLifetime.reset();
     _duration = 0;
+    _debugInfo.clear();
     _call = {.id = source.id_, .user = source.user_id_, .outgoing = source.is_outgoing_, .video = source.is_video_};
   }
   switch (state) {
@@ -180,6 +186,11 @@ void CallBackend::call(const api::call &source) {
       const auto &discarded = static_cast<const api::callStateDiscarded &>(*source.state_);
       stop();
       _creating = false;
+      if (discarded.need_debug_information_ && !_debugInfo.empty()) {
+        _client.send(api::make_object<api::sendCallDebugInformation>(
+            api::make_object<api::inputCallDiscarded>(_call.id), _debugInfo));
+        _debugInfo.clear();
+      }
       _call.needRating = discarded.need_rating_;
       _call.stage = discarded.reason_ && discarded.reason_->get_id() == api::callDiscardReasonDeclined::ID
           && _call.outgoing ? Stage::Busy : Stage::Ended;
@@ -205,6 +216,16 @@ void CallBackend::ready(const api::callStateReady &ready) {
       .outgoing = _call.outgoing, .allowP2p = ready.allow_p2p_, .maxLayer = ready.protocol_->max_layer_,
       .customParameters = ready.custom_parameters_, .video = _call.video,
       .connectTimeout = _connectTimeout, .packetTimeout = _packetTimeout};
+  if (g_getenv("CONTRAIL_DEBUG") && !g_getenv("CONTRAIL_SCENARIO")) {
+    const auto directory = Td::DataDirectory();
+    if (g_mkdir_with_parents(directory.c_str(), 0700) == 0) {
+      const auto path = directory + "/last-call.json";
+      const auto file = g_open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0600);
+      if (file >= 0) { close(file); parameters.statsLogPath = path; }
+    }
+    g_message("call-media: protocol=%s p2p=%d stats=%s", parameters.version.c_str(),
+        parameters.allowP2p && !g_getenv("CONTRAIL_CALL_RELAY"), parameters.statsLogPath.c_str());
+  }
   for (const auto &source : ready.servers_) {
     if (!source || !source->type_) continue;
     auto server = Calls::Server{.id = source->id_, .ipv4 = source->ip_address_, .ipv6 = source->ipv6_address_,
@@ -276,13 +297,19 @@ void CallBackend::startMedia(Calls::Parameters parameters) {
         changed();
       },
       .videoStopped = [this, token] { if (!token.expired() && _frame) _frame({}, false); }};
-  _media = _factory(std::move(parameters), std::move(callbacks));
+  auto media = _factory(std::move(parameters), std::move(callbacks));
+  if (token.expired()) { if (media) media->stop(); return; }
+  _media = std::move(media);
   if (!_media) { hangup(true); fail("Unsupported call media protocol."); return; }
   _media->setMuted(_call.muted);
   _media->setOutputDevice(_outputDevice);
-  for (const auto &data : _earlySignaling) _media->receiveSignaling(data);
+  auto earlySignaling = std::move(_earlySignaling);
   _earlySignaling.clear();
   _earlySignalingBytes = 0;
+  for (const auto &data : earlySignaling) {
+    if (!_media) break;
+    _media->receiveSignaling(data);
+  }
 }
 
 void CallBackend::stop() {
@@ -290,12 +317,13 @@ void CallBackend::stop() {
   _established = false;
   _mediaLifetime.reset();
   _startingMedia = false;
-  if (_media) { _media->stop(); _media.reset(); }
+  if (_media) { _debugInfo = _media->debugInfo(); _media->stop(); _media.reset(); }
   _earlySignaling.clear();
   _earlySignalingBytes = 0;
 }
 
 void CallBackend::fail(const std::string &message) {
+  _creating = false;
   stop();
   _call.stage = Stage::Failed;
   _call.error = message;

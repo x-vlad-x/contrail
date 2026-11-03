@@ -4,6 +4,7 @@
 #include <gdk/gdk.h>
 #include <string>
 #include <functional>
+#include <memory>
 
 namespace Contrail {
 
@@ -39,7 +40,7 @@ private:
 
   Callbacks _callbacks;
   GDBusConnection *_bus = nullptr;
-  GCancellable *_cancellable = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
   guint _actionSignal = 0;
   guint _closedSignal = 0;
   State _state = State::None;

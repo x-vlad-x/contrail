@@ -73,6 +73,7 @@ class ScenarioMedia final : public Media {
   void setCamera(const std::string &id) override { _state->camera = id; }
   std::int64_t preferredRelay() override { return 42; }
   std::string lastError() override { return {}; }
+  std::string debugInfo() override { return "{\"scenario\":true}"; }
   std::string soundStats() override { return "scenario"; }
   void stop() override { _state->active = false; if (_source) g_source_remove(_source); _source = 0; }
  private:

@@ -89,6 +89,7 @@ class Media {
   virtual void setCamera(const std::string &id) = 0;
   [[nodiscard]] virtual std::int64_t preferredRelay() = 0;
   [[nodiscard]] virtual std::string lastError() = 0;
+  [[nodiscard]] virtual std::string debugInfo() = 0;
   // The sound module's counters, for the debug state.
   [[nodiscard]] virtual std::string soundStats() = 0;
   // Takes the call apart. tgcalls finishes this on its own threads afterwards: see WaitForStoppedMedia.

@@ -2,6 +2,7 @@
 
 #include <gio/gio.h>
 #include <functional>
+#include <memory>
 
 namespace Contrail {
 
@@ -46,7 +47,7 @@ private:
   void started(guint32 id);
 
   GDBusConnection *_bus = nullptr;
-  GCancellable *_cancellable = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
   guint32 _id = 0;
   bool _pending = false;
   bool _wanted = false;

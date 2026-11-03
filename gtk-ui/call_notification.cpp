@@ -32,7 +32,7 @@ GVariant *ImageData(GdkTexture *image) {
 } // namespace
 
 CallNotification::CallNotification(Callbacks callbacks)
-    : _callbacks(std::move(callbacks)), _cancellable(g_cancellable_new()) {
+    : _callbacks(std::move(callbacks)) {
   _bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
   if (!_bus) return;
   _actionSignal = g_dbus_connection_signal_subscribe(_bus, nullptr, kInterface, "ActionInvoked", kPath, nullptr,
@@ -54,13 +54,12 @@ CallNotification::CallNotification(Callbacks callbacks)
 
 CallNotification::~CallNotification() {
   close();
-  g_cancellable_cancel(_cancellable);
+  _alive.reset();
   if (_bus) {
     g_dbus_connection_signal_unsubscribe(_bus, _actionSignal);
     g_dbus_connection_signal_unsubscribe(_bus, _closedSignal);
     g_object_unref(_bus);
   }
-  g_object_unref(_cancellable);
 }
 
 void CallNotification::showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic) {
@@ -135,26 +134,21 @@ void CallNotification::send(const std::string &name, const std::string &status) 
     g_variant_builder_add(hints, "{sv}", "image-data", ImageData(_userpic));
   }
 
+  using Pending = std::pair<CallNotification *, std::weak_ptr<char>>;
+  // Notify can already have reached the shell when a call ends. Keep its reply instead of cancelling it:
+  // otherwise a notification can remain on the lock screen with no owner left to close it.
   g_dbus_connection_call(_bus, kService, kPath, kInterface, "Notify",
-      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.c_str(),
-          status.c_str(), actions, hints, 0),
-      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
+      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.c_str(), status.c_str(), actions, hints, 0),
+      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
-        const auto self = static_cast<CallNotification *>(data);
-        GError *error = nullptr;
-        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
-        if (!reply) {
-          const auto cancelled = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
-          g_error_free(error);
-          // Cancelled: the object is gone.
-          if (!cancelled) self->sent(0);
-          return;
-        }
+        const auto pending = std::unique_ptr<Pending>(static_cast<Pending *>(data));
+        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, nullptr);
         guint32 id = 0;
-        g_variant_get(reply, "(u)", &id);
-        g_variant_unref(reply);
-        self->sent(id);
-      }, this);
+        if (reply) { g_variant_get(reply, "(u)", &id); g_variant_unref(reply); }
+        if (!pending->second.expired()) pending->first->sent(id);
+        else if (id) g_dbus_connection_call(G_DBUS_CONNECTION(source), kService, kPath, kInterface,
+            "CloseNotification", g_variant_new("(u)", id), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+      }, new Pending(this, _alive));
   g_variant_builder_unref(actions);
   g_variant_builder_unref(hints);
 }

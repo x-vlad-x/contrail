@@ -235,6 +235,7 @@ class TgcallsMedia final : public Media {
   }
   std::int64_t preferredRelay() override { return _instance ? _instance->getPreferredRelayId() : 0; }
   std::string lastError() override { return _instance ? _instance->getLastError() : std::string(); }
+  std::string debugInfo() override { return _instance ? _instance->getDebugInfo() : std::string(); }
   std::string soundStats() override {
     const auto lock = std::lock_guard(_shared->soundMutex);
     if (!_shared->sound) return {};
