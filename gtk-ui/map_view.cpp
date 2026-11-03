@@ -1,7 +1,7 @@
 #include "map_view.hpp"
 
 #include "geo.hpp"
-#include "text.hpp"
+#include "td/strings.hpp"
 
 #include "contrail_version.h"
 
@@ -15,6 +15,8 @@ extern "C" {
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -194,7 +196,8 @@ void SetupTrace(GtkWidget *map) {
 
 GtkWidget *MakeMap() {
   auto *map = shumate_simple_map_new();
-  shumate_simple_map_set_map_source(map, OpenStreetMap());
+  // The scenario transport has no network and asks nobody for tiles: its maps stay empty.
+  if (!g_getenv("CONTRAIL_SCENARIO")) shumate_simple_map_set_map_source(map, OpenStreetMap());
   auto *viewport = shumate_simple_map_get_viewport(map);
   shumate_viewport_set_max_zoom_level(viewport, 19);
   // The scale would cover the attribution on a phone's width (the phone apps show none either).
@@ -270,8 +273,8 @@ GtkWidget *MakeMapZoomButtons(GtkWidget *map) {
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
   gtk_widget_add_css_class(box, "linked");
   gtk_widget_add_css_class(box, "map-zoom");
-  const auto add = [&](const char *icon, const QString &tooltip, int levels) {
-    auto *button = MakeIconButton(icon, U8(tooltip).c_str(), "osd");
+  const auto add = [&](const char *icon, const std::string &tooltip, int levels) {
+    auto *button = MakeIconButton(icon, tooltip.c_str(), "osd");
     gtk_widget_add_css_class(button, "map-button");
     Connect<void(GtkButton *)>(button, "clicked", [map, levels](GtkButton *) { MapZoomBy(map, levels); });
     gtk_box_append(GTK_BOX(box), button);
@@ -331,7 +334,7 @@ void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &po
   if (show(animate)) return;
   // Not allocated yet (the dialog is being opened): on its first frame.
   struct Pending {
-    Fn<bool(bool)> show;
+    std::function<bool(bool)> show;
   };
   auto *pending = new Pending{show};
   const auto id = gtk_widget_add_tick_callback(
@@ -345,7 +348,7 @@ void MapShowAll(GtkWidget *map, const std::vector<std::pair<double, double>> &po
   g_object_set_data(G_OBJECT(map), kPendingKey, GUINT_TO_POINTER(id));
 }
 
-void MapOnUserMove(GtkWidget *map, Fn<void()> touched) {
+void MapOnUserMove(GtkWidget *map, std::function<void()> touched) {
   // Every press, touch and wheel turn on the map, before the map's own gestures take them.
   auto *events = gtk_event_controller_legacy_new();
   gtk_event_controller_set_propagation_phase(events, GTK_PHASE_CAPTURE);
@@ -360,7 +363,7 @@ void MapOnUserMove(GtkWidget *map, Fn<void()> touched) {
   gtk_widget_add_controller(map, events);
 }
 
-void MapOnCenterChanged(GtkWidget *map, Fn<void()> moved) {
+void MapOnCenterChanged(GtkWidget *map, std::function<void()> moved) {
   auto *viewport = shumate_simple_map_get_viewport(SHUMATE_SIMPLE_MAP(map));
   Connect<void(GObject *, GParamSpec *)>(viewport, "notify::longitude", [=](GObject *, GParamSpec *) { moved(); });
   Connect<void(GObject *, GParamSpec *)>(viewport, "notify::latitude", [=](GObject *, GParamSpec *) { moved(); });
@@ -401,19 +404,30 @@ GtkWidget *MakePositionDot() {
 }
 
 void OpenInMapsApp(double lat, double lon) {
-  OpenUri(("geo:" + QString::number(lat, 'f', 6) + ',' + QString::number(lon, 'f', 6)).toStdString());
+  OpenUri("geo:" + FormatNumber(lat, 6, false) + ',' + FormatNumber(lon, 6, false));
 }
 
-QString FormatCoordinates(double lat, double lon) {
-  return QString::number(lat, 'f', 5) + u", "_q + QString::number(lon, 'f', 5);
+std::string FormatCoordinates(double lat, double lon) {
+  return FormatNumber(lat, 5, false) + ", " + FormatNumber(lon, 5, false);
 }
 
-QString FormatDistance(double meters) {
+std::string FormatDistance(double meters) {
   if (meters < 1000.) {
-    return QString::number(int(std::lround(meters))) + ' ' + Translated("m", "м", "м");
+    return std::to_string(std::lround(meters)) + ' ' + Translated("m", "м", "м");
   }
   const auto km = meters / 1000.;
-  return QLocale().toString(km, 'f', km < 10. ? 1 : 0) + ' ' + Translated("km", "км", "км");
+  return FormatNumber(km, km < 10. ? 1 : 0, true) + ' ' + Translated("km", "км", "км");
+}
+
+std::string FormatNumber(double value, int decimals, bool localized) {
+  char buffer[64];
+  if (localized) {
+    std::snprintf(buffer, sizeof(buffer), "%.*f", decimals, value);
+  } else {
+    // A URI and coordinates have a dot whatever the language.
+    g_ascii_formatd(buffer, sizeof(buffer), decimals == 6 ? "%.6f" : "%.5f", value);
+  }
+  return buffer;
 }
 
 }  // namespace Contrail

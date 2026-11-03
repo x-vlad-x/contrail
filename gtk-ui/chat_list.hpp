@@ -26,6 +26,8 @@ class ChatList final {
 
   void debugMenu(int index);
   void debugAction(int index, const std::string &action);
+  // "Delete chat" / "Leave group" with the question, as the row's menu asks it (from the chat's card).
+  void askToDelete(Td::ChatId id) { confirmDelete(id); }
   void debugScroll(const std::string &where);
   void debugState();
 

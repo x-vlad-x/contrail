@@ -63,6 +63,11 @@ class ChatView final {
   void sendText(const std::string &text);  // Bot commands from links.
   // The sponsored message's button, text or media was tapped (`media`): Telegram counts it.
   void sponsoredClicked(const MessageItem &item, bool media);
+  // Locations: the picker sends to this chat (or topic), as a reply to the message chosen; a location's message
+  // opens on a map.
+  void chooseLocation();
+  void openLocation(const MessageItem &item);
+  void sendContent(Td::api::object_ptr<Td::api::InputMessageContent> content);
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;

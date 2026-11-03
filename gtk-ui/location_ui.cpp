@@ -1,50 +1,36 @@
 #include "location_ui.hpp"
 
-#include "live_location.hpp"
+#include "geo.hpp"
 #include "location.hpp"
 #include "main_window.hpp"
 #include "map_view.hpp"
-#include "text.hpp"
+#include "td/dates.hpp"
+#include "td/strings.hpp"
 #include "userpics.hpp"
 
-#include "api/api_common.h"
-#include "api/api_sending.h"
-#include "apiwrap.h"
-#include "base/timer.h"
-#include "base/unixtime.h"
-#include "base/weak_ptr.h"
-#include "core/current_geo_location.h"
-#include "data/data_changes.h"
-#include "data/data_chat_participant_status.h"
-#include "data/data_location.h"
-#include "data/data_media_types.h"
-#include "data/data_peer.h"
-#include "data/data_session.h"
-#include "data/data_thread.h"
-#include "data/data_user.h"
-#include "history/history.h"
-#include "history/history_item.h"
-#include "history/history_item_components.h"
-#include "lang/lang_keys.h"
-#include "main/main_session.h"
-#include "mtproto/mtproto_config.h"
-
-#include <QtCore/QDateTime>
-#include <QtCore/QLocale>
-
-#include <rpl/lifetime.h>
+#include <algorithm>
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
 
 namespace Contrail {
+namespace api = Td::api;
 namespace {
 
 constexpr auto kPlaceZoom = 16.;
-constexpr auto kVenuesDelay = 700;            // Milliseconds after the map stopped or the query changed.
-constexpr auto kVenuesMinMove = 150.;         // Meters the map moves before the places nearby are asked again.
-constexpr auto kSelectedAway = 30.;           // Meters from the device's position: the place under the pin.
+constexpr auto kVenuesDelay = 700u;   // Milliseconds after the map stopped or the query changed.
+constexpr auto kVenuesMinMove = 150.;  // Meters the map moves before the places nearby are asked again.
+constexpr auto kSelectedAway = 30.;    // Meters from the device's position: the place under the pin.
 
-TimeId UpdateDate(not_null<const HistoryItem *> item) {
-  const auto edited = item->Get<HistoryMessageEdited>();
-  return edited ? edited->date : item->date();
+template <typename Type>
+[[nodiscard]] const Type *Cast(const api::Object *object) {
+  return (object && object->get_id() == Type::ID) ? static_cast<const Type *>(object) : nullptr;
+}
+
+std::int32_t UpdateDate(const api::message &message) {
+  return message.edit_date_ ? message.edit_date_ : message.date_;
 }
 
 GtkWidget *RowIcon(const char *icon, const char *cssClass) {
@@ -56,10 +42,47 @@ GtkWidget *RowIcon(const char *icon, const char *cssClass) {
   return image;
 }
 
+bool WindowActive(MainWindow &window) {
+  return window.widget() && gtk_window_is_active(GTK_WINDOW(window.widget()));
+}
+
+// A main-loop timer that is cancelled with its owner.
+class Timer final {
+ public:
+  explicit Timer(std::function<void()> callback) : _callback(std::move(callback)) {}
+  ~Timer() { cancel(); }
+  void callOnce(guint ms) {
+    cancel();
+    _source = g_timeout_add(ms, +[](gpointer data) -> gboolean {
+      auto *self = static_cast<Timer *>(data);
+      self->_source = 0;
+      self->_callback();
+      return G_SOURCE_REMOVE;
+    }, this);
+  }
+  void cancel() {
+    if (_source) g_source_remove(std::exchange(_source, 0));
+  }
+
+ private:
+  std::function<void()> _callback;
+  guint _source = 0;
+};
+
+struct Venue {
+  double lat = 0.;
+  double lon = 0.;
+  std::string title;
+  std::string address;
+  std::string provider;
+  std::string id;
+  std::string type;
+};
+
 }  // namespace
 
-GtkWidget *MapButton(const char *icon, const QString &tooltip) {
-  auto *button = MakeIconButton(icon, U8(tooltip).c_str(), "circular");
+GtkWidget *MapButton(const char *icon, const std::string &tooltip) {
+  auto *button = MakeIconButton(icon, tooltip.c_str(), "circular");
   gtk_widget_add_css_class(button, "osd");
   gtk_widget_add_css_class(button, "map-button");
   return button;
@@ -76,59 +99,152 @@ GtkWidget *MakeZoomButtons(GtkWidget *map) {
 }
 #endif  // CONTRAIL_SHUMATE
 
-QString MyLocationText() {
+std::string MyLocationText() {
   return Translated("My Location", "Моё местоположение", "Моє місцезнаходження");
 }
 
-QString FailureText(LocationService::Failure failure) {
+std::string FailureText(LocationService::Failure failure) {
   return (failure == LocationService::Failure::Denied)
              ? Translated("No access to the location", "Нет доступа к геопозиции", "Немає доступу до геопозиції")
              : Translated("Location is unavailable", "Геопозиция недоступна", "Геопозиція недоступна");
 }
 
-bool CanShareLive(not_null<PeerData *> peer) {
-  return !peer->isSelf() && !peer->isBroadcast();
+bool CanShareLive(const Td::Store &store, const Td::Chat &chat) {
+  if (chat.kind == Td::ChatKind::Channel) return false;
+  return !(chat.kind == Td::ChatKind::Private && chat.peerId == store.selfId());
 }
 
-void ChooseLivePeriod(GtkWidget *parent, Fn<void(TimeId)> chosen) {
+void ChooseLivePeriod(GtkWidget *parent, std::function<void(std::int32_t)> chosen) {
   auto *dialog = adw_alert_dialog_new(
-      U8(Translated("Share your live location for…", "Транслировать геопозицию…", "Транслювати геопозицію…")).c_str(),
-      U8(Translated("People in this chat will see where you are in real time.",
-                    "Участники чата будут видеть, где вы находитесь, в реальном времени.",
-                    "Учасники чату бачитимуть, де ви, у реальному часі."))
+      Translated("Share your live location for…", "Транслировать геопозицию…", "Транслювати геопозицію…").c_str(),
+      Translated("People in this chat will see where you are in real time.",
+                 "Участники чата будут видеть, где вы находитесь, в реальном времени.",
+                 "Учасники чату бачитимуть, де ви, у реальному часі.")
           .c_str());
   adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog),
-                                 "15m", U8(tr::lng_minutes(tr::now, lt_count, 15)).c_str(),
-                                 "1h", U8(tr::lng_hours(tr::now, lt_count, 1)).c_str(),
-                                 "8h", U8(tr::lng_hours(tr::now, lt_count, 8)).c_str(),
-                                 "off", U8(Translated("Until I turn it off", "Пока не выключу", "Доки не вимкну")).c_str(),
-                                 "cancel", U8(tr::lng_cancel(tr::now)).c_str(), nullptr);
+                                 "15m", TrCount("lng_minutes", 15).c_str(),
+                                 "1h", TrCount("lng_hours", 1).c_str(),
+                                 "8h", TrCount("lng_hours", 8).c_str(),
+                                 "off", Translated("Until I turn it off", "Пока не выключу", "Доки не вимкну").c_str(),
+                                 "cancel", Tr("lng_cancel").c_str(), nullptr);
   adw_alert_dialog_set_prefer_wide_layout(ADW_ALERT_DIALOG(dialog), FALSE);
   adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
   Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=](AdwAlertDialog *, const char *response) {
     const auto id = std::string(response);
-    const auto period = (id == "15m") ? TimeId(15 * 60)
-                        : (id == "1h") ? TimeId(3600)
-                        : (id == "8h") ? TimeId(8 * 3600)
-                        : (id == "off") ? LiveLocations::kUntilOff
-                                        : TimeId(0);
+    const auto period = (id == "15m") ? 15 * 60 : (id == "1h") ? 3600 : (id == "8h") ? 8 * 3600
+                        : (id == "off") ? kUntilOff : 0;
     if (period) chosen(period);
   });
   adw_dialog_present(ADW_DIALOG(dialog), parent);
+}
+
+bool MessageLocation(const api::message &message, LocationInfo *info) {
+  const auto content = message.content_.get();
+  auto result = LocationInfo();
+  if (const auto plain = Cast<api::messageLocation>(content)) {
+    if (!plain->location_) return false;
+    result.lat = plain->location_->latitude_;
+    result.lon = plain->location_->longitude_;
+  } else if (const auto live = Cast<api::messageLiveLocation>(content)) {
+    if (!live->location_ || !live->location_->location_) return false;
+    result.lat = live->location_->location_->latitude_;
+    result.lon = live->location_->location_->longitude_;
+    result.livePeriod = std::max(live->location_->live_period_, 1);
+  } else if (const auto venue = Cast<api::messageVenue>(content)) {
+    if (!venue->venue_ || !venue->venue_->location_) return false;
+    result.lat = venue->venue_->location_->latitude_;
+    result.lon = venue->venue_->location_->longitude_;
+    result.title = venue->venue_->title_;
+    result.address = venue->venue_->address_;
+  } else {
+    return false;
+  }
+  if (info) *info = std::move(result);
+  return true;
+}
+
+bool LiveLocationActive(const api::message &message) {
+  auto info = LocationInfo();
+  if (!MessageLocation(message, &info) || !info.livePeriod) return false;
+  const auto now = Td::Now();
+  return info.livePeriod == kUntilOff || now < message.date_ || now - message.date_ < info.livePeriod;
+}
+
+std::string LiveLocationUpdated(const api::message &message) {
+  const auto date = UpdateDate(message);
+  const auto now = Td::Now();
+  const auto elapsed = now - date;
+  if (elapsed < 60) {
+    return Tr("lng_live_location_now");
+  } else if (const auto minutes = elapsed / 60; minutes < 60) {
+    return TrCount("lng_live_location_minutes", minutes);
+  } else if (const auto hours = elapsed / 3600; hours < 12) {
+    return TrCount("lng_live_location_hours", hours);
+  }
+  const auto time = Td::FormatTime(date);
+  const auto days = Td::DayNumber(now) - Td::DayNumber(date);
+  if (days == 0) return Tr("lng_live_location_today", {{"time", time}});
+  if (days == 1) return Tr("lng_live_location_yesterday", {{"time", time}});
+  return Tr("lng_live_location_date_time", {{"date", Td::FormatDay(date)}, {"time", time}});
+}
+
+std::string LiveLocationRemaining(const api::message &message) {
+  auto info = LocationInfo();
+  if (!MessageLocation(message, &info)) return {};
+  if (info.livePeriod == kUntilOff) return "∞";
+  const auto elapsed = Td::Now() - message.date_;
+  const auto remaining = std::clamp(info.livePeriod - elapsed, 0, info.livePeriod);
+  if (remaining < 10) {
+    return TrCount("lng_seconds_tiny", remaining);
+  } else if (remaining < 3600) {
+    return TrCount("lng_minutes_tiny", std::max(remaining / 60, 1));
+  } else if (remaining < 86400) {
+    return TrCount("lng_hours_tiny", remaining / 3600);
+  }
+  return TrCount("lng_days_tiny", remaining / 86400);
+}
+
+double LiveLocationProgress(const api::message &message) {
+  auto info = LocationInfo();
+  if (!MessageLocation(message, &info) || !info.livePeriod) return 0.;
+  if (info.livePeriod == kUntilOff) return 1.;
+  const auto elapsed = Td::Now() - message.date_;
+  return std::clamp(double(info.livePeriod - elapsed) / info.livePeriod, 0., 1.);
+}
+
+std::string SenderName(const Td::Store &store, const api::message &message) {
+  if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
+    const auto known = store.user(user->user_id_);
+    return known ? Td::DisplayName(*known) : std::string();
+  } else if (const auto chat = Cast<api::messageSenderChat>(message.sender_id_.get())) {
+    const auto known = store.chat(chat->chat_id_);
+    return known ? known->title : std::string();
+  }
+  return {};
+}
+
+GtkWidget *MakeSenderAvatar(Td::Store &store, const api::message &message, int size) {
+  if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
+    return MakeUserAvatar(store, user->user_id_, size);
+  } else if (const auto chat = Cast<api::messageSenderChat>(message.sender_id_.get())) {
+    return MakeAvatar(store, chat->chat_id_, size);
+  }
+  return adw_avatar_new(size, nullptr, TRUE);
 }
 
 namespace {
 
 // --- the picker --------------------------------------------------------------
 
-class LocationPicker final : public base::has_weak_ptr {
-public:
-  LocationPicker(not_null<MainWindow *> window, not_null<Data::Thread *> thread, FullMsgId replyTo, Fn<void()> sent);
+class LocationPicker final {
+ public:
+  LocationPicker(MainWindow &window, LocationTarget target);
   ~LocationPicker();
 
   [[nodiscard]] GtkWidget *dialog() const { return _dialog; }
+  void debug(const std::string &name, const std::string &rest);
 
-private:
+ private:
   void build();
   GtkWidget *buildMap();
   void updateWatching();
@@ -136,28 +252,22 @@ private:
   void failed(LocationService::Failure failure);
   void refreshRows();
   [[nodiscard]] std::optional<std::pair<double, double>> selected() const;
-  [[nodiscard]] std::optional<std::pair<double, double>> venuesPoint() const;
   void scheduleVenues();
   void requestVenues();
   void sendVenuesRequest();
-  void showVenues(std::vector<Data::InputVenue> venues, bool failed);
+  void showVenues(std::vector<Venue> venues, bool failed);
   void sendPoint(double lat, double lon);
-  void sendVenue(const Data::InputVenue &venue);
-  void shareLive();
+  void sendVenue(const Venue &venue);
   void done();
 
-  const not_null<MainWindow *> _window;
-  const not_null<Data::Thread *> _thread;
-  const not_null<Main::Session *> _session;
-  const FullMsgId _replyTo;
-  const Fn<void()> _sent;
+  MainWindow &_window;
+  Td::Store &_store;
+  const LocationTarget _target;
   GtkWidget *_dialog = nullptr;
   GtkWidget *_map = nullptr;
   GtkWidget *_mapPin = nullptr;
   GtkWidget *_positionMarker = nullptr;
   GtkWidget *_sendRow = nullptr;
-  GtkWidget *_sendIcon = nullptr;
-  GtkWidget *_liveRow = nullptr;
   GtkWidget *_venues = nullptr;
   GtkWidget *_venuesStatus = nullptr;
   GtkWidget *_venuesSpinner = nullptr;
@@ -169,27 +279,27 @@ private:
   bool _follow = true;     // The map follows the device's position until it is moved by hand.
   bool _centered = false;  // The map has been put on the device's position once.
   bool _closed = false;
-  QString _query;
-  UserData *_venuesBot = nullptr;
-  mtpRequestId _venuesBotRequest = 0;
-  mtpRequestId _venuesRequest = 0;
+  bool _done = false;
+  std::string _query;
+  Td::UserId _venuesBot = 0;
+  Td::ChatId _venuesBotChat = 0;
+  bool _venuesBotAsked = false;
   std::optional<std::pair<double, double>> _venuesAt;
-  QString _venuesQuery;
-  base::Timer _venuesTimer;
+  std::string _venuesQuery;
+  Timer _venuesTimer;
+  Td::Lifetime _lifetime;
+  Td::Lifetime _venuesLifetime;
   SignalConnections _signals;
-  rpl::lifetime _lifetime;
+  const std::shared_ptr<char> _alive = std::make_shared<char>();
 };
 
-LocationPicker::LocationPicker(not_null<MainWindow *> window, not_null<Data::Thread *> thread, FullMsgId replyTo,
-                               Fn<void()> sent)
-    : _window(window), _thread(thread), _session(&thread->session()), _replyTo(replyTo), _sent(std::move(sent)),
-      _venuesTimer([=] { requestVenues(); }) {
+LocationPicker::LocationPicker(MainWindow &window, LocationTarget target)
+    : _window(window), _store(*window.store()), _target(std::move(target)), _venuesTimer([this] { requestVenues(); }) {
   build();
   _fix = Location().recent(60);
-  Live().changes() | rpl::on_next([=] { refreshRows(); }, _lifetime);
-  _signals.connect<void(GObject *, GParamSpec *)>(_window->widget(), "notify::is-active",
-                                                  [=](GObject *, GParamSpec *) { updateWatching(); });
-  _signals.connect<void(AdwDialog *)>(_dialog, "closed", [=](AdwDialog *) {
+  _signals.connect<void(GObject *, GParamSpec *)>(_window.widget(), "notify::is-active",
+                                                  [this](GObject *, GParamSpec *) { updateWatching(); });
+  _signals.connect<void(AdwDialog *)>(_dialog, "closed", [this](AdwDialog *) {
     _closed = true;
     updateWatching();
   });
@@ -200,18 +310,17 @@ LocationPicker::LocationPicker(not_null<MainWindow *> window, not_null<Data::Thr
   } else {
     requestVenues();
   }
+  g_message("Location picker: shown");
 }
 
 LocationPicker::~LocationPicker() {
   _signals.clear();
   _watch = nullptr;
-  if (_venuesRequest) _session->api().request(_venuesRequest).cancel();
-  if (_venuesBotRequest) _session->api().request(_venuesBotRequest).cancel();
 }
 
 void LocationPicker::build() {
   _dialog = GTK_WIDGET(adw_dialog_new());
-  adw_dialog_set_title(ADW_DIALOG(_dialog), U8(tr::lng_maps_point(tr::now)).c_str());
+  adw_dialog_set_title(ADW_DIALOG(_dialog), Tr("lng_maps_point").c_str());
   adw_dialog_set_content_width(ADW_DIALOG(_dialog), 560);
   adw_dialog_set_content_height(ADW_DIALOG(_dialog), 1000);
   adw_dialog_set_presentation_mode(ADW_DIALOG(_dialog), ADW_DIALOG_FLOATING);
@@ -220,13 +329,13 @@ void LocationPicker::build() {
   auto *header = adw_header_bar_new();
   auto *searchButton = gtk_toggle_button_new();
   gtk_button_set_icon_name(GTK_BUTTON(searchButton), "system-search-symbolic");
-  gtk_widget_set_tooltip_text(searchButton, U8(tr::lng_dlg_filter(tr::now)).c_str());
+  gtk_widget_set_tooltip_text(searchButton, Tr("lng_dlg_filter").c_str());
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), searchButton);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
 
   // Places by name (the venue bot searches around the map's middle).
   _search = gtk_search_entry_new();
-  gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(_search), U8(tr::lng_dlg_filter(tr::now)).c_str());
+  gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(_search), Tr("lng_dlg_filter").c_str());
   gtk_widget_set_hexpand(_search, TRUE);
   _searchBar = gtk_search_bar_new();
   auto *searchClamp = adw_clamp_new();
@@ -235,13 +344,15 @@ void LocationPicker::build() {
   gtk_search_bar_connect_entry(GTK_SEARCH_BAR(_searchBar), GTK_EDITABLE(_search));
   g_object_bind_property(searchButton, "active", _searchBar, "search-mode-enabled", G_BINDING_BIDIRECTIONAL);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), _searchBar);
-  _signals.connect<void(GtkSearchEntry *)>(_search, "search-changed", [=](GtkSearchEntry *) {
-    _query = Q(gtk_editable_get_text(GTK_EDITABLE(_search))).trimmed();
+  _signals.connect<void(GtkSearchEntry *)>(_search, "search-changed", [this](GtkSearchEntry *) {
+    auto query = std::string(gtk_editable_get_text(GTK_EDITABLE(_search)));
+    const auto first = query.find_first_not_of(" \t");
+    _query = (first == std::string::npos) ? std::string() : query.substr(first, query.find_last_not_of(" \t") - first + 1);
     scheduleVenues();
   });
-  _signals.connect<void(GObject *, GParamSpec *)>(_searchBar, "notify::search-mode-enabled", [=](GObject *, GParamSpec *) {
-    if (!gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(_searchBar)) && !_query.isEmpty()) {
-      _query = QString();
+  _signals.connect<void(GObject *, GParamSpec *)>(_searchBar, "notify::search-mode-enabled", [this](GObject *, GParamSpec *) {
+    if (!gtk_search_bar_get_search_mode(GTK_SEARCH_BAR(_searchBar)) && !_query.empty()) {
+      _query.clear();
       scheduleVenues();
     }
   });
@@ -257,22 +368,14 @@ void LocationPicker::build() {
   gtk_widget_add_css_class(list, "boxed-list");
   _sendRow = adw_action_row_new();
   gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(_sendRow), TRUE);
-  _sendIcon = RowIcon("contrail-map-pin-symbolic", "send-location");
-  adw_action_row_add_prefix(ADW_ACTION_ROW(_sendRow), _sendIcon);
-  _signals.connect<void(AdwActionRow *)>(_sendRow, "activated", [=](AdwActionRow *) {
+  adw_action_row_add_prefix(ADW_ACTION_ROW(_sendRow), RowIcon("contrail-map-pin-symbolic", "send-location"));
+  _signals.connect<void(AdwActionRow *)>(_sendRow, "activated", [this](AdwActionRow *) {
     if (const auto point = selected()) sendPoint(point->first, point->second);
   });
   gtk_list_box_append(GTK_LIST_BOX(list), _sendRow);
-  if (CanShareLive(_thread->peer())) {
-    _liveRow = adw_action_row_new();
-    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(_liveRow), TRUE);
-    adw_action_row_add_prefix(ADW_ACTION_ROW(_liveRow), RowIcon("contrail-live-location-symbolic", "live-location"));
-    _signals.connect<void(AdwActionRow *)>(_liveRow, "activated", [=](AdwActionRow *) { shareLive(); });
-    gtk_list_box_append(GTK_LIST_BOX(list), _liveRow);
-  }
 
   // Places nearby.
-  auto *venuesTitle = gtk_label_new(U8(tr::lng_maps_places_in_area(tr::now)).c_str());
+  auto *venuesTitle = gtk_label_new(Tr("lng_maps_places_in_area").c_str());
   gtk_widget_add_css_class(venuesTitle, "heading");
   gtk_label_set_xalign(GTK_LABEL(venuesTitle), 0);
   _venuesSpinner = adw_spinner_new();
@@ -290,7 +393,7 @@ void LocationPicker::build() {
   gtk_widget_add_css_class(_venuesStatus, "dim-label");
   gtk_label_set_wrap(GTK_LABEL(_venuesStatus), TRUE);
   gtk_widget_set_margin_top(_venuesStatus, 6);
-  auto *source = gtk_label_new(U8(tr::lng_maps_venues_source(tr::now)).c_str());
+  auto *source = gtk_label_new(Tr("lng_maps_venues_source").c_str());
   gtk_widget_add_css_class(source, "dim-label");
   gtk_widget_add_css_class(source, "caption");
   gtk_widget_set_margin_top(source, 8);
@@ -318,12 +421,7 @@ void LocationPicker::build() {
 GtkWidget *LocationPicker::buildMap() {
 #ifdef CONTRAIL_SHUMATE
   _map = MakeMap();
-  auto initial = Core::ResolveCurrentCountryLocation();
-  if (initial) {
-    MapCenterOn(_map, initial.point.x(), initial.point.y(), 5., false);
-  } else {
-    MapCenterOn(_map, 30., 0., 2., false);
-  }
+  MapCenterOn(_map, 30., 0., 2., false);
   // The place to send is under the pin in the middle, as in the phone apps.
   auto *overlay = gtk_overlay_new();
   gtk_overlay_set_child(GTK_OVERLAY(overlay), _map);
@@ -337,23 +435,23 @@ GtkWidget *LocationPicker::buildMap() {
   gtk_widget_set_margin_bottom(mine, 64);  // Above the attribution (two lines on a phone).
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), mine);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), MakeZoomButtons(_map));
-  _signals.clicked(mine, [=] {
+  _signals.clicked(mine, [this] {
     _follow = true;
     if (_fix) MapCenterOn(_map, _fix->lat, _fix->lon, std::max(MapZoom(_map), kPlaceZoom), true);
     refreshRows();
     scheduleVenues();
   });
-  MapOnUserMove(_map, crl::guard(this, [=] {
-    if (!_follow) return;
+  const auto weak = std::weak_ptr<char>(_alive);
+  MapOnUserMove(_map, [this, weak] {
+    if (weak.expired() || !_follow) return;
     _follow = false;
     refreshRows();
-  }));
-  MapOnCenterChanged(_map, crl::guard(this, [=] {
-    if (!_follow) {
-      refreshRows();
-      scheduleVenues();
-    }
-  }));
+  });
+  MapOnCenterChanged(_map, [this, weak] {
+    if (weak.expired() || _follow) return;
+    refreshRows();
+    scheduleVenues();
+  });
   gtk_widget_set_size_request(overlay, -1, 260);
   gtk_widget_set_vexpand(overlay, TRUE);
   return overlay;
@@ -363,7 +461,7 @@ GtkWidget *LocationPicker::buildMap() {
 }
 
 void LocationPicker::updateWatching() {
-  const auto wanted = !_closed && _window->isActive();
+  const auto wanted = !_closed && WindowActive(_window);
   if (!wanted) {
     _watch = nullptr;
     return;
@@ -371,13 +469,13 @@ void LocationPicker::updateWatching() {
     return;
   }
   _failure = std::nullopt;
-  const auto weak = base::make_weak(this);
+  const auto weak = std::weak_ptr<char>(_alive);
   _watch = Location().watch(
-      [=](const GeoFix &fix) {
-        if (const auto strong = weak.get()) strong->received(fix);
+      [this, weak](const GeoFix &fix) {
+        if (!weak.expired()) received(fix);
       },
-      [=](LocationService::Failure failure) {
-        if (const auto strong = weak.get()) strong->failed(failure);
+      [this, weak](LocationService::Failure failure) {
+        if (!weak.expired()) failed(failure);
       });
   refreshRows();
 }
@@ -405,8 +503,18 @@ void LocationPicker::received(const GeoFix &fix) {
 
 void LocationPicker::failed(LocationService::Failure failure) {
   _failure = failure;
-  // The watch is over: a new one when the window is activated again.
-  crl::on_main(this, [=] { _watch = nullptr; });
+  // The watch is over (from inside its own callback): a new one when the window is activated again.
+  auto *self = this;
+  const auto weak = std::weak_ptr<char>(_alive);
+  struct Drop {
+    LocationPicker *self;
+    std::weak_ptr<char> weak;
+  };
+  g_idle_add_full(G_PRIORITY_DEFAULT, +[](gpointer data) -> gboolean {
+    const auto drop = static_cast<Drop *>(data);
+    if (!drop->weak.expired()) drop->self->_watch = nullptr;
+    return G_SOURCE_REMOVE;
+  }, new Drop{self, weak}, +[](gpointer data) { delete static_cast<Drop *>(data); });
   refreshRows();
 }
 
@@ -427,54 +535,36 @@ void LocationPicker::refreshRows() {
   const auto away = point && (!_fix || DistanceMeters(point->first, point->second, _fix->lat, _fix->lon) > kSelectedAway);
   const auto chooseOnMap = _map && !_follow && away;
   if (_mapPin) gtk_widget_set_visible(_mapPin, chooseOnMap);
-  QString title, subtitle;
+  std::string title, subtitle;
   if (chooseOnMap) {
-    title = tr::lng_maps_point_send(tr::now);
+    title = Tr("lng_maps_point_send");
     subtitle = FormatCoordinates(point->first, point->second);
   } else {
     title = Translated("Send My Current Location", "Отправить своё местоположение", "Надіслати своє місцезнаходження");
-    subtitle = _fix ? Translated("Accurate to %1", "Точность: %1", "Точність: %1").arg(FormatDistance(_fix->accuracy))
-               : _failure ? FailureText(*_failure)
+    if (_fix) {
+      subtitle = Translated("Accurate to {distance}", "Точность: {distance}", "Точність: {distance}");
+      subtitle.replace(subtitle.find("{distance}"), 10, FormatDistance(_fix->accuracy));
+    } else {
+      subtitle = _failure ? FailureText(*_failure)
                           : Translated("Locating…", "Определение местоположения…", "Визначення місцезнаходження…");
+    }
   }
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_sendRow), Escape(title).c_str());
   adw_action_row_set_subtitle(ADW_ACTION_ROW(_sendRow), Escape(subtitle).c_str());
   gtk_widget_set_sensitive(_sendRow, point.has_value() && (chooseOnMap || _fix));
-  if (_liveRow) {
-    const auto sharing = Live().sharingIn(_thread->peer());
-    if (sharing) {
-      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_liveRow), Escape(tr::lng_group_call_screen_share_stop(tr::now)).c_str());
-      adw_action_row_set_subtitle(ADW_ACTION_ROW(_liveRow), Escape(tr::lng_live_location(tr::now)).c_str());
-      gtk_widget_add_css_class(_liveRow, "error");
-    } else {
-      adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_liveRow),
-                                    Escape(Translated("Share My Live Location", "Транслировать геопозицию",
-                                                      "Транслювати геопозицію")).c_str());
-      adw_action_row_set_subtitle(ADW_ACTION_ROW(_liveRow),
-                                  Escape(Translated("Updated in real time as you move",
-                                                    "Обновляется в реальном времени, пока вы перемещаетесь",
-                                                    "Оновлюється в реальному часі, поки ви рухаєтеся")).c_str());
-      gtk_widget_remove_css_class(_liveRow, "error");
-    }
-    gtk_widget_set_sensitive(_liveRow, sharing || _fix.has_value());
-  }
 }
 
 // --- places ------------------------------------------------------------------
-
-std::optional<std::pair<double, double>> LocationPicker::venuesPoint() const {
-  return selected();
-}
 
 void LocationPicker::scheduleVenues() {
   _venuesTimer.callOnce(kVenuesDelay);
 }
 
 void LocationPicker::requestVenues() {
-  const auto point = venuesPoint();
+  const auto point = selected();
   if (!point) {
     gtk_widget_set_visible(_venuesSpinner, FALSE);
-    gtk_label_set_text(GTK_LABEL(_venuesStatus), U8(tr::lng_maps_choose_to_search(tr::now)).c_str());
+    gtk_label_set_text(GTK_LABEL(_venuesStatus), Tr("lng_maps_choose_to_search").c_str());
     gtk_widget_set_visible(_venuesStatus, TRUE);
     return;
   }
@@ -488,88 +578,64 @@ void LocationPicker::requestVenues() {
   if (_venuesBot) {
     sendVenuesRequest();
     return;
-  } else if (_venuesBotRequest) {
+  } else if (_venuesBotAsked) {
     return;
   }
   // The bot the phone apps ask about places (Foursquare's, by the server's configuration).
-  const auto username = _session->serverConfig().venueSearchUsername;
-  const auto weak = base::make_weak(this);
-  const auto session = _session;
-  _venuesBotRequest = _session->api()
-                          .request(MTPcontacts_ResolveUsername(MTP_flags(0), MTP_string(username), MTP_string()))
-                          .done([=](const MTPcontacts_ResolvedPeer &result) {
-                            const auto &data = result.data();
-                            session->data().processUsers(data.vusers());
-                            session->data().processChats(data.vchats());
-                            const auto strong = weak.get();
-                            if (!strong) return;
-                            strong->_venuesBotRequest = 0;
-                            const auto peer = session->data().peerLoaded(peerFromMTP(data.vpeer()));
-                            const auto user = peer ? peer->asUser() : nullptr;
-                            if (user && user->isBotInlineGeo()) {
-                              strong->_venuesBot = user;
-                              strong->sendVenuesRequest();
-                            } else {
-                              strong->showVenues({}, true);
-                            }
-                          })
-                          .fail([=] {
-                            if (const auto strong = weak.get()) {
-                              strong->_venuesBotRequest = 0;
-                              strong->showVenues({}, true);
-                            }
-                          })
-                          .send();
+  _venuesBotAsked = true;
+  auto &client = _store.client();
+  client.request<api::optionValueString>(
+      api::make_object<api::getOption>("venue_search_bot_username"), _lifetime,
+      [this, &client](api::optionValueString &name) {
+        client.request<api::chat>(
+            api::make_object<api::searchPublicChat>(name.value_), _lifetime,
+            [this](api::chat &chat) {
+              _venuesBotAsked = false;
+              const auto user = Cast<api::chatTypePrivate>(chat.type_.get());
+              if (!user) {
+                showVenues({}, true);
+                return;
+              }
+              _venuesBot = user->user_id_;
+              _venuesBotChat = chat.id_;
+              sendVenuesRequest();
+            },
+            [this](api::error &) {
+              _venuesBotAsked = false;
+              showVenues({}, true);
+            });
+      },
+      [this](api::error &) {
+        _venuesBotAsked = false;
+        showVenues({}, true);
+      });
 }
 
 void LocationPicker::sendVenuesRequest() {
-  if (!_venuesAt || !_venuesBot) return;
-  if (_venuesRequest) _session->api().request(base::take(_venuesRequest)).cancel();
-  const auto weak = base::make_weak(this);
-  const auto session = _session;
-  _venuesRequest =
-      _session->api()
-          .request(MTPmessages_GetInlineBotResults(
-              MTP_flags(MTPmessages_GetInlineBotResults::Flag::f_geo_point), _venuesBot->inputUser(),
-              _thread->peer()->input(),
-              MTP_inputGeoPoint(MTP_flags(0), MTP_double(_venuesAt->first), MTP_double(_venuesAt->second), MTP_int(0)),
-              MTP_string(_venuesQuery), MTP_string()))
-          .done([=](const MTPmessages_BotResults &result) {
-            const auto &data = result.data();
-            session->data().processUsers(data.vusers());
-            auto venues = std::vector<Data::InputVenue>();
-            for (const auto &found : data.vresults().v) {
-              found.match([&](const auto &data) {
-                data.vsend_message().match([&](const MTPDbotInlineMessageMediaVenue &data) {
-                  data.vgeo().match([&](const MTPDgeoPoint &geo) {
-                    venues.push_back({
-                        .lat = geo.vlat().v,
-                        .lon = geo.vlong().v,
-                        .title = qs(data.vtitle()),
-                        .address = qs(data.vaddress()),
-                        .provider = qs(data.vprovider()),
-                        .id = qs(data.vvenue_id()),
-                        .venueType = qs(data.vvenue_type()),
-                    });
-                  }, [](const auto &) {});
-                }, [](const auto &) {});
-              });
-            }
-            if (const auto strong = weak.get()) {
-              strong->_venuesRequest = 0;
-              strong->showVenues(std::move(venues), false);
-            }
-          })
-          .fail([=] {
-            if (const auto strong = weak.get()) {
-              strong->_venuesRequest = 0;
-              strong->showVenues({}, true);
-            }
-          })
-          .send();
+  if (!_venuesAt) return;
+  _venuesLifetime.reset();
+  g_message("Location picker: places near %s \"%s\"", FormatCoordinates(_venuesAt->first, _venuesAt->second).c_str(),
+            _venuesQuery.c_str());
+  _store.client().request<api::inlineQueryResults>(
+      api::make_object<api::getInlineQueryResults>(
+          _venuesBot, _target.chat, api::make_object<api::location>(_venuesAt->first, _venuesAt->second, 0.),
+          _venuesQuery, std::string()),
+      _venuesLifetime,
+      [this](api::inlineQueryResults &results) {
+        auto venues = std::vector<Venue>();
+        for (const auto &result : results.results_) {
+          const auto venue = Cast<api::inlineQueryResultVenue>(result.get());
+          if (!venue || !venue->venue_ || !venue->venue_->location_) continue;
+          const auto &data = *venue->venue_;
+          venues.push_back({.lat = data.location_->latitude_, .lon = data.location_->longitude_, .title = data.title_,
+                            .address = data.address_, .provider = data.provider_, .id = data.id_, .type = data.type_});
+        }
+        showVenues(std::move(venues), false);
+      },
+      [this](api::error &) { showVenues({}, true); });
 }
 
-void LocationPicker::showVenues(std::vector<Data::InputVenue> venues, bool failed) {
+void LocationPicker::showVenues(std::vector<Venue> venues, bool failed) {
   gtk_widget_set_visible(_venuesSpinner, FALSE);
   if (failed) _venuesAt = std::nullopt;  // Asked again next time.
   gtk_list_box_remove_all(GTK_LIST_BOX(_venues));
@@ -580,49 +646,74 @@ void LocationPicker::showVenues(std::vector<Data::InputVenue> venues, bool faile
     adw_action_row_set_subtitle_lines(ADW_ACTION_ROW(row), 1);
     adw_action_row_add_prefix(ADW_ACTION_ROW(row), RowIcon("contrail-map-pin-symbolic", "venue"));
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), TRUE);
-    Connect<void(AdwActionRow *)>(row, "activated", crl::guard(this, [=](AdwActionRow *) { sendVenue(venue); }));
+    _signals.connect<void(AdwActionRow *)>(row, "activated", [this, venue](AdwActionRow *) { sendVenue(venue); });
     gtk_list_box_append(GTK_LIST_BOX(_venues), row);
   }
   gtk_widget_set_visible(_venues, !venues.empty());
-  gtk_label_set_text(GTK_LABEL(_venuesStatus), venues.empty() ? U8(tr::lng_maps_no_places(tr::now)).c_str() : "");
+  gtk_label_set_text(GTK_LABEL(_venuesStatus), venues.empty() ? Tr("lng_maps_no_places").c_str() : "");
   gtk_widget_set_visible(_venuesStatus, venues.empty());
+  g_message("Location picker: %zu places%s", venues.size(), failed ? " (failed)" : "");
 }
 
 // --- sending -----------------------------------------------------------------
 
 void LocationPicker::sendPoint(double lat, double lon) {
-  if (!Data::CanSendTexts(_thread)) return;
-  auto action = Api::SendAction(_thread);
-  if (_replyTo) action.replyTo.messageId = _replyTo;
-  Api::SendLocation(action, lat, lon);
+  if (_done) return;
+  g_message("Location picker: sending %s", FormatCoordinates(lat, lon).c_str());
+  _target.send(api::make_object<api::inputMessageLocation>(api::make_object<api::location>(lat, lon, 0.)));
   done();
 }
 
-void LocationPicker::sendVenue(const Data::InputVenue &venue) {
-  if (!Data::CanSendTexts(_thread)) return;
-  auto action = Api::SendAction(_thread);
-  if (_replyTo) action.replyTo.messageId = _replyTo;
-  Api::SendVenue(action, venue);
+void LocationPicker::sendVenue(const Venue &venue) {
+  if (_done) return;
+  g_message("Location picker: sending the place \"%s\"", venue.title.c_str());
+  _target.send(api::make_object<api::inputMessageVenue>(api::make_object<api::venue>(
+      api::make_object<api::location>(venue.lat, venue.lon, 0.), venue.title, venue.address, venue.provider, venue.id,
+      venue.type)));
   done();
 }
 
-void LocationPicker::shareLive() {
-  if (const auto sharing = Live().sharingIn(_thread->peer())) {
-    Live().stop(sharing);
-    return;
+// loc-send | loc-venue N | loc-search TEXT | loc-move LAT LON (as a finger moves the map) | loc-mine | loc-state
+void LocationPicker::debug(const std::string &name, const std::string &rest) {
+  if (name == "loc-send") {
+    if (gtk_widget_get_sensitive(_sendRow)) g_signal_emit_by_name(_sendRow, "activated");
+    else g_message("Location picker: nothing to send yet");
+  } else if (name == "loc-venue") {
+    auto *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_venues), std::atoi(rest.c_str()));
+    if (row) g_signal_emit_by_name(row, "activated");
+    else g_message("Location picker: no place %s", rest.c_str());
+  } else if (name == "loc-search") {
+    gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(_searchBar), !rest.empty());
+    gtk_editable_set_text(GTK_EDITABLE(_search), rest.c_str());
+  } else if (name == "loc-move") {
+#ifdef CONTRAIL_SHUMATE
+    auto *end = const_cast<char *>(rest.c_str());
+    const auto lat = g_ascii_strtod(end, &end);
+    const auto lon = g_ascii_strtod(end, &end);
+    if (_map) {
+      _follow = false;
+      MapCenterOn(_map, lat, lon, std::max(MapZoom(_map), kPlaceZoom), false);
+      refreshRows();
+      scheduleVenues();
+    }
+#endif
+  } else if (name == "loc-mine") {
+    _follow = true;
+    refreshRows();
+    scheduleVenues();
   }
-  if (!_fix || !Data::CanSendTexts(_thread)) return;
-  const auto weak = base::make_weak(this);
-  ChooseLivePeriod(_dialog, [=](TimeId period) {
-    const auto strong = weak.get();
-    if (!strong || !strong->_fix) return;
-    Live().start(strong->_thread, period, *strong->_fix, strong->_replyTo);
-    strong->done();
-  });
+  auto venues = 0;
+  for (auto *row = gtk_widget_get_first_child(_venues); row; row = gtk_widget_get_next_sibling(row)) ++venues;
+  g_message("Location picker: send=\"%s\" \"%s\" sensitive=%d pin=%d follow=%d venues=%d status=\"%s\" watching=%d",
+            adw_preferences_row_get_title(ADW_PREFERENCES_ROW(_sendRow)),
+            adw_action_row_get_subtitle(ADW_ACTION_ROW(_sendRow)), int(gtk_widget_get_sensitive(_sendRow)),
+            int(_mapPin && gtk_widget_get_visible(_mapPin)), int(_follow), venues,
+            gtk_widget_get_visible(_venuesStatus) ? gtk_label_get_text(GTK_LABEL(_venuesStatus)) : "",
+            int(_watch != nullptr));
 }
 
 void LocationPicker::done() {
-  if (_sent) _sent();
+  _done = true;
   adw_dialog_close(ADW_DIALOG(_dialog));
 }
 
@@ -630,22 +721,25 @@ void LocationPicker::done() {
 
 #ifdef CONTRAIL_SHUMATE
 
-class LocationViewer final : public base::has_weak_ptr {
-public:
-  LocationViewer(not_null<MainWindow *> window, not_null<HistoryItem *> item);
+class LocationViewer final {
+ public:
+  LocationViewer(MainWindow &window, const api::message &message);
   ~LocationViewer();
 
   [[nodiscard]] GtkWidget *dialog() const { return _dialog; }
+  void debug(const std::string &name);
 
-private:
+ private:
+  void updated(api::Update &update);
   void refresh();
   void received(const GeoFix &fix);
   void toggleMyLocation();
-  [[nodiscard]] HistoryItem *item() const;
 
-  const not_null<MainWindow *> _window;
-  const not_null<Main::Session *> _session;
-  const FullMsgId _id;
+  MainWindow &_window;
+  Td::Store &_store;
+  const Td::ChatId _chat;
+  std::int64_t _id = 0;
+  api::object_ptr<api::message> _message;
   GtkWidget *_dialog = nullptr;
   GtkWidget *_title = nullptr;
   GtkWidget *_map = nullptr;
@@ -653,20 +747,50 @@ private:
   GtkWidget *_position = nullptr;
   GtkWidget *_details = nullptr;
   GtkWidget *_distance = nullptr;
-  GtkWidget *_stop = nullptr;
   GtkWidget *_mine = nullptr;
   std::unique_ptr<LocationService::Watch> _watch;
   std::optional<GeoFix> _fix;
   double _lat = 0.;
   double _lon = 0.;
   bool _moved = false;  // By hand: the map doesn't follow a live location then.
-  base::Timer _timer;
+  Timer _timer;
+  Td::Lifetime _lifetime;
   SignalConnections _signals;
-  rpl::lifetime _lifetime;
+  const std::shared_ptr<char> _alive = std::make_shared<char>();
 };
 
-LocationViewer::LocationViewer(not_null<MainWindow *> window, not_null<HistoryItem *> item)
-    : _window(window), _session(&item->history()->session()), _id(item->fullId()), _timer([=] { refresh(); }) {
+api::object_ptr<api::message> CopyMessage(const api::message &message) {
+  // Only what the viewer reads: the content's location, the dates and the sender.
+  auto copy = api::make_object<api::message>();
+  copy->id_ = message.id_;
+  copy->chat_id_ = message.chat_id_;
+  copy->date_ = message.date_;
+  copy->edit_date_ = message.edit_date_;
+  copy->is_outgoing_ = message.is_outgoing_;
+  if (const auto user = Cast<api::messageSenderUser>(message.sender_id_.get())) {
+    copy->sender_id_ = api::make_object<api::messageSenderUser>(user->user_id_);
+  } else if (const auto chat = Cast<api::messageSenderChat>(message.sender_id_.get())) {
+    copy->sender_id_ = api::make_object<api::messageSenderChat>(chat->chat_id_);
+  }
+  auto info = LocationInfo();
+  if (MessageLocation(message, &info)) {
+    auto location = api::make_object<api::location>(info.lat, info.lon, 0.);
+    if (info.livePeriod) {
+      copy->content_ = api::make_object<api::messageLiveLocation>(
+          api::make_object<api::liveLocation>(std::move(location), info.livePeriod, 0, 0), 0);
+    } else if (!info.title.empty()) {
+      copy->content_ = api::make_object<api::messageVenue>(
+          api::make_object<api::venue>(std::move(location), info.title, info.address, "", "", ""));
+    } else {
+      copy->content_ = api::make_object<api::messageLocation>(std::move(location));
+    }
+  }
+  return copy;
+}
+
+LocationViewer::LocationViewer(MainWindow &window, const api::message &message)
+    : _window(window), _store(*window.store()), _chat(message.chat_id_), _id(message.id_),
+      _message(CopyMessage(message)), _timer([this] { refresh(); }) {
   _dialog = GTK_WIDGET(adw_dialog_new());
   adw_dialog_set_content_width(ADW_DIALOG(_dialog), 1200);
   adw_dialog_set_content_height(ADW_DIALOG(_dialog), 1200);
@@ -685,18 +809,21 @@ LocationViewer::LocationViewer(not_null<MainWindow *> window, not_null<HistoryIt
   gtk_widget_set_valign(buttons, GTK_ALIGN_END);
   gtk_widget_set_margin_end(buttons, 12);
   gtk_widget_set_margin_bottom(buttons, 64);  // Above the attribution (two lines on a phone).
-  auto *place = MapButton("contrail-map-pin-symbolic", tr::lng_maps_point(tr::now));
-  _signals.clicked(place, [=] {
+  auto *place = MapButton("contrail-map-pin-symbolic", Tr("lng_maps_point"));
+  _signals.clicked(place, [this] {
     _moved = false;
     MapCenterOn(_map, _lat, _lon, std::max(MapZoom(_map), kPlaceZoom), true);
   });
   gtk_box_append(GTK_BOX(buttons), place);
   _mine = MapButton("contrail-my-location-symbolic", MyLocationText());
-  _signals.clicked(_mine, [=] { toggleMyLocation(); });
+  _signals.clicked(_mine, [this] { toggleMyLocation(); });
   gtk_box_append(GTK_BOX(buttons), _mine);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), buttons);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), MakeZoomButtons(_map));
-  MapOnUserMove(_map, [=] { _moved = true; });
+  const auto weak = std::weak_ptr<char>(_alive);
+  MapOnUserMove(_map, [this, weak] {
+    if (!weak.expired()) _moved = true;
+  });
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), overlay);
 
   // The address or the live location's state, how far, and what can be done.
@@ -713,34 +840,27 @@ LocationViewer::LocationViewer(not_null<MainWindow *> window, not_null<HistoryIt
   gtk_box_append(GTK_BOX(bottom), _distance);
   auto *actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_widget_set_halign(actions, GTK_ALIGN_CENTER);
-  auto *open = gtk_button_new_with_label(U8(Translated("Open in Maps", "Открыть в Картах", "Відкрити в Картах")).c_str());
+  auto *open = gtk_button_new_with_label(Translated("Open in Maps", "Открыть в Картах", "Відкрити в Картах").c_str());
   gtk_widget_add_css_class(open, "pill");
   gtk_widget_add_css_class(open, "suggested-action");
-  _signals.clicked(open, [=] { OpenInMapsApp(_lat, _lon); });
+  _signals.clicked(open, [this] { OpenInMapsApp(_lat, _lon); });
   gtk_box_append(GTK_BOX(actions), open);
-  _stop = gtk_button_new_with_label(U8(tr::lng_group_call_screen_share_stop(tr::now)).c_str());
-  gtk_widget_add_css_class(_stop, "pill");
-  gtk_widget_add_css_class(_stop, "destructive-action");
-  _signals.clicked(_stop, [=] { Live().stop(_id); });
-  gtk_box_append(GTK_BOX(actions), _stop);
   gtk_box_append(GTK_BOX(bottom), actions);
   auto *clamp = adw_clamp_new();
   adw_clamp_set_child(ADW_CLAMP(clamp), bottom);
   adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(view), clamp);
   adw_dialog_set_child(ADW_DIALOG(_dialog), view);
 
-  _signals.connect<void(AdwDialog *)>(_dialog, "closed", [=](AdwDialog *) {
+  _signals.connect<void(AdwDialog *)>(_dialog, "closed", [this](AdwDialog *) {
     _watch = nullptr;
     _timer.cancel();
+    _lifetime.reset();
   });
   // A live location moves as it is edited.
-  _session->changes().messageUpdates(Data::MessageUpdate::Flag::Edited)
-      | rpl::filter([=](const Data::MessageUpdate &update) { return update.item->fullId() == _id; })
-      | rpl::on_next([=] { refresh(); }, _lifetime);
-  _session->data().itemRemoved(_id) | rpl::on_next([=] { adw_dialog_close(ADW_DIALOG(_dialog)); }, _lifetime);
-  Live().changes() | rpl::on_next([=] { refresh(); }, _lifetime);
+  _store.client().subscribe([this](api::Update &update) { updated(update); }, _lifetime);
   refresh();
   MapCenterOn(_map, _lat, _lon, kPlaceZoom, false);
+  g_message("Location viewer: %s", FormatCoordinates(_lat, _lon).c_str());
 }
 
 LocationViewer::~LocationViewer() {
@@ -748,51 +868,82 @@ LocationViewer::~LocationViewer() {
   _watch = nullptr;
 }
 
-HistoryItem *LocationViewer::item() const {
-  return _session->data().message(_id);
+void LocationViewer::updated(api::Update &update) {
+  switch (update.get_id()) {
+    case api::updateMessageContent::ID: {
+      auto &data = static_cast<api::updateMessageContent &>(update);
+      if (data.chat_id_ != _chat || data.message_id_ != _id || !data.new_content_) break;
+      auto copy = api::make_object<api::message>();
+      copy->content_ = std::move(data.new_content_);
+      if (MessageLocation(*copy, nullptr)) {
+        _message->content_ = std::move(copy->content_);
+        refresh();
+      }
+      break;
+    }
+    case api::updateMessageEdited::ID: {
+      auto &data = static_cast<api::updateMessageEdited &>(update);
+      if (data.chat_id_ != _chat || data.message_id_ != _id) break;
+      _message->edit_date_ = data.edit_date_;
+      refresh();
+      break;
+    }
+    case api::updateMessageSendSucceeded::ID: {
+      auto &data = static_cast<api::updateMessageSendSucceeded &>(update);
+      if (data.message_ && data.message_->chat_id_ == _chat && data.old_message_id_ == _id) {
+        _id = data.message_->id_;
+        _message->id_ = _id;
+      }
+      break;
+    }
+    case api::updateDeleteMessages::ID: {
+      auto &data = static_cast<api::updateDeleteMessages &>(update);
+      if (data.chat_id_ == _chat && data.is_permanent_
+          && std::ranges::find(data.message_ids_, _id) != data.message_ids_.end()) {
+        adw_dialog_close(ADW_DIALOG(_dialog));
+      }
+      break;
+    }
+    default: break;
+  }
 }
 
 void LocationViewer::refresh() {
-  const auto item = this->item();
-  const auto location = item ? LocationMedia(item) : nullptr;
-  if (!location) return;
-  const auto live = LiveLocationActive(item);
-  const auto &point = location->point();
+  auto info = LocationInfo();
+  if (!MessageLocation(*_message, &info)) return;
+  const auto live = LiveLocationActive(*_message);
   const auto movedFrom = std::pair(_lat, _lon);
-  _lat = point.lat();
-  _lon = point.lon();
-  const auto from = item->displayFrom() ? item->displayFrom() : item->from().get();
+  _lat = info.lat;
+  _lon = info.lon;
   if (!_marker) {
-    auto *avatar = location->livePeriod() ? MakeAvatar(from, 30) : nullptr;
+    auto *avatar = info.livePeriod ? MakeSenderAvatar(_store, *_message, 30) : nullptr;
     _marker = MapAddMarker(_map, MakeMapPin(avatar), _lat, _lon);
   } else if (movedFrom != std::pair(_lat, _lon)) {
     MapMoveMarker(_marker, _lat, _lon);
     if (!_moved) MapCenterOn(_map, _lat, _lon, MapZoom(_map), true);
   }
-  QString title, subtitle, details;
-  if (location->livePeriod()) {
-    title = tr::lng_live_location(tr::now);
-    subtitle = from->name();
-    details = live ? LiveLocationUpdated(item) : QString();
-  } else if (!location->title().isEmpty()) {
-    title = location->title();
-    details = location->description();
+  std::string title, subtitle, details;
+  if (info.livePeriod) {
+    title = Tr("lng_live_location");
+    subtitle = SenderName(_store, *_message);
+    details = live ? LiveLocationUpdated(*_message) : std::string();
+  } else if (!info.title.empty()) {
+    title = info.title;
+    details = info.address;
   } else {
-    title = tr::lng_maps_point(tr::now);
+    title = Tr("lng_maps_point");
   }
-  if (details.isEmpty()) details = FormatCoordinates(_lat, _lon);
-  adw_window_title_set_title(ADW_WINDOW_TITLE(_title), U8(title).c_str());
-  adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), U8(subtitle).c_str());
-  gtk_label_set_text(GTK_LABEL(_details), U8(details).c_str());
-  gtk_widget_set_visible(_stop, Live().sharing(_id));
+  if (details.empty()) details = FormatCoordinates(_lat, _lon);
+  adw_window_title_set_title(ADW_WINDOW_TITLE(_title), title.c_str());
+  adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), subtitle.c_str());
+  gtk_label_set_text(GTK_LABEL(_details), details.c_str());
   if (_fix) {
-    gtk_label_set_text(GTK_LABEL(_distance),
-                       U8(Translated("%1 away", "%1 от вас", "%1 від вас")
-                              .arg(FormatDistance(DistanceMeters(_fix->lat, _fix->lon, _lat, _lon))))
-                           .c_str());
+    auto text = Translated("{distance} away", "{distance} от вас", "{distance} від вас");
+    text.replace(text.find("{distance}"), 10, FormatDistance(DistanceMeters(_fix->lat, _fix->lon, _lat, _lon)));
+    gtk_label_set_text(GTK_LABEL(_distance), text.c_str());
   }
   gtk_widget_set_visible(_distance, _fix.has_value());
-  if (live) _timer.callOnce(30 * crl::time(1000));
+  if (live) _timer.callOnce(30 * 1000);
 }
 
 // The device's position is asked for only after this button: looking at a place doesn't turn the GPS on.
@@ -802,18 +953,35 @@ void LocationViewer::toggleMyLocation() {
     return;
   }
   gtk_widget_add_css_class(_mine, "active");
-  const auto weak = base::make_weak(this);
+  const auto weak = std::weak_ptr<char>(_alive);
   _watch = Location().watch(
-      [=](const GeoFix &fix) {
-        if (const auto strong = weak.get()) strong->received(fix);
+      [this, weak](const GeoFix &fix) {
+        if (!weak.expired()) received(fix);
       },
-      [=](LocationService::Failure failure) {
-        const auto strong = weak.get();
-        if (!strong) return;
+      [this, weak](LocationService::Failure failure) {
+        if (weak.expired()) return;
         ShowToast(FailureText(failure));
-        gtk_widget_remove_css_class(strong->_mine, "active");
-        crl::on_main(strong, [=] { _watch = nullptr; });
+        gtk_widget_remove_css_class(_mine, "active");
+        struct Drop {
+          LocationViewer *self;
+          std::weak_ptr<char> weak;
+        };
+        g_idle_add_full(G_PRIORITY_DEFAULT, +[](gpointer data) -> gboolean {
+          const auto drop = static_cast<Drop *>(data);
+          if (!drop->weak.expired()) drop->self->_watch = nullptr;
+          return G_SOURCE_REMOVE;
+        }, new Drop{this, weak}, +[](gpointer data) { delete static_cast<Drop *>(data); });
       });
+}
+
+// loc-mine | loc-state
+void LocationViewer::debug(const std::string &name) {
+  if (name == "loc-mine") toggleMyLocation();
+  g_message("Location viewer: \"%s\" \"%s\" details=\"%s\" distance=\"%s\" at %s watching=%d",
+            adw_window_title_get_title(ADW_WINDOW_TITLE(_title)), adw_window_title_get_subtitle(ADW_WINDOW_TITLE(_title)),
+            gtk_label_get_text(GTK_LABEL(_details)),
+            gtk_widget_get_visible(_distance) ? gtk_label_get_text(GTK_LABEL(_distance)) : "",
+            FormatCoordinates(_lat, _lon).c_str(), int(_watch != nullptr));
 }
 
 void LocationViewer::received(const GeoFix &fix) {
@@ -835,87 +1003,62 @@ void LocationViewer::received(const GeoFix &fix) {
 
 }  // namespace
 
-void ShowLocationPicker(not_null<MainWindow *> window, not_null<Data::Thread *> thread, FullMsgId replyTo,
-                        Fn<void()> sent) {
-  if (!window->widget()) return;
-  auto picker = std::make_unique<LocationPicker>(window, thread, replyTo, std::move(sent));
+void ShowLocationPicker(MainWindow &window, LocationTarget target) {
+  if (!window.widget() || !window.store()) return;
+  auto picker = std::make_unique<LocationPicker>(window, std::move(target));
   auto *dialog = picker->dialog();
   AttachData(dialog, "contrail-location-picker", std::move(picker));
-  adw_dialog_present(ADW_DIALOG(dialog), window->widget());
+  adw_dialog_present(ADW_DIALOG(dialog), window.widget());
 }
 
-void ShowLocation(not_null<MainWindow *> window, not_null<HistoryItem *> item) {
-  const auto location = LocationMedia(item);
-  if (!location || !window->widget()) return;
+void ShowLocation(MainWindow &window, const api::message &message) {
+  auto info = LocationInfo();
+  if (!MessageLocation(message, &info) || !window.widget() || !window.store()) return;
 #ifdef CONTRAIL_SHUMATE
-  auto viewer = std::make_unique<LocationViewer>(window, item);
+  auto viewer = std::make_unique<LocationViewer>(window, message);
   auto *dialog = viewer->dialog();
   AttachData(dialog, "contrail-location-viewer", std::move(viewer));
-  adw_dialog_present(ADW_DIALOG(dialog), window->widget());
+  adw_dialog_present(ADW_DIALOG(dialog), window.widget());
 #else
-  OpenInMapsApp(location->point().lat(), location->point().lon());
+  OpenInMapsApp(info.lat, info.lon);
 #endif
 }
 
-Data::MediaLocation *LocationMedia(not_null<const HistoryItem *> item) {
-  return dynamic_cast<Data::MediaLocation *>(item->media());
-}
-
-bool LiveLocationActive(not_null<const HistoryItem *> item) {
-  const auto location = LocationMedia(item);
-  const auto period = location ? location->livePeriod() : 0;
-  if (!period) return false;
-  const auto now = base::unixtime::now();
-  return period == LiveLocations::kUntilOff || now < item->date() || now - item->date() < period;
-}
-
-QString LiveLocationUpdated(not_null<const HistoryItem *> item) {
-  const auto date = UpdateDate(item);
-  const auto now = base::unixtime::now();
-  const auto elapsed = now - date;
-  if (elapsed < 60) {
-    return tr::lng_live_location_now(tr::now);
-  } else if (const auto minutes = elapsed / 60; minutes < 60) {
-    return tr::lng_live_location_minutes(tr::now, lt_count, minutes);
-  } else if (const auto hours = elapsed / 3600; hours < 12) {
-    return tr::lng_live_location_hours(tr::now, lt_count, hours);
+bool LocationDebugCommand(MainWindow &window, const std::string &name, const std::string &rest) {
+  if (!name.starts_with("loc-") || !window.widget()) return false;
+  if (name == "loc-fix") {
+    // "loc-fix LAT LON [ACCURACY]": a position as if from the location service (while something watches it).
+    // Whatever the language's decimal separator.
+    auto *end = const_cast<char *>(rest.c_str());
+    const auto lat = g_ascii_strtod(end, &end);
+    const auto lon = g_ascii_strtod(end, &end);
+    const auto accuracy = g_ascii_strtod(end, &end);
+    Location().debugFix(lat, lon, accuracy > 0. ? accuracy : 10.);
+    return true;
+  } else if (name == "loc-service") {
+    g_message("Location: %s", Location().debugState().c_str());
+    return true;
   }
-  const auto dateFull = base::unixtime::parse(date);
-  const auto nowFull = base::unixtime::parse(now);
-  const auto locale = QLocale();
-  const auto time = locale.toString(dateFull.time(), QLocale::ShortFormat);
-  if (dateFull.date() == nowFull.date()) {
-    return tr::lng_live_location_today(tr::now, lt_time, time);
-  } else if (dateFull.date().addDays(1) == nowFull.date()) {
-    return tr::lng_live_location_yesterday(tr::now, lt_time, time);
+  auto *dialog = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(window.widget()));
+  if (!dialog) {
+    g_message("Location: no dialog shown");
+    return true;
+  } else if (name == "loc-close") {
+    adw_dialog_close(dialog);
+    return true;
   }
-  return tr::lng_live_location_date_time(tr::now, lt_date, locale.toString(dateFull.date(), QLocale::ShortFormat),
-                                         lt_time, time);
-}
-
-QString LiveLocationRemaining(not_null<const HistoryItem *> item) {
-  const auto location = LocationMedia(item);
-  const auto period = location ? location->livePeriod() : 0;
-  if (period == LiveLocations::kUntilOff) return QString(1, QChar(0x221E));
-  const auto elapsed = base::unixtime::now() - item->date();
-  const auto remaining = std::clamp(period - elapsed, 0, period);
-  if (remaining < 10) {
-    return tr::lng_seconds_tiny(tr::now, lt_count, remaining);
-  } else if (remaining < 3600) {
-    return tr::lng_minutes_tiny(tr::now, lt_count, std::max(remaining / 60, 1));
-  } else if (remaining < 86400) {
-    return tr::lng_hours_tiny(tr::now, lt_count, remaining / 3600);
+  if (const auto picker = static_cast<LocationPicker *>(g_object_get_data(G_OBJECT(dialog), "contrail-location-picker"))) {
+    picker->debug(name, rest);
+    return true;
   }
-  return tr::lng_days_tiny(tr::now, lt_count, remaining / 86400);
-}
-
-double LiveLocationProgress(not_null<const HistoryItem *> item) {
-  const auto location = LocationMedia(item);
-  const auto period = location ? location->livePeriod() : 0;
-  if (period == LiveLocations::kUntilOff) return 1.;
-  if (period < 1) return 0.;
-  const auto elapsed = base::unixtime::now() - item->date();
-  return std::clamp(double(period - elapsed) / period, 0., 1.);
+#ifdef CONTRAIL_SHUMATE
+  if (const auto viewer = static_cast<LocationViewer *>(g_object_get_data(G_OBJECT(dialog), "contrail-location-viewer"))) {
+    viewer->debug(name);
+    return true;
+  }
+#endif
+  g_message("Location: another dialog is shown");
+  return true;
 }
 
 }  // namespace Contrail

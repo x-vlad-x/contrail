@@ -110,6 +110,10 @@ class MessageWidget final {
     bool voice = false;
     int duration = 0;
     std::string fallbackStatus;  // A video's length, "GIF": what stands there without a download.
+    // A location: its map comes from TDLib's answer, which mustn't land in a cell built again since.
+    std::shared_ptr<char> location;
+    GtkWidget *liveStatus = nullptr;     // "updated 5 minutes ago"
+    GtkWidget *liveRemaining = nullptr;  // The time left, over the map.
   };
 
   void build();
@@ -132,6 +136,8 @@ class MessageWidget final {
   GtkWidget *buildPoll(const Td::api::poll &poll);
   GtkWidget *buildWebPage(MessageItem *item);
   GtkWidget *buildSponsored(MessageItem *item);
+  GtkWidget *buildLocation(Cell &cell);
+  void refreshLive();
   GtkWidget *buildFooter();
   void setupDoubleTap(GtkWidget *bubble);
   GtkWidget *makeStatus();
@@ -164,6 +170,7 @@ class MessageWidget final {
   std::vector<std::function<void()>> _taps;
   GtkWidget *_highlighted = nullptr;
   guint _highlightTimeout = 0;
+  guint _liveTimer = 0;  // Live locations: "updated N minutes ago" and the time left go on.
   SignalConnections _signals;
 };
 

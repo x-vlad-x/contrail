@@ -62,6 +62,13 @@ class MainWindow final {
   [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
   void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
 
+  // The chat's card, the contacts in the sidebar, "About" (dialogs.cpp).
+  void openProfile(Td::ChatId chat);
+  void openContacts();
+  void showAbout();
+  // A page of the sidebar by its tag, if it is there.
+  [[nodiscard]] AdwNavigationPage *sidebarPage(const char *tag) const;
+
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
   void debugOpenTopic(int index);

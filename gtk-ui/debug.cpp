@@ -22,11 +22,16 @@
 //   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
 //   edit-last (the up arrow in the empty field)
+//   loc-picker (sending a location to the open chat) | loc-fix LAT LON [ACCURACY] (a position, as from the device)
+//   loc-service | in the picker: loc-send, loc-venue N, loc-search TEXT, loc-move LAT LON, loc-mine, loc-state |
+//   on a location's map (tap N on its message): loc-mine, loc-state
 #include "debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "dialogs.hpp"
 #include "forward.hpp"
+#include "location_ui.hpp"
 #include "main_window.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
@@ -267,6 +272,10 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name == "loc-picker" && window.chatView()) {
+    window.chatView()->chooseLocation();
+  } else if (LocationDebugCommand(window, name, rest)) {
+  } else if (ProfileDebugCommand(window, name, rest)) {
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));
