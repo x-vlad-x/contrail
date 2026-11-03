@@ -485,8 +485,9 @@ class ScenarioTransport final : public Transport {
   void send(std::uint64_t id, FunctionPtr function) override {
     if (mediaRequest(id, *function)) return;
     if (sendingRequest(id, *function)) return;
-    if (placesRequest(id, *function) || showcaseRequest(id, *function) || forumRequest(id, *function)
-        || pinnedRequest(id, *function) || reactionRequest(id, *function) || backgroundRequest(id, *function)) {
+    if (callRequest(id, *function) || placesRequest(id, *function) || showcaseRequest(id, *function)
+        || forumRequest(id, *function) || pinnedRequest(id, *function) || reactionRequest(id, *function)
+        || backgroundRequest(id, *function)) {
       return;
     }
     switch (function->get_id()) {
@@ -3192,6 +3193,93 @@ class ScenarioTransport final : public Transport {
   bool _notificationsOn = false;
   int _notified = 0;
   std::vector<std::int32_t> _notes;  // The notifications of Friend 5 not read yet.
+  // Section calls: TDLib signaling; the UI uses MakeScenarioMedia for sound and pictures.
+  void callUpdate(api::object_ptr<api::CallState> state) {
+    auto call = api::make_object<api::call>();
+    call->id_ = _callId;
+    call->user_id_ = _callUser;
+    call->is_outgoing_ = _callOutgoing;
+    call->is_video_ = _callVideo;
+    call->state_ = std::move(state);
+    update(api::make_object<api::updateCall>(std::move(call)));
+  }
+  void callReady() {
+    callUpdate(api::make_object<api::callStateExchangingKeys>());
+    const auto id = _callId;
+    later(150, [this, id] {
+      if (_callId != id || !_callActive) return;
+      auto ready = api::make_object<api::callStateReady>();
+      ready->protocol_ = api::make_object<api::callProtocol>(true, true, 65, 92, std::vector<std::string>{"13.0.0"});
+      ready->encryption_key_ = std::string(256, 's');
+      ready->emojis_ = {"😀", "🍀", "🚀", "🐾"};
+      ready->allow_p2p_ = true;
+      // Signaling before Ready exercises the backend's early queue.
+      update(api::make_object<api::updateNewCallSignalingData>(_callId, "scenario-early"));
+      callUpdate(std::move(ready));
+    });
+  }
+  void callEnd(bool busy = false, bool rating = false) {
+    _callActive = false;
+    api::object_ptr<api::CallDiscardReason> reason = busy
+        ? api::object_ptr<api::CallDiscardReason>(api::make_object<api::callDiscardReasonDeclined>())
+        : api::object_ptr<api::CallDiscardReason>(api::make_object<api::callDiscardReasonHungUp>());
+    callUpdate(api::make_object<api::callStateDiscarded>(std::move(reason), rating, false, false));
+  }
+  bool callRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      // The proxies a call goes through are the background section's (backgroundRequest).
+      case api::createCall::ID: {
+        const auto &request = static_cast<const api::createCall &>(function);
+        ++_callId; _callUser = request.user_id_; _callVideo = request.is_video_;
+        _callOutgoing = true; _callActive = true;
+        callUpdate(api::make_object<api::callStatePending>(true, false));
+        answer(id, api::make_object<api::callId>(_callId));
+        const auto call = _callId;
+        later(100, [this, call] {
+          if (_callId != call || !_callActive) return;
+          callUpdate(api::make_object<api::callStatePending>(true, true));
+        });
+        later(500, [this, call] { if (_callId == call && _callActive) callReady(); });
+        return true;
+      }
+      case api::acceptCall::ID:
+        answer(id, api::make_object<api::ok>());
+        callReady();
+        return true;
+      case api::discardCall::ID:
+        answer(id, api::make_object<api::ok>());
+        callEnd();
+        return true;
+      case api::sendCallSignalingData::ID:
+      case api::sendCallRating::ID:
+      case api::sendCallDebugInformation::ID:
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::getOption::ID: {
+        const auto &option = static_cast<const api::getOption &>(function).name_;
+        if (!option.starts_with("contrail_call_")) return false;
+        const auto command = option.substr(14);
+        answer(id, api::make_object<api::optionValueEmpty>());
+        if (command == "incoming" || command == "incoming-video") {
+          ++_callId; _callUser = 2; _callOutgoing = false;
+          _callVideo = command == "incoming-video"; _callActive = true;
+          callUpdate(api::make_object<api::callStatePending>(true, true));
+        } else if (command == "privacy") {
+          _callActive = false;
+          callUpdate(api::make_object<api::callStateError>(api::make_object<api::error>(400, "USER_PRIVACY_RESTRICTED")));
+        } else if (command == "end" || command == "busy" || command == "rated") {
+          callEnd(command == "busy", command == "rated");
+        } else update(api::make_object<api::updateNewCallSignalingData>(_callId, command));
+        return true;
+      }
+      default: return false;
+    }
+  }
+  int _callId = 100;
+  std::int64_t _callUser = 0;
+  bool _callOutgoing = false;
+  bool _callVideo = false;
+  bool _callActive = false;
 
   const bool _fullList;
   Sink _sink;

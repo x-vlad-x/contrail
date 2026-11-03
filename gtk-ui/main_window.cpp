@@ -1,6 +1,7 @@
 #include "main_window.hpp"
 
 #include "scroll_helpers.hpp"
+#include "calls.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
@@ -76,10 +77,25 @@ void MainWindow::buildWindow() {
   _toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   _stack = GTK_STACK(gtk_stack_new());
   gtk_stack_set_transition_type(_stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-  adw_toast_overlay_set_child(_toasts, GTK_WIDGET(_stack));
+  // Section calls: a persistent button above all pages returns to the call.
+  auto *pages = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  _callBar = adw_banner_new("");
+  adw_banner_set_use_markup(ADW_BANNER(_callBar), FALSE);
+  Connect<void(AdwBanner *)>(_callBar, "button-clicked", [this](AdwBanner *) { if (_call) _call->present(); });
+  gtk_box_append(GTK_BOX(pages), _callBar);
+  gtk_widget_set_vexpand(GTK_WIDGET(_stack), TRUE);
+  gtk_box_append(GTK_BOX(pages), GTK_WIDGET(_stack));
+  adw_toast_overlay_set_child(_toasts, pages);
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(_window), GTK_WIDGET(_toasts));
   gtk_stack_add_named(_stack, MakeLoadingPage(), "loading");
   buildChats();
+
+  // Section calls: closing the chat window must leave an ongoing call alive.
+  Connect<gboolean(GtkWindow *)>(_window, "close-request", [this](GtkWindow *) -> gboolean {
+    if (!_call || !_call->active()) return FALSE;
+    gtk_widget_set_visible(_window, FALSE);
+    return TRUE;
+  });
 
   // Telegram shows the account as online while the window is in front, and only then.
   // The window itself, not _window: this comes while a window going to the background is destroyed too.
@@ -158,6 +174,8 @@ MainWindow::~MainWindow() {
 
 void MainWindow::clearChats() {
   clearViews();
+  _call = nullptr;
+  setCallStatus({});
   _forwardDrafts.clear();
   _notifier = nullptr;
   _network = nullptr;
@@ -252,6 +270,7 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
     _unreadUnmuted = data.unread_unmuted_count_;
     updateTray();
   }, _unreadLifetime);
+  _call = std::make_unique<CallView>(*this, *_store);
   _language = language;
   _stringsAsked = false;
   _stringsReady = false;
@@ -696,6 +715,7 @@ void MainWindow::releaseWindow() {
   g_object_remove_weak_pointer(G_OBJECT(window), reinterpret_cast<gpointer *>(&_window));
   gtk_window_destroy(GTK_WINDOW(window));
   _toasts = nullptr;
+  _callBar = nullptr;
   _stack = nullptr;
   _split = nullptr;
   _contentPage = nullptr;
@@ -728,3 +748,17 @@ void MainWindow::releaseMemory(MemoryLevel level) {
 }
 
 }  // namespace Contrail
+
+// Section calls: shared window hooks kept together for the TDLib migration.
+namespace Contrail {
+void MainWindow::startCall(Td::UserId user, bool video) { if (_call) _call->start(user, video); }
+void MainWindow::setCallStatus(const std::string &text) {
+  if (!_callBar) return;  // The window is released: the bar comes back with it.
+  adw_banner_set_button_label(ADW_BANNER(_callBar), Tr("lng_call_box_title").c_str());
+  adw_banner_set_title(ADW_BANNER(_callBar), text.c_str());
+  adw_banner_set_revealed(ADW_BANNER(_callBar), !text.empty());
+}
+void MainWindow::debugCall(const std::string &action, const std::string &argument) {
+  if (_call) _call->debug(action, argument);
+}
+} // namespace Contrail

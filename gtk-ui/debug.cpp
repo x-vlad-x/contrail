@@ -44,6 +44,9 @@
 //   attach-caption TEXT | attach-remove N | attach-state (the attach dialog of the open chat) | attach-copy-image PATH
 //   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
 //   attach-menu file|location (an item of the attach menu, as a tap on it)
+//   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
+//   call-state|hide|present|speaker | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
+//   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
 #include "debug.hpp"
 
 #include "background_debug.hpp"
@@ -140,6 +143,11 @@ void Run(MainWindow &window, const std::string &command) {
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
   if (RunBackgroundCommand(window, name, rest)) return;
+  // A call goes on without the window.
+  if (name.starts_with("call-")) {
+    window.debugCall(name.substr(5), rest);
+    return;
+  }
   // Without its window (the app in the background) only what needs none.
   if (!window.widget() && name != "mem" && name != "mem-arenas" && name != "trim") {
     g_message("debug: no window for %s", command.c_str());

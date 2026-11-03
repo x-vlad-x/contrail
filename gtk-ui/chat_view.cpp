@@ -774,6 +774,15 @@ void ChatView::buildHeader() {
   adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), _title);
   auto *avatar = MakeAvatar(_store, _chat, 32, true);
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), avatar);
+  // Section calls: only a person can receive a 1:1 call.
+  const auto known = _store.chat(_chat);
+  const auto user = known ? _store.user(known->peerId) : nullptr;
+  if (known && known->kind == Td::ChatKind::Private && known->peerId != _store.selfId()
+      && (!user || (!user->bot && !user->deleted))) {
+    auto *call = MakeIconButton("call-start-symbolic", Tr("lng_call_box_title").c_str());
+    _signals.clicked(call, [this, id = known->peerId] { _window.startCall(id); });
+    adw_header_bar_pack_end(ADW_HEADER_BAR(header), call);
+  }
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(_root), header);
   // A tap on the name or the picture: the chat's card.
   for (auto *widget : {_title, avatar}) {

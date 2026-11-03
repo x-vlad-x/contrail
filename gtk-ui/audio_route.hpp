@@ -1,11 +1,12 @@
 #pragma once
 
-#include <QtCore/QHash>
-#include <QtCore/QProcess>
-#include <QtCore/QStringList>
+#include <gio/gio.h>
 #include <deque>
 #include <functional>
+#include <map>
+#include <string>
 #include <vector>
+#include <memory>
 
 namespace Contrail {
 
@@ -18,85 +19,89 @@ class AudioRoute final {
 public:
   enum class Kind { Earpiece, Speaker, Headphones, Bluetooth, Other };
   struct Output {
-    QString id;
-    QString sink;
-    QString port;   // A port of the phone's sink; empty for a whole sink.
-    QString name;   // The sink's description; empty for the phone's own ports.
-    QString device; // The sink's name for the core's audio (OpenAL): its unique description.
+    std::string id;
+    std::string sink;
+    std::string port;   // A port of the phone's sink; empty for a whole sink.
+    std::string name;   // The sink's description; empty for the phone's own ports.
+    std::string device; // The sink's name for the core's audio (OpenAL): its unique description.
     Kind kind = Kind::Other;
   };
   using Changed = std::function<void()>;
 
-  explicit AudioRoute(Changed changed, QString volumesFile = QString());
+  explicit AudioRoute(Changed changed, std::string volumesFile = {});
   ~AudioRoute();
 
   // A call starts where the sound goes now: headphones or another device when one is the default
   // output, otherwise the earpiece (the loudspeaker for a video call).
   void begin(bool video);
-  void select(const QString &id);
+  void select(const std::string &id);
   void end();
 
   [[nodiscard]] const std::vector<Output> &outputs() const { return _outputs; }
   [[nodiscard]] const Output *current() const;
-  [[nodiscard]] bool busy() const { return _process.state() != QProcess::NotRunning || !_queue.empty(); }
+  [[nodiscard]] bool busy() const { return _process || !_queue.empty(); }
 
 private:
   struct Port {
-    QString name;
+    std::string name;
     bool available = true;
   };
   struct Sink {
-    QString name;
-    QString description;
-    QString device;
-    QString activePort;
-    QString bus;
-    QString formFactor;
+    std::string name;
+    std::string description;
+    std::string device;
+    std::string activePort;
+    std::string bus;
+    std::string formFactor;
     int volume = -1;
     std::vector<Port> ports;
     bool skip = false;
   };
   struct Command {
-    QStringList arguments;
-    std::function<void(int exitCode, const QByteArray &output)> done;
+    std::vector<std::string> arguments;
+    std::function<void(int exitCode, const std::string &output)> done;
   };
 
-  void run(QStringList arguments, std::function<void(int, const QByteArray &)> done);
+  void run(std::vector<std::string> arguments, std::function<void(int, const std::string &)> done);
   void next();
   void query();
-  void parseSinks(const QByteArray &json);
+  void parseSinks(const std::string &json);
   void queried();
   void apply(const Output &output);
-  void setVolume(const QString &sink, int volume, bool call = true);
-  void rememberVolume(const QString &port, int volume);
+  void setVolume(const std::string &sink, int volume, bool call = true);
+  void rememberVolume(const std::string &port, int volume);
   void trackVolume();
   void startMonitor();
   void stopMonitor();
-  [[nodiscard]] const Output *find(const QString &id) const;
+  [[nodiscard]] const Output *find(const std::string &id) const;
   [[nodiscard]] const Output *preferred() const;
-  [[nodiscard]] Sink *sink(const QString &name);
+  [[nodiscard]] Sink *sink(const std::string &name);
   void notify();
 
-  QProcess _process;
-  QProcess _monitor;
+  GSubprocess *_process = nullptr;
+  GSubprocess *_monitor = nullptr;
+  GDataInputStream *_events = nullptr;
+  GCancellable *_cancel = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
+  void readEvent();
   std::deque<Command> _queue;
   Command _running;
   Changed _changed;
   std::vector<Sink> _sinks;
   std::vector<Output> _outputs;
-  QString _defaultSink;
-  QString _knownDefaultSink;
-  QString _currentId;
+  std::string _defaultSink;
+  std::string _knownDefaultSink;
+  std::string _currentId;
   // The port and the volume of the phone's sink before the call, to put back afterwards unless
   // someone else changed the port in the meantime.
-  QString _restoreSink;
-  QString _originalPort;
-  QString _selectedPort;
+  std::string _restoreSink;
+  std::string _originalPort;
+  std::string _selectedPort;
   int _originalVolume = -1;
   int _appliedVolume = -1;
   int _volumesPending = 0;
-  QString _volumesFile;
-  QHash<QString, int> _callVolumes;
+  std::string _volumesFile;
+  std::map<std::string, int> _callVolumes;
   bool _active = false;
   bool _video = false;
   bool _queryQueued = false;

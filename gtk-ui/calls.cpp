@@ -3,74 +3,24 @@
 #include "main_window.hpp"
 #include "layout.hpp"
 #include "call_layout.hpp"
+#include "td/session.hpp"
+#include "td/strings.hpp"
 #include "userpics.hpp"
 
-#include "calls/calls_call.h"
-#include "calls/calls_emoji_fingerprint.h"
-#include "calls/calls_instance.h"
-#include "core/application.h"
-#include "core/core_settings.h"
-#include "main/main_session.h"
-#include "data/data_user.h"
-#include "lang/lang_keys.h"
-#include "settings.h"
-#include "ui/emoji_config.h"
-#include "ui/text/format_values.h"
-#include "webrtc/webrtc_video_track.h"
-#include "webrtc/webrtc_environment.h"
-#include "ui/userpic_view.h"
-#include "window/notifications_utilities.h"
-
-#include <QtGui/QPainter>
+#include <algorithm>
+#include <cstdio>
 
 namespace Contrail {
 namespace {
+using S = CallBackend::Stage;
+using OutputKind = AudioRoute::Kind;
 
-QString CallStatus(Calls::Call *call) {
-  using State = Calls::Call::State;
-  switch (call->state()) {
-    case State::Established: return Ui::FormatDurationText(call->getDurationMs() / 1000);
-    case State::Starting:
-    case State::WaitingIncoming: return call->type() == Calls::Call::Type::Incoming
-        ? tr::lng_call_status_incoming(tr::now) : tr::lng_call_status_connecting(tr::now);
-    case State::WaitingInit:
-    case State::WaitingInitAck: return tr::lng_call_status_connecting(tr::now);
-    case State::ExchangingKeys: return tr::lng_call_status_exchanging(tr::now);
-    case State::Requesting: return tr::lng_call_status_requesting(tr::now);
-    case State::Ringing: return tr::lng_call_status_ringing(tr::now);
-    case State::Busy: return tr::lng_call_status_busy(tr::now);
-    case State::Failed: return tr::lng_call_status_failed(tr::now);
-    case State::HangingUp:
-    case State::FailedHangingUp:
-    case State::MigrationHangingUp: return tr::lng_call_status_hanging(tr::now);
-    case State::Ended:
-    case State::EndedByOtherDevice: return tr::lng_call_status_ended(tr::now);
-    default: return tr::lng_call_status_waiting(tr::now);
-  }
-}
-
-GtkWidget *CallButton(const QString &text, const char *css) {
-  auto *button = gtk_button_new_with_label(U8(text).c_str());
+GtkWidget *CallButton(const std::string &text, const char *css) {
+  auto *button = gtk_button_new_with_label(text.c_str());
   gtk_widget_add_css_class(button, "pill");
   gtk_widget_add_css_class(button, css);
   return button;
 }
-
-bool PhoneCameraName(const QString &name) {
-  return name.contains(u"front"_q, Qt::CaseInsensitive)
-      || name.contains(u"back"_q, Qt::CaseInsensitive)
-      || name.contains(u"rear"_q, Qt::CaseInsensitive);
-}
-
-std::vector<Webrtc::DeviceInfo> CallCameras() {
-  auto cameras = Core::App().mediaDevices().devices(Webrtc::DeviceType::Camera);
-  std::erase_if(cameras, [](const auto &camera) { return camera.inactive; });
-  const auto phone = std::any_of(cameras.begin(), cameras.end(), [](const auto &camera) { return PhoneCameraName(camera.name); });
-  if (phone) std::erase_if(cameras, [](const auto &camera) { return !PhoneCameraName(camera.name); });
-  return cameras;
-}
-
-using OutputKind = AudioRoute::Kind;
 
 const char *OutputIcon(OutputKind kind) {
   switch (kind) {
@@ -82,58 +32,58 @@ const char *OutputIcon(OutputKind kind) {
   }
 }
 
-QString OutputName(const AudioRoute::Output &output) {
-  if (!output.name.isEmpty()) return output.name;
-  // Telegram Desktop has no strings for a phone's own outputs.
-  const auto language = Lang::LanguageIdOrDefault(Lang::Id());
-  const auto russian = language.startsWith(u"ru"_q), ukrainian = language.startsWith(u"uk"_q);
+std::string OutputName(const AudioRoute::Output &output) {
+  if (!output.name.empty()) return output.name;
   switch (output.kind) {
-    case OutputKind::Earpiece: return (russian || ukrainian) ? u"Телефон"_q : u"Phone"_q;
-    case OutputKind::Speaker: return russian ? u"Динамик"_q : ukrainian ? u"Гучномовець"_q : u"Speaker"_q;
-    default: return russian ? u"Наушники"_q : ukrainian ? u"Навушники"_q : u"Headphones"_q;
+    case OutputKind::Earpiece: return Translated("Phone", "Телефон", "Телефон");
+    case OutputKind::Speaker: return Translated("Speaker", "Динамик", "Гучномовець");
+    default: return Translated("Headphones", "Наушники", "Навушники");
   }
 }
 
+std::string CallErrorText(const std::string &error, const std::string &user) {
+  if (error == "CAMERA_UNAVAILABLE") return Tr("lng_call_error_no_camera");
+  if (error == "USER_PRIVACY_RESTRICTED" || error == "USER_IS_BLOCKED" || error == "CALL_PEER_INVALID") {
+    return Tr("lng_call_error_not_available", {{"user", user}});
+  }
+  if (error == "PARTICIPANT_VERSION_OUTDATED" || error == "Unsupported call media protocol.") {
+    return Tr("lng_call_error_outdated", {{"user", user}});
+  }
+  if (error == "Call connection failed.") return Tr("lng_call_status_failed");
+  if (error == "This build has no call media support.") {
+    return Translated("This build has no call support.", "В этой сборке нет поддержки звонков.",
+        "У цій збірці немає підтримки дзвінків.");
+  }
+  return error;
+}
+
+std::vector<Calls::Camera> Cameras() {
+  if (g_getenv("CONTRAIL_SCENARIO")) return {{"scenario-front", "Front"}, {"scenario-back", "Back"}};
+  return Calls::Cameras();
+}
 } // namespace
 
-CallView::CallView(not_null<MainWindow *> window)
-    : _parent(window)
-    , _audio([=] { updateAudioRoute(); }, cWorkingDir() + u"tdata/contrail-call-volumes.ini"_q)
-    , _proximity([=](bool near) { setProximityShield(near); })
-    , _notification({
-          .accept = [=] { crl::on_main(this, [=] {
-            if (const auto call = _call.get(); call && !_ending && call->isIncomingWaiting()) call->answer();
-          }); },
-          .decline = [=] { crl::on_main(this, [=] { hangup(); }); },
-          .hangup = [=] { crl::on_main(this, [=] { hangup(); }); },
-          .open = [=] { crl::on_main(this, [=] { _parent->present(); present(); }); },
-      })
-    , _lockScreen({
-          .accept = [=] {
-            if (const auto call = _call.get(); call && !_ending && call->isIncomingWaiting()) call->answer();
-          },
-          .hangup = [=] { hangup(); },
-          .mute = [=] {
-            if (const auto call = _call.get(); call && !_ending) call->setMuted(!call->muted());
-          },
-          .speaker = [=] { if (!_ending) toggleSpeaker(); },
-      })
-    , _screenLock([=](bool locked) {
-        crl::on_main(this, [=] {
-          updateLockScreen();
-          // Unlocked during the call: the call window is in front.
-          if (!locked && _call && !_ending) { _parent->present(); present(); }
-        });
-      })
-    , _timer([=] { refresh(); }) {
+CallView::CallView(MainWindow &window, Td::Store &store)
+    : _parent(window), _store(store)
+    , _backend(store.client(), g_getenv("CONTRAIL_SCENARIO") ? Calls::MakeScenarioMedia : Calls::StartMedia)
+    , _audio([this] { updateAudioRoute(); }, Td::DataDirectory() + "/call-volumes.ini")
+    , _proximity([this](bool near) { setProximityShield(near); })
+    , _notification({.accept = [this] { _backend.accept(); }, .decline = [this] { _backend.hangup(); },
+          .hangup = [this] { _backend.hangup(); }, .open = [this] { _parent.present(); present(); }})
+    , _lockScreen({.accept = [this] { _backend.accept(); }, .hangup = [this] { _backend.hangup(); },
+          .mute = [this] { _backend.setMuted(!_backend.snapshot().muted); }, .speaker = [this] { toggleSpeaker(); }})
+    , _screenLock([this](bool locked) {
+        updateLockScreen();
+        if (!locked && _backend.active()) { _parent.present(); present(); }
+      }) {
   _window = adw_window_new();
   g_object_ref_sink(_window);
   gtk_widget_add_css_class(_window, "call-window");
-  gtk_window_set_title(GTK_WINDOW(_window), U8(tr::lng_call_box_title(tr::now)).c_str());
+  gtk_window_set_title(GTK_WINDOW(_window), Tr("lng_call_box_title").c_str());
   gtk_window_set_default_size(GTK_WINDOW(_window), 380, 620);
   gtk_widget_set_size_request(_window, 320, 294);
-  gtk_window_set_transient_for(GTK_WINDOW(_window), GTK_WINDOW(window->widget()));
-  _signals.connect<gboolean(GtkWindow *)>(_window, "close-request", [=](GtkWindow *) -> gboolean {
+  gtk_window_set_transient_for(GTK_WINDOW(_window), GTK_WINDOW(window.widget()));
+  _signals.connect<gboolean(GtkWindow *)>(_window, "close-request", [=, this](GtkWindow *) -> gboolean {
     gtk_widget_set_visible(_window, FALSE);
     return TRUE;
   });
@@ -183,21 +133,21 @@ CallView::CallView(not_null<MainWindow *> window)
   gtk_widget_set_halign(controls, GTK_ALIGN_CENTER);
   SetMarginAll(controls, 12);
   gtk_widget_add_css_class(controls, "call-controls");
-  _accept = CallButton(tr::lng_call_accept(tr::now), "suggested-action");
+  _accept = CallButton(Tr("lng_call_accept"), "suggested-action");
   gtk_box_append(GTK_BOX(controls), _accept);
   auto *buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-  const auto button = [&](const char *icon, const QString &text) {
-    auto *result = MakeIconButton(icon, U8(text).c_str());
+  const auto button = [&](const char *icon, const std::string &text) {
+    auto *result = MakeIconButton(icon, text.c_str());
     gtk_widget_add_css_class(result, "circular");
     gtk_widget_add_css_class(result, "call-control");
     gtk_box_append(GTK_BOX(buttons), result);
     return result;
   };
-  _mute = button("audio-input-microphone-symbolic", tr::lng_call_mute_audio(tr::now));
-  _camera = button("camera-video-symbolic", tr::lng_call_start_video(tr::now));
-  _switchCamera = button("view-refresh-symbolic", tr::lng_settings_call_camera(tr::now));
-  _speaker = button("audio-speakers-symbolic", tr::lng_settings_call_section_output(tr::now));
-  _hangup = button("call-stop-symbolic", tr::lng_call_end_call(tr::now));
+  _mute = button("audio-input-microphone-symbolic", Tr("lng_call_mute_audio"));
+  _camera = button("camera-video-symbolic", Tr("lng_call_start_video"));
+  _switchCamera = button("view-refresh-symbolic", Tr("lng_settings_call_camera"));
+  _speaker = button("audio-speakers-symbolic", Tr("lng_settings_call_section_output"));
+  _hangup = button("call-stop-symbolic", Tr("lng_call_end_call"));
   gtk_widget_add_css_class(_hangup, "destructive-action");
   gtk_box_append(GTK_BOX(controls), buttons);
   gtk_overlay_add_overlay(GTK_OVERLAY(stage), controls);
@@ -208,385 +158,205 @@ CallView::CallView(not_null<MainWindow *> window)
   gtk_overlay_add_overlay(GTK_OVERLAY(stage), _shield);
   adw_window_set_content(ADW_WINDOW(_window), stage);
 
-  _signals.clicked(_accept, [=] {
-    if (const auto call = _call.get(); call && !_ending) {
-      if (call->state() == Calls::Call::Busy) call->redial();
-      else call->answer();
-    }
+  _signals.clicked(_accept, [this] {
+    const auto call = _backend.snapshot();
+    if (call.stage == S::Busy) start(call.user, call.video);
+    else _backend.accept();
   });
-  _signals.clicked(_hangup, [=] { hangup(); });
-  _signals.clicked(_mute, [=] {
-    if (const auto call = _call.get(); call && !_ending) {
-      call->setMuted(!call->muted());
-      if (g_getenv("CONTRAIL_DEBUG")) g_message("Microphone toggled: %s", call->muted() ? "muted" : "unmuted");
-    }
+  _signals.clicked(_hangup, [this] {
+    if (_backend.active()) _backend.hangup();
+    else gtk_widget_set_visible(_window, FALSE);
   });
-  _signals.clicked(_camera, [=] {
-    if (const auto call = _call.get(); call && !_ending && call->state() == Calls::Call::Established) {
-      call->toggleCameraSharing(!call->isSharingCamera());
-      refresh();
-    }
+  _signals.clicked(_mute, [this] { _backend.setMuted(!_backend.snapshot().muted); });
+  _signals.clicked(_camera, [this] {
+    const auto &call = _backend.snapshot();
+    if (call.camera.empty()) loadCameras();
+    const auto &cameras = _cameras;
+    if (!call.camera.empty()) { _backend.setCamera({}); showFrame({}, true); }
+    else if (!cameras.empty()) _backend.setCamera(cameras.front().id);
+    else ShowToast(Tr("lng_call_error_no_camera"));
   });
-  _signals.clicked(_switchCamera, [=] { switchCamera(); });
-  _signals.clicked(_speaker, [=] { if (!_ending) chooseAudioOutput(); });
-
-  Core::App().calls().currentCallValue() | rpl::on_next([=](Calls::Call *call) {
-    setCall(call);
-  }, _lifetime);
-  Core::App().mediaDevices().changes(Webrtc::DeviceType::Camera)
-      | rpl::on_next([=] { refreshDevices(); }, _lifetime);
+  _signals.clicked(_switchCamera, [this] { switchCamera(); });
+  _signals.clicked(_speaker, [this] { chooseAudioOutput(); });
+  _backend.setChanged([this] { refresh(); });
+  _backend.setFrames([this](Calls::Frame frame, bool local) { showFrame(std::move(frame), local); });
 }
 
 CallView::~CallView() {
-  invalidate_weak_ptrs(this);
+  _backend.setChanged(nullptr);
+  _backend.setFrames(nullptr);
+  _backend.hangup();
   _proximity.setEnabled(false);
-  _lifetime.destroy();
-  _callLifetime.destroy();
-  stopVideo();
-  _audio.end();
-  _timer.cancel();
+  _idle.set(false);
+  _ringer.stop();
+  _notification.close();
+  _lockScreen.hide();
+  if (_timer) g_source_remove(_timer);
   _signals.clear();
   gtk_window_destroy(GTK_WINDOW(_window));
   g_object_unref(_window);
 }
 
-void CallView::choosePhoneCamera() {
-  const auto cameras = CallCameras();
-  const auto current = Core::App().settings().cameraDeviceId();
-  const Webrtc::DeviceInfo *front = nullptr;
-  for (const auto &camera : cameras) {
-    if (camera.inactive) continue;
-    const auto name = camera.name.toLower();
-    const auto phoneCamera = PhoneCameraName(name);
-    if (camera.id == current && phoneCamera) return;
-    if (!front && name.contains(u"front"_q)) front = &camera;
-  }
-  // Android HAL loopback cameras are usable; the first enumerated MediaTek codec/dpe device is not.
-  if (front) Core::App().settings().setCameraDeviceId(front->id);
-}
-
-void CallView::start(not_null<UserData *> user, bool video) {
-  auto &calls = Core::App().calls();
-  if (calls.currentCall()) { present(); return; }
-  if (calls.inGroupCall() || user->isSelf() || user->isBot()) return;
-  if (user->callsStatus() == UserData::CallsStatus::Private) {
-    user->updateFull();
-    ShowToast(tr::lng_call_error_not_available(tr::now, lt_user, user->name()));
-    return;
-  }
-  if (user->callsStatus() == UserData::CallsStatus::Disabled) {
-    ShowToast(tr::lng_call_error_outdated(tr::now, lt_user, user->name()));
-    return;
-  }
-  choosePhoneCamera();
-  calls.startOutgoingCall(user, {.video = video, .isConfirmed = true});
+void CallView::start(Td::UserId user, bool video) {
+  if (_backend.active()) { present(); return; }
+  const auto known = _store.user(user);
+  if (user == _store.selfId() || (known && (known->bot || known->deleted))) return;
+  _backend.start(user, video);
 }
 
 void CallView::present() {
-  if (_call) gtk_window_present(GTK_WINDOW(_window));
+  if (_backend.snapshot().stage != S::None) gtk_window_present(GTK_WINDOW(_window));
 }
 
-void CallView::setParentWindow(GtkWindow *parent) {
-  gtk_window_set_transient_for(GTK_WINDOW(_window), parent);
+std::string CallView::name() const {
+  const auto user = _store.user(_backend.snapshot().user);
+  return user ? Td::DisplayName(*user) : Tr("lng_deleted");
 }
 
-void CallView::stopVideo() {
-  _videoLifetime.destroy();
-  _remoteHasFrame = false;
-  gtk_picture_set_paintable(GTK_PICTURE(_video), nullptr);
-  gtk_picture_set_paintable(GTK_PICTURE(_localVideo), nullptr);
-  gtk_widget_set_visible(_video, FALSE);
-  gtk_widget_set_visible(_localFrame, FALSE);
-  gtk_widget_set_visible(_avatarBox, TRUE);
-}
-
-void CallView::hangup() {
-  const auto call = _call.get();
-  if (!call) {
-    _audio.end();
-    _notification.close();
-    _ringer.stop();
-    _lockScreen.hide();
-    gtk_widget_set_visible(_window, FALSE);
-    return;
+std::string CallView::status() const {
+  switch (_backend.snapshot().stage) {
+    case S::Incoming: return Tr("lng_call_status_incoming");
+    case S::Requesting: return Tr("lng_call_status_requesting");
+    case S::Ringing: return Tr("lng_call_status_ringing");
+    case S::Exchanging: return Tr("lng_call_status_exchanging");
+    case S::Established: {
+      const auto seconds = _backend.duration();
+      char result[32];
+      std::snprintf(result, sizeof(result), "%d:%02d", seconds / 60, seconds % 60);
+      return result;
+    }
+    case S::Connecting: case S::Reconnecting: return Tr("lng_call_status_connecting");
+    case S::HangingUp: return Tr("lng_call_status_hanging");
+    case S::Busy: return Tr("lng_call_status_busy");
+    case S::Failed: return Tr("lng_call_status_failed");
+    default: return Tr("lng_call_status_ended");
   }
-  if (_ending) return;
-  _ending = true;
-  stopVideo();
-  _timer.cancel();
-  refresh();
-  call->hangup();
-}
-
-void CallView::setCall(Calls::Call *call) {
-  _callLifetime.destroy();
-  stopVideo();
-  _timer.cancel();
-  if (!call) {
-    if (const auto previous = _call.get()) ShowToast(CallStatus(previous));
-    _call.reset();
-    _audio.end();
-    updateProximity();
-    _idle.set(false);
-    // Contrail has no setting for the calls' output device: each call follows its own route.
-    _playbackOutput.clear();
-    Core::App().settings().setCallPlaybackDeviceId(QString());
-    Core::App().saveSettingsDelayed();
-    _parent->setCallStatus(QString(), false);
-    _notification.close();
-    _ringer.stop();
-    _lockScreen.hide();
-    _audioStarted = false;
-    gtk_widget_set_visible(_window, FALSE);
-    return;
-  }
-  _call = call;
-  _audioStarted = false;
-  HideCoreWindow();
-  _ending = false;
-  _localSourceSize = _remoteSourceSize = QSize();
-  _playbackOutput.clear();
-  Core::App().settings().setCallPlaybackDeviceId(QString());
-  choosePhoneCamera();
-  ClearBox(_avatarBox);
-  gtk_box_append(GTK_BOX(_avatarBox), MakeAvatar(call->user(), 112, true));
-  gtk_label_set_text(GTK_LABEL(_name), U8(call->user()->name()).c_str());
-  gtk_widget_set_sensitive(_accept, TRUE);
-  call->stateValue() | rpl::on_next([=] { refresh(); }, _callLifetime);
-  call->mutedValue() | rpl::on_next([=] { refresh(); }, _callLifetime);
-  call->remoteAudioStateValue() | rpl::on_next([=] { refresh(); }, _callLifetime);
-  call->errors() | rpl::on_next([=](const Calls::Error &error) {
-    const auto text = error.type == Calls::ErrorType::NoCamera ? tr::lng_call_error_no_camera(tr::now)
-        : error.type == Calls::ErrorType::NoMicrophone ? tr::lng_call_error_audio_io(tr::now)
-        : error.details.isEmpty() ? tr::lng_call_status_failed(tr::now) : error.details;
-    ShowToast(text);
-  }, _callLifetime);
-  const auto weak = _call;
-  const auto attachVideo = [=](not_null<Webrtc::VideoTrack *> track, GtkWidget *picture) {
-    track->stateValue() | rpl::on_next([=](Webrtc::VideoState state) {
-      if (!weak || _call != weak || _ending) return;
-      if (state != Webrtc::VideoState::Active) {
-        gtk_picture_set_paintable(GTK_PICTURE(picture), nullptr);
-        gtk_widget_set_visible(picture == _localVideo ? _localFrame : picture, FALSE);
-        if (picture == _video) {
-          _remoteHasFrame = false;
-          gtk_widget_set_visible(_avatarBox, TRUE);
-        }
-      }
-      refreshDevices();
-    }, _videoLifetime);
-    track->renderNextFrame() | rpl::on_next([=] {
-      if (weak && _call == weak && !_ending) showFrame(track, picture);
-    }, _videoLifetime);
-  };
-  attachVideo(call->videoIncoming(), _video);
-  attachVideo(call->videoOutgoing(), _localVideo);
-  _idle.set(true);
-  _timer.callEach(1000);
-  _parent->present();
-  present();
 }
 
 void CallView::refresh() {
-  const auto call = _call.get();
-  if (!call) return;
-  const auto incoming = call->isIncomingWaiting();
-  const auto busy = call->state() == Calls::Call::Busy;
-  const auto established = call->state() == Calls::Call::Established;
-  const auto final = call->state() == Calls::Call::Ended || call->state() == Calls::Call::EndedByOtherDevice
-      || call->state() == Calls::Call::Failed;
-  const auto finishing = _ending || final || call->state() == Calls::Call::HangingUp
-      || call->state() == Calls::Call::FailedHangingUp || call->state() == Calls::Call::MigrationHangingUp;
-  if (finishing && !_ending) { _ending = true; stopVideo(); }
-  // An incoming call rings on the loudspeaker: the call's own route (the earpiece) only once answered.
-  if (!incoming && !finishing && !_audioStarted) {
-    _audioStarted = true;
-    _audio.begin(call->isSharingCamera());
+  const auto &call = _backend.snapshot();
+  const auto active = _backend.active();
+  const auto incoming = call.stage == S::Incoming;
+  const auto busy = call.stage == S::Busy;
+  const auto finishing = !active || call.stage == S::HangingUp;
+  if (call.id != _shownCall || (!_shownCall && call.stage == S::Requesting)) {
+    _shownCall = call.id;
+    _cameras.clear();
+    _devicesLoaded = false;
+    _shownError.clear();
+    _ratedCall = 0;
+    stopVideo();
+    ClearBox(_avatarBox);
+    gtk_box_append(GTK_BOX(_avatarBox), MakeUserAvatar(_store, call.user, 128));
+    _parent.present();
+    present();
   }
-  if (incoming && !finishing) _ringer.start();
-  else _ringer.stop();
-  const auto status = CallStatus(call);
-  gtk_label_set_text(GTK_LABEL(_status), U8(status).c_str());
-  gtk_widget_set_visible(_accept, (incoming || busy) && !finishing);
-  gtk_button_set_label(GTK_BUTTON(_accept), U8(busy ? tr::lng_call_redial(tr::now)
-      : tr::lng_call_accept(tr::now)).c_str());
+  if (!call.camera.empty() && !_devicesLoaded) loadCameras();
+  if (call.error.empty()) _shownError.clear();
+  gtk_window_set_title(GTK_WINDOW(_window), Tr("lng_call_box_title").c_str());
+  gtk_widget_set_tooltip_text(_switchCamera, Tr("lng_settings_call_camera").c_str());
+  gtk_label_set_text(GTK_LABEL(_name), name().c_str());
+  const auto text = status();
+  gtk_label_set_text(GTK_LABEL(_status), text.c_str());
+  gtk_label_set_text(GTK_LABEL(_fingerprint), call.emojis.c_str());
+  gtk_widget_set_visible(_fingerprint, !call.emojis.empty() && !finishing);
+  gtk_widget_set_tooltip_text(_fingerprint, Tr("lng_call_fingerprint_tooltip", {{"user", name()}}).c_str());
+  gtk_widget_set_visible(_remoteMuted, call.remoteMuted && !finishing);
+  gtk_label_set_text(GTK_LABEL(_remoteMuted), Tr("lng_call_microphone_off", {{"user", name()}}).c_str());
+  gtk_widget_set_visible(_accept, (incoming || busy) && call.stage != S::HangingUp);
+  gtk_button_set_label(GTK_BUTTON(_accept), Tr(busy ? "lng_call_redial" : "lng_call_accept").c_str());
   gtk_widget_set_sensitive(_mute, !finishing && !busy);
-  gtk_widget_set_sensitive(_camera, established && !finishing);
-  gtk_widget_set_sensitive(_hangup, !finishing);
-  gtk_widget_set_tooltip_text(_hangup, U8(incoming ? tr::lng_call_decline(tr::now)
-      : tr::lng_call_end_call(tr::now)).c_str());
-  gtk_widget_set_tooltip_text(_mute, U8(call->muted() ? tr::lng_call_unmute_audio(tr::now)
-      : tr::lng_call_mute_audio(tr::now)).c_str());
-  gtk_button_set_icon_name(GTK_BUTTON(_mute), call->muted()
+  gtk_widget_set_sensitive(_camera, call.stage == S::Established);
+  gtk_widget_set_sensitive(_switchCamera, !finishing && !call.camera.empty() && _cameras.size() > 1);
+  gtk_widget_set_sensitive(_speaker, !finishing && _audio.outputs().size() > 1);
+  gtk_widget_set_sensitive(_hangup, call.stage != S::HangingUp);
+  gtk_widget_set_tooltip_text(_hangup, Tr(incoming ? "lng_call_decline" : "lng_call_end_call").c_str());
+  gtk_button_set_icon_name(GTK_BUTTON(_mute), call.muted
       ? "microphone-sensitivity-muted-symbolic" : "audio-input-microphone-symbolic");
-  if (call->muted()) gtk_widget_add_css_class(_mute, "active");
-  else gtk_widget_remove_css_class(_mute, "active");
-  gtk_widget_set_tooltip_text(_camera, U8(call->isSharingCamera() ? tr::lng_call_stop_video(tr::now)
-      : tr::lng_call_start_video(tr::now)).c_str());
-  if (call->isSharingCamera()) gtk_widget_add_css_class(_camera, "active");
-  else gtk_widget_remove_css_class(_camera, "active");
-  const auto remoteMuted = call->remoteAudioState() == Calls::Call::RemoteAudioState::Muted;
-  gtk_widget_set_visible(_remoteMuted, remoteMuted && !finishing);
-  if (remoteMuted) gtk_label_set_text(GTK_LABEL(_remoteMuted),
-      U8(tr::lng_call_microphone_off(tr::now, lt_user, call->user()->name())).c_str());
-  gtk_widget_set_visible(_fingerprint, call->isKeyShaForFingerprintReady() && !finishing);
-  if (call->isKeyShaForFingerprintReady() && !finishing) {
-    QString text;
-    for (const auto emoji : Calls::ComputeEmojiFingerprint(call)) text += emoji->text() + ' ';
-    gtk_label_set_text(GTK_LABEL(_fingerprint), U8(text.trimmed()).c_str());
-    gtk_widget_set_tooltip_text(_fingerprint,
-        U8(tr::lng_call_fingerprint_tooltip(tr::now, lt_user, call->user()->name())).c_str());
-  }
-  refreshDevices();
-  updateProximity();
-  updateNotification();
-  updateLockScreen();
-  _parent->setCallStatus(call->user()->name() + u" · "_q + status, !final);
-  if (final) {
-    _timer.cancel();
-    crl::on_main(call, [=] { if (call->ratingInPanel()) call->finishRating(); });
-  }
-}
-
-void CallView::updateNotification() {
-  const auto call = _call.get();
-  if (!call || _ending) {
+  gtk_widget_set_tooltip_text(_mute, Tr(call.muted ? "lng_call_unmute_audio" : "lng_call_mute_audio").c_str());
+  if (call.muted) gtk_widget_add_css_class(_mute, "active"); else gtk_widget_remove_css_class(_mute, "active");
+  if (!call.camera.empty()) gtk_widget_add_css_class(_camera, "active"); else gtk_widget_remove_css_class(_camera, "active");
+  gtk_widget_set_tooltip_text(_camera, Tr(call.camera.empty() ? "lng_call_start_video" : "lng_call_stop_video").c_str());
+  _idle.set(active && !finishing);
+  if (incoming) _ringer.start(); else _ringer.stop();
+  if (!incoming && !finishing && !_audioStarted) { _audioStarted = true; _audio.begin(call.video); }
+  if (finishing) {
+    stopVideo();
+    _proximity.setEnabled(false);
+    if (_audioStarted) { _audioStarted = false; _audio.end(); _output.clear(); _backend.setOutputDevice({}); }
     _notification.close();
-  } else if (call->isIncomingWaiting()) {
-    Ui::PeerUserpicView userpic;
-    _notification.showIncoming(call->user()->name(), tr::lng_call_incoming(tr::now),
-        Window::Notifications::GenerateUserpic(call->user(), userpic));
-  } else {
-    _notification.showOngoing(call->user()->name(), CallStatus(call));
-  }
-}
-
-void CallView::updateLockScreen() {
-  const auto call = _call.get();
-  if (!call || _ending || !_screenLock.locked()) {
     _lockScreen.hide();
-    return;
+  } else if (incoming) {
+    GdkTexture *texture = nullptr;
+    if (auto *avatar = gtk_widget_get_first_child(_avatarBox); ADW_IS_AVATAR(avatar)) {
+      // The small userpic is already a CPU texture. Rendering the widget to a new texture here needlessly
+      // exports a Vulkan dmabuf on phones, even for callers whose notification is already shown.
+      auto *image = adw_avatar_get_custom_image(ADW_AVATAR(avatar));
+      if (GDK_IS_TEXTURE(image)) texture = GDK_TEXTURE(g_object_ref(image));
+    }
+    _notification.showIncoming(name(), Tr("lng_call_incoming"), texture);
+    g_clear_object(&texture);
+  } else _notification.showOngoing(name(), text);
+  updateProximity();
+  updateLockScreen();
+  _parent.setCallStatus(active ? name() + " · " + text : std::string());
+  if (active && !_timer) _timer = g_timeout_add_seconds(1, +[](gpointer data) -> gboolean {
+    static_cast<CallView *>(data)->refresh(); return G_SOURCE_CONTINUE;
+  }, this);
+  if (!active && _timer) { g_source_remove(_timer); _timer = 0; }
+  if (!call.error.empty() && _shownError != call.error) {
+    _shownError = call.error;
+    ShowToast(CallErrorText(call.error, name()));
   }
-  if (!_lockScreen.shown()) _lockScreen.show(call->user(), call->user()->name());
-  const auto incoming = call->isIncomingWaiting();
-  const auto output = _audio.current();
-  _lockScreen.update(incoming ? tr::lng_call_incoming(tr::now) : CallStatus(call), incoming, call->muted(),
-      output && output->kind == OutputKind::Speaker);
-  _lockScreen.setShield(_proximity.near());
+  if (call.needRating) rating();
 }
 
-// Over the lock screen: between the earpiece and the loudspeaker only.
-void CallView::toggleSpeaker() {
-  const auto current = _audio.current();
-  const auto speaker = current && current->kind == OutputKind::Speaker;
-  for (const auto &output : _audio.outputs()) {
-    if (output.kind == (speaker ? OutputKind::Earpiece : OutputKind::Speaker)) {
-      _audio.select(output.id);
-      return;
-    }
-  }
-}
+void CallView::stopVideo() { showFrame({}, false); showFrame({}, true); }
 
-void CallView::showFrame(not_null<Webrtc::VideoTrack *> track, GtkWidget *picture) {
-  if (!_call || _ending || track->state() != Webrtc::VideoState::Active) return;
-  // Hidden Qt panels leave the track in its default full-resolution ARGB format. Reading with
-  // false would turn that conversion off and break the core's software renderer on later frames.
-  const auto data = track->frameWithInfo(true);
-  auto image = data.original;
-  if (data.format == Webrtc::FrameFormat::YUV420 && data.yuv420) {
-    const auto &yuv = *data.yuv420;
-    const unsigned char *planes[3] = {static_cast<const unsigned char *>(yuv.y.data),
-        static_cast<const unsigned char *>(yuv.u.data), static_cast<const unsigned char *>(yuv.v.data)};
-    const int strides[3] = {yuv.y.stride, yuv.u.stride, yuv.v.stride};
-    auto &converter = picture == _localVideo ? _outgoingConverter : _incomingConverter;
-    image = converter.fromYuv420(planes, strides, yuv.size.width(), yuv.size.height());
-  }
-  auto front = false;
-  if (picture == _localVideo) {
-    const auto current = Core::App().settings().cameraDeviceId();
-    for (const auto &camera : Core::App().mediaDevices().devices(Webrtc::DeviceType::Camera)) {
-      if (camera.id == current) front = camera.name.contains(u"front"_q, Qt::CaseInsensitive);
-    }
-  }
-  image = OrientVideoImage(image, data.rotation, front);
-  auto &lastSize = picture == _localVideo ? _localSourceSize : _remoteSourceSize;
-  if (!image.isNull() && lastSize != image.size()) {
-    lastSize = image.size();
-    if (g_getenv("CONTRAIL_DEBUG")) g_message("%s video: %dx%d, rotation=%d",
-        picture == _localVideo ? "Local" : "Remote", image.width(), image.height(), data.rotation);
-  }
-  if (auto *texture = ToTexture(image)) {
+void CallView::showFrame(Calls::Frame frame, bool local) {
+  auto *picture = local ? _localVideo : _video;
+  const auto valid = frame.pixels && frame.width > 0 && frame.height > 0;
+  if (valid) {
+    auto *owner = new std::shared_ptr<const std::vector<std::uint8_t>>(frame.pixels);
+    auto *bytes = g_bytes_new_with_free_func(frame.pixels->data(), frame.pixels->size(),
+        +[](gpointer data) { delete static_cast<std::shared_ptr<const std::vector<std::uint8_t>> *>(data); }, owner);
+    auto *texture = gdk_memory_texture_new(frame.width, frame.height, GDK_MEMORY_B8G8R8A8_PREMULTIPLIED, bytes, frame.stride);
     gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
     g_object_unref(texture);
-    gtk_widget_set_visible(picture == _localVideo ? _localFrame : picture, TRUE);
-    if (picture == _video) { _remoteHasFrame = true; gtk_widget_set_visible(_avatarBox, FALSE); }
-  }
-  track->markFrameShown();
+    g_bytes_unref(bytes);
+  } else gtk_picture_set_paintable(GTK_PICTURE(picture), nullptr);
+  (local ? _localWidth : _remoteWidth) = valid ? frame.width : 0;
+  gtk_widget_set_visible(local ? _localFrame : picture, valid);
+  if (!local) gtk_widget_set_visible(_avatarBox, !valid);
 }
 
-void CallView::refreshDevices() {
-  const auto call = _call.get();
-  const auto cameras = CallCameras();
-  const auto count = std::count_if(cameras.begin(), cameras.end(), [](const auto &camera) { return !camera.inactive; });
-  gtk_widget_set_sensitive(_switchCamera, call && !_ending && call->isSharingCamera() && count > 1);
-  gtk_widget_set_sensitive(_speaker, call && !_ending && _audio.outputs().size() > 1);
+void CallView::loadCameras() {
+  _cameras = Cameras();
+  _devicesLoaded = true;
 }
 
 void CallView::switchCamera() {
-  const auto call = _call.get();
-  if (!call || _ending || !call->isSharingCamera()) return;
-  const auto cameras = CallCameras();
-  const auto current = Core::App().settings().cameraDeviceId();
-  const auto from = std::find_if(cameras.begin(), cameras.end(), [&](const auto &camera) { return camera.id == current; });
-  const auto front = from != cameras.end() && from->name.contains(u"front"_q, Qt::CaseInsensitive);
-  const auto target = std::find_if(cameras.begin(), cameras.end(), [&](const auto &camera) {
-    return !camera.inactive && (front
-        ? camera.name.contains(u"back"_q, Qt::CaseInsensitive) || camera.name.contains(u"rear"_q, Qt::CaseInsensitive)
-        : camera.name.contains(u"front"_q, Qt::CaseInsensitive));
-  });
-  QString chosen;
-  if (target != cameras.end() && target->id != current) chosen = target->id;
-  else {
-    auto i = from == cameras.end() ? 0 : int(std::distance(cameras.begin(), from)) + 1;
-    for (auto tried = 0; tried < int(cameras.size()); ++tried, ++i) {
-      const auto &camera = cameras[i % cameras.size()];
-      if (!camera.inactive && camera.id != current) { chosen = camera.id; break; }
-    }
-  }
-  if (!chosen.isEmpty()) {
-    Core::App().settings().setCameraDeviceId(chosen);
-    Core::App().saveSettingsDelayed();
-  }
+  const auto &cameras = _cameras;
+  const auto &current = _backend.snapshot().camera;
+  if (cameras.size() < 2 || current.empty()) return;
+  auto from = std::find_if(cameras.begin(), cameras.end(), [&](const auto &camera) { return camera.id == current; });
+  if (from == cameras.end() || ++from == cameras.end()) from = cameras.begin();
+  _backend.setCamera(from->id);
 }
 
 void CallView::updateAudioRoute() {
   if (!_speaker) return;
   const auto output = _audio.current();
   gtk_button_set_icon_name(GTK_BUTTON(_speaker), OutputIcon(output ? output->kind : OutputKind::Speaker));
-  gtk_widget_set_tooltip_text(_speaker, U8(tr::lng_settings_call_section_output(tr::now)
-      + (output ? u'\n' + OutputName(*output) : QString())).c_str());
+  gtk_widget_set_tooltip_text(_speaker, (Tr("lng_settings_call_section_output")
+      + (output ? "\n" + OutputName(*output) : std::string())).c_str());
   if (output && output->kind == OutputKind::Speaker) gtk_widget_add_css_class(_speaker, "active");
   else gtk_widget_remove_css_class(_speaker, "active");
-  refreshDevices();
-  if (_call && output && output->device != _playbackOutput) {
-    // The core plays the call on the chosen device; a phone port is switched on the device itself.
-    auto &devices = Core::App().mediaDevices();
-    devices.validateDevices(Webrtc::DeviceType::Playback);
-    QString id;
-    for (const auto &device : devices.devices(Webrtc::DeviceType::Playback)) {
-      if (!device.inactive && (device.id == output->device || device.name == output->device)) {
-        id = device.id;
-        break;
-      }
-    }
-    auto &settings = Core::App().settings();
-    if (settings.callPlaybackDeviceId() != id) settings.setCallPlaybackDeviceId(id);
-    if (!id.isEmpty()) _playbackOutput = output->device;
-    if (g_getenv("CONTRAIL_DEBUG")) {
-      g_message("Call audio: %s (%d outputs), playback device \"%s\"", U8(OutputName(*output)).c_str(),
-          int(_audio.outputs().size()), U8(id).c_str());
-    }
+  if (_backend.active() && output && output->device != _output) {
+    _output = output->device;
+    _backend.setOutputDevice(_output);
   }
+  gtk_widget_set_sensitive(_speaker, _backend.active() && _audio.outputs().size() > 1);
   updateProximity();
   updateLockScreen();
 }
@@ -595,19 +365,19 @@ void CallView::chooseAudioOutput() {
   const auto &outputs = _audio.outputs();
   const auto current = _audio.current();
   if (outputs.size() < 2) return;
-  // Only the earpiece and the loudspeaker: the button switches between them, as in the phone apps.
-  if (outputs.size() == 2 && current && !outputs[0].port.isEmpty() && !outputs[1].port.isEmpty()) {
+  if (outputs.size() == 2 && current && !outputs[0].port.empty() && !outputs[1].port.empty()) {
     _audio.select(outputs[0].id == current->id ? outputs[1].id : outputs[0].id);
     return;
   }
   auto *popover = gtk_popover_new();
   auto *list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  const auto token = _lifetime.token();
   for (const auto &output : outputs) {
     auto *row = gtk_button_new();
     gtk_widget_add_css_class(row, "flat");
     auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     gtk_box_append(GTK_BOX(box), gtk_image_new_from_icon_name(OutputIcon(output.kind)));
-    auto *label = gtk_label_new(U8(OutputName(output)).c_str());
+    auto *label = gtk_label_new(OutputName(output).c_str());
     gtk_label_set_xalign(GTK_LABEL(label), 0);
     gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
     gtk_widget_set_hexpand(label, TRUE);
@@ -616,10 +386,9 @@ void CallView::chooseAudioOutput() {
     gtk_widget_set_opacity(check, current && current->id == output.id ? 1. : 0.);
     gtk_box_append(GTK_BOX(box), check);
     gtk_button_set_child(GTK_BUTTON(row), box);
-    const auto id = output.id;
-    OnClicked(row, [=] {
+    OnClicked(row, [this, token, popover, id = output.id] {
       gtk_popover_popdown(GTK_POPOVER(popover));
-      if (_call && !_ending) _audio.select(id);
+      if (!token.expired() && _backend.active()) _audio.select(id);
     });
     gtk_box_append(GTK_BOX(list), row);
   }
@@ -629,14 +398,21 @@ void CallView::chooseAudioOutput() {
   gtk_popover_popup(GTK_POPOVER(popover));
 }
 
+void CallView::toggleSpeaker() {
+  const auto current = _audio.current();
+  const auto speaker = current && current->kind == OutputKind::Speaker;
+  for (const auto &output : _audio.outputs()) if (output.kind == (speaker ? OutputKind::Earpiece : OutputKind::Speaker)) {
+    _audio.select(output.id); return;
+  }
+}
+
 void CallView::updateProximity() {
-  const auto call = _call.get();
+  const auto &call = _backend.snapshot();
   const auto output = _audio.current();
-  _proximity.setEnabled(call && !_ending && !call->isIncomingWaiting() && call->state() != Calls::Call::Busy
+  _proximity.setEnabled(_backend.active() && call.stage != S::Incoming && call.stage != S::HangingUp
       && output && output->kind == OutputKind::Earpiece);
 }
 
-// As Phosh does for GNOME Calls: the whole screen black, the display itself stays on.
 void CallView::setProximityShield(bool near) {
   _lockScreen.setShield(near);
   gtk_widget_set_visible(_shield, near);
@@ -650,78 +426,75 @@ void CallView::setProximityShield(bool near) {
   }
 }
 
-void CallView::preview(bool incoming, bool video, const QString &name) {
-  if (_call) return;
-  _ending = false;
-  stopVideo();
-  ClearBox(_avatarBox);
-  gtk_box_append(GTK_BOX(_avatarBox), adw_avatar_new(112, U8(name).c_str(), TRUE));
-  gtk_label_set_text(GTK_LABEL(_name), U8(name).c_str());
-  gtk_label_set_text(GTK_LABEL(_status), U8(incoming ? tr::lng_call_status_incoming(tr::now)
-      : tr::lng_call_status_connecting(tr::now)).c_str());
-  gtk_widget_set_visible(_remoteMuted, FALSE);
-  gtk_widget_set_visible(_fingerprint, FALSE);
-  gtk_widget_set_visible(_accept, incoming);
-  gtk_button_set_label(GTK_BUTTON(_accept), U8(tr::lng_call_accept(tr::now)).c_str());
-  // Their handlers do nothing without a call; the others act on the devices.
-  for (auto *button : {_accept, _mute, _camera}) gtk_widget_set_sensitive(button, TRUE);
-  for (auto *button : {_switchCamera, _speaker}) gtk_widget_set_sensitive(button, FALSE);
-  gtk_widget_set_sensitive(_hangup, TRUE);
-  gtk_widget_set_tooltip_text(_hangup, U8(tr::lng_close(tr::now)).c_str());
-  if (video) {
-    auto image = QImage(720, 1280, QImage::Format_RGB32);
-    image.fill(QColor(28, 53, 65));
-    auto painter = QPainter(&image);
-    for (auto y = 0; y < 1280; y += 80) {
-      for (auto x = 0; x < 720; x += 80) {
-        if ((x / 80 + y / 80) % 2) painter.fillRect(x, y, 80, 80, QColor(47, 91, 106));
-      }
-    }
-    painter.end();
-    if (auto *texture = ToTexture(image)) {
-      gtk_picture_set_paintable(GTK_PICTURE(_video), GDK_PAINTABLE(texture));
-      gtk_picture_set_paintable(GTK_PICTURE(_localVideo), GDK_PAINTABLE(texture));
-      g_object_unref(texture);
-    }
-    gtk_widget_set_visible(_video, TRUE);
-    gtk_widget_set_visible(_localFrame, TRUE);
-    gtk_widget_set_visible(_avatarBox, FALSE);
+void CallView::updateLockScreen() {
+  const auto &call = _backend.snapshot();
+  if (!_backend.active() || call.stage == S::HangingUp || !(_screenLock.locked() || _debugLocked)) {
+    _lockScreen.hide(); return;
   }
-  if (incoming) {
-    _notification.showIncoming(name, tr::lng_call_incoming(tr::now), QImage());
-    _ringer.start();
-    if (_screenLock.locked()) {
-      _lockScreen.show(nullptr, name);
-      _lockScreen.update(tr::lng_call_incoming(tr::now), true, false, false);
-    }
-  }
-  gtk_window_present(GTK_WINDOW(_window));
+  if (!_lockScreen.shown()) _lockScreen.show(_store, call.user, name());
+  const auto output = _audio.current();
+  _lockScreen.update(status(), call.stage == S::Incoming, call.muted, output && output->kind == OutputKind::Speaker);
+  _lockScreen.setShield(_proximity.near());
 }
 
-void CallView::debugLocalCall(const QString &action) {
-  auto &calls = Core::App().calls();
-  if (action == u"end"_q || action == u"camera"_q || action == u"mute"_q || action == u"audio"_q
-      || action == u"near"_q || action == u"far"_q) {
-    const auto call = calls.currentCall();
-    if (call && call->state() == Calls::Call::WaitingUserConfirmation && !call->id()) {
-      if (action == u"camera"_q) switchCamera();
-      else if (action == u"audio"_q) chooseAudioOutput();
-      else if (action == u"near"_q || action == u"far"_q) _proximity.debugSetNear(action == u"near"_q);
-      else if (action == u"mute"_q) {
-        g_signal_emit_by_name(_mute, "clicked");
-        g_message("Local call regression: microphone %s", call->muted() ? "muted" : "unmuted");
-      }
-      else {
-        hangup();
-        g_message("Local call regression: ended unconfirmed call (no network call)");
-      }
+void CallView::rating() {
+  const auto &call = _backend.snapshot();
+  if (_ratedCall == call.id) return;
+  _ratedCall = call.id;
+  auto *dialog = adw_alert_dialog_new(Tr("lng_call_rate_label").c_str(), nullptr);
+  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+  auto *score = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 1, 5, 1);
+  gtk_range_set_value(GTK_RANGE(score), 5);
+  gtk_scale_set_digits(GTK_SCALE(score), 0);
+  gtk_scale_set_draw_value(GTK_SCALE(score), TRUE);
+  auto *comment = gtk_entry_new();
+  gtk_entry_set_placeholder_text(GTK_ENTRY(comment), Tr("lng_call_rate_comment").c_str());
+  gtk_box_append(GTK_BOX(box), score);
+  gtk_box_append(GTK_BOX(box), comment);
+  adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), box);
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(),
+      "send", Tr("lng_send_button").c_str(), nullptr);
+  const auto token = _lifetime.token();
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [this, token, score, comment, id = call.id]
+      (AdwAlertDialog *, const char *response) {
+    if (!token.expired() && _backend.snapshot().id == id && g_strcmp0(response, "send") == 0) {
+      _backend.rate(int(gtk_range_get_value(GTK_RANGE(score))), gtk_editable_get_text(GTK_EDITABLE(comment)));
     }
-  } else if (!calls.currentCall() && _parent->session()) {
-    // The core only starts signalling after confirmation. Exercise its real Qt panel and GTK
-    // teardown with our own user, without confirming or contacting another account.
-    choosePhoneCamera();
-    calls.startOutgoingCall(_parent->session()->user(), {.video = action == u"video"_q, .isConfirmed = false});
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window);
+}
+
+void CallView::debug(const std::string &action, const std::string &argument) {
+  if (action == "start") start(argument.empty() ? 1 : std::atoll(argument.c_str()));
+  else if (action == "video") start(argument.empty() ? 1 : std::atoll(argument.c_str()), true);
+  else if (action == "accept") _backend.accept();
+  else if (action == "hangup") _backend.hangup();
+  else if (action == "mute") _backend.setMuted(!_backend.snapshot().muted);
+  else if (action == "camera") {
+    if (_backend.snapshot().camera.empty()) loadCameras();
+    const auto &cameras = _cameras;
+    if (!cameras.empty()) _backend.setCamera(_backend.snapshot().camera.empty() ? cameras.front().id : std::string());
+  } else if (action == "switch-camera") switchCamera();
+  else if (action == "speaker") toggleSpeaker();
+  else if (action == "route") _audio.select(argument);
+  else if (action == "near") setProximityShield(argument == "1");
+  else if (action == "lock") { _debugLocked = argument == "1"; updateLockScreen(); }
+  else if (action == "hide") gtk_widget_set_visible(_window, FALSE);
+  else if (action == "present") present();
+  else if (action == "devices") {
+    for (const auto &camera : Calls::Cameras()) g_message("call-camera: id=%s name=%s", camera.id.c_str(), camera.name.c_str());
+    for (const auto &output : _audio.outputs()) g_message("call-output: id=%s kind=%d device=%s", output.id.c_str(),
+        int(output.kind), output.device.c_str());
+  } else if (action == "rate") _backend.rate(std::atoi(argument.c_str()), "Scenario feedback");
+  else if (g_getenv("CONTRAIL_SCENARIO") && action != "state") {
+    _store.client().send(Td::api::make_object<Td::api::getOption>("contrail_call_" + action));
   }
+  const auto &call = _backend.snapshot();
+  g_message("call-state: id=%d user=%lld stage=%d active=%d incoming=%d muted=%d camera=%s remote=%d local=%d "
+      "visible=%d shield=%d locked=%d notification=%u ringing=%u emojis=\"%s\" status=\"%s\" sound=%s", call.id, (long long)call.user,
+      int(call.stage), _backend.active(), call.stage == S::Incoming, call.muted, call.camera.c_str(),
+      _remoteWidth, _localWidth, gtk_widget_get_visible(_window), gtk_widget_get_visible(_shield), _lockScreen.shown(), _notification.id(), _ringer.eventId(),
+      call.emojis.c_str(), status().c_str(), _backend.soundStats().c_str());
 }
 
 } // namespace Contrail

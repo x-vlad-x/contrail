@@ -16,6 +16,7 @@ namespace Contrail {
 
 class AudioPlayer;
 class VoiceRecorder;
+class CallView;
 class ChatList;
 class ChatView;
 class LoginView;
@@ -99,6 +100,10 @@ class MainWindow final {
   [[nodiscard]] NetworkWatch *networkWatch() const { return _network.get(); }
   [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
   void releaseMemory(MemoryLevel level);
+  // Section calls: the call survives navigation between chats.
+  void startCall(Td::UserId user, bool video = false);
+  void setCallStatus(const std::string &text);
+  void debugCall(const std::string &action, const std::string &argument);
 
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
@@ -133,6 +138,8 @@ class MainWindow final {
   std::unique_ptr<Td::Store> _store;
   std::unique_ptr<AudioPlayer> _player;  // Goes before the store it downloads with.
   std::unique_ptr<VoiceRecorder> _recorder;
+  std::unique_ptr<CallView> _call;
+  GtkWidget *_callBar = nullptr;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;

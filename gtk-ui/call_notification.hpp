@@ -1,9 +1,10 @@
 #pragma once
 
 #include <gio/gio.h>
-#include <QtCore/QString>
-#include <QtGui/QImage>
+#include <gdk/gdk.h>
+#include <string>
 #include <functional>
+#include <memory>
 
 namespace Contrail {
 
@@ -24,21 +25,22 @@ public:
   CallNotification(const CallNotification &) = delete;
   CallNotification &operator=(const CallNotification &) = delete;
 
-  void showIncoming(const QString &name, const QString &status, const QImage &userpic);
+  void showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic);
   // Only takes the place of the incoming call's notification, a call started here gets none.
-  void showOngoing(const QString &name, const QString &status);
+  void showOngoing(const std::string &name, const std::string &status);
   void close();
+  [[nodiscard]] guint32 id() const { return _id; }
 
 private:
   enum class State { None, Incoming, Ongoing };
-  void send(const QString &name, const QString &status);
+  void send(const std::string &name, const std::string &status);
   void sent(guint32 id);
   void invoked(guint32 id, const char *action);
   void closed(guint32 id);
 
   Callbacks _callbacks;
   GDBusConnection *_bus = nullptr;
-  GCancellable *_cancellable = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
   guint _actionSignal = 0;
   guint _closedSignal = 0;
   State _state = State::None;
@@ -47,10 +49,10 @@ private:
   bool _inFlight = false;
   bool _resend = false;
   bool _dismissed = false;
-  QString _name;
-  QString _status;
-  QString _shown;
-  QImage _userpic;
+  std::string _name;
+  std::string _status;
+  std::string _shown;
+  GdkTexture *_userpic = nullptr;
 };
 
 } // namespace Contrail

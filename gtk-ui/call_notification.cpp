@@ -2,7 +2,7 @@
 
 #include "app.hpp"
 
-#include "lang/lang_keys.h"
+#include "td/strings.hpp"
 
 namespace Contrail {
 namespace {
@@ -16,18 +16,23 @@ constexpr auto kAccept = "call-accept";
 constexpr auto kDecline = "call-decline";
 constexpr auto kHangup = "call-hangup";
 
-GVariant *ImageData(const QImage &image) {
-  const auto rgba = image.convertToFormat(QImage::Format_RGBA8888);
-  auto *bytes = g_bytes_new(rgba.constBits(), rgba.sizeInBytes());
-  auto *data = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, TRUE);
+GVariant *ImageData(GdkTexture *image) {
+  auto *downloader = gdk_texture_downloader_new(image);
+  gdk_texture_downloader_set_format(downloader, GDK_MEMORY_R8G8B8A8);
+  gsize stride = 0;
+  auto *bytes = gdk_texture_downloader_download_bytes(downloader, &stride);
+  auto *data = g_variant_new_from_bytes(G_VARIANT_TYPE("ay"), bytes, TRUE);
   g_bytes_unref(bytes);
-  return g_variant_new("(iiibii@ay)", rgba.width(), rgba.height(), int(rgba.bytesPerLine()), TRUE, 8, 4, data);
+  auto *result = g_variant_new("(iiibii@ay)", gdk_texture_get_width(image), gdk_texture_get_height(image),
+      int(stride), TRUE, 8, 4, data);
+  gdk_texture_downloader_free(downloader);
+  return result;
 }
 
 } // namespace
 
 CallNotification::CallNotification(Callbacks callbacks)
-    : _callbacks(std::move(callbacks)), _cancellable(g_cancellable_new()) {
+    : _callbacks(std::move(callbacks)) {
   _bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
   if (!_bus) return;
   _actionSignal = g_dbus_connection_signal_subscribe(_bus, nullptr, kInterface, "ActionInvoked", kPath, nullptr,
@@ -49,23 +54,23 @@ CallNotification::CallNotification(Callbacks callbacks)
 
 CallNotification::~CallNotification() {
   close();
-  g_cancellable_cancel(_cancellable);
+  _alive.reset();
   if (_bus) {
     g_dbus_connection_signal_unsubscribe(_bus, _actionSignal);
     g_dbus_connection_signal_unsubscribe(_bus, _closedSignal);
     g_object_unref(_bus);
   }
-  g_object_unref(_cancellable);
 }
 
-void CallNotification::showIncoming(const QString &name, const QString &status, const QImage &userpic) {
+void CallNotification::showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic) {
   if (_dismissed) return;
   _state = State::Incoming;
-  _userpic = userpic;
+  if (_userpic != userpic) _shown.clear();
+  g_set_object(&_userpic, userpic);
   send(name, status);
 }
 
-void CallNotification::showOngoing(const QString &name, const QString &status) {
+void CallNotification::showOngoing(const std::string &name, const std::string &status) {
   if (_dismissed || _state == State::None) return;
   _state = State::Ongoing;
   send(name, status);
@@ -75,7 +80,7 @@ void CallNotification::close() {
   _state = State::None;
   _dismissed = false;
   _shown.clear();
-  _userpic = QImage();
+  g_clear_object(&_userpic);
   // A notification still being shown is closed once its id is known.
   if (_inFlight) return;
   if (_bus && _id) {
@@ -85,10 +90,10 @@ void CallNotification::close() {
   _id = 0;
 }
 
-void CallNotification::send(const QString &name, const QString &status) {
+void CallNotification::send(const std::string &name, const std::string &status) {
   if (!_bus) return;
   const auto incoming = _state == State::Incoming;
-  const auto shown = QString::number(int(_state)) + u'\n' + name + u'\n' + status;
+  const auto shown = std::to_string(int(_state)) + '\n' + name + '\n' + status;
   if (shown == _shown) return;
   _shown = shown;
   _name = name;
@@ -105,15 +110,15 @@ void CallNotification::send(const QString &name, const QString &status) {
   // A tap on the notification itself brings up the call window (after unlocking).
   g_variant_builder_add(actions, "s", "default");
   g_variant_builder_add(actions, "s", "");
-  const auto action = [&](const char *id, const QString &label) {
+  const auto action = [&](const char *id, const std::string &label) {
     g_variant_builder_add(actions, "s", id);
-    g_variant_builder_add(actions, "s", label.toUtf8().constData());
+    g_variant_builder_add(actions, "s", label.c_str());
   };
   if (incoming) {
-    action(kDecline, tr::lng_call_decline(tr::now));
-    action(kAccept, tr::lng_call_accept(tr::now));
+    action(kDecline, Tr("lng_call_decline"));
+    action(kAccept, Tr("lng_call_accept"));
   } else {
-    action(kHangup, tr::lng_call_end_call(tr::now));
+    action(kHangup, Tr("lng_call_end_call"));
   }
   auto *hints = g_variant_builder_new(G_VARIANT_TYPE_VARDICT);
   g_variant_builder_add(hints, "{sv}", "desktop-entry", g_variant_new_string(kAppId));
@@ -125,30 +130,25 @@ void CallNotification::send(const QString &name, const QString &status) {
   // The call rings by itself (Ringer): no sound or vibration of the notification's own.
   // (Not suppress-sound: Phosh takes it for vibration.)
   g_variant_builder_add(hints, "{sv}", "x-phosh-fb-profile", g_variant_new_string("none"));
-  if (!_userpic.isNull()) {
+  if (_userpic != nullptr) {
     g_variant_builder_add(hints, "{sv}", "image-data", ImageData(_userpic));
   }
 
+  using Pending = std::pair<CallNotification *, std::weak_ptr<char>>;
+  // Notify can already have reached the shell when a call ends. Keep its reply instead of cancelling it:
+  // otherwise a notification can remain on the lock screen with no owner left to close it.
   g_dbus_connection_call(_bus, kService, kPath, kInterface, "Notify",
-      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.toUtf8().constData(),
-          status.toUtf8().constData(), actions, hints, 0),
-      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
+      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.c_str(), status.c_str(), actions, hints, 0),
+      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
-        const auto self = static_cast<CallNotification *>(data);
-        GError *error = nullptr;
-        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
-        if (!reply) {
-          const auto cancelled = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
-          g_error_free(error);
-          // Cancelled: the object is gone.
-          if (!cancelled) self->sent(0);
-          return;
-        }
+        const auto pending = std::unique_ptr<Pending>(static_cast<Pending *>(data));
+        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, nullptr);
         guint32 id = 0;
-        g_variant_get(reply, "(u)", &id);
-        g_variant_unref(reply);
-        self->sent(id);
-      }, this);
+        if (reply) { g_variant_get(reply, "(u)", &id); g_variant_unref(reply); }
+        if (!pending->second.expired()) pending->first->sent(id);
+        else if (id) g_dbus_connection_call(G_DBUS_CONNECTION(source), kService, kPath, kInterface,
+            "CloseNotification", g_variant_new("(u)", id), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+      }, new Pending(this, _alive));
   g_variant_builder_unref(actions);
   g_variant_builder_unref(hints);
 }

@@ -49,6 +49,7 @@ Terminal=false
 StartupNotify=true
 Categories=Network;InstantMessaging;
 X-Purism-FormFactor=Workstation;Mobile;
+X-Phosh-Lockscreen-Actions=call-;
 DESKTOP
       update-desktop-database ~/.local/share/applications' ;;
   td-run)
