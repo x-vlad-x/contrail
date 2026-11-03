@@ -1,8 +1,9 @@
 #pragma once
 
 #include "app.hpp"
+#include "td/store.hpp"
 
-class PeerData;
+
 
 namespace Contrail {
 
@@ -27,8 +28,8 @@ public:
   [[nodiscard]] static bool Supported();
 
   // Without a peer (a preview), initials of the name.
-  void show(PeerData *peer, const QString &name);
-  void update(const QString &status, bool incoming, bool muted, bool speaker);
+  void show(Td::Store &store, Td::UserId user, const std::string &name);
+  void update(const std::string &status, bool incoming, bool muted, bool speaker);
   // Black while the phone is held to the ear.
   void setShield(bool near);
   void hide();

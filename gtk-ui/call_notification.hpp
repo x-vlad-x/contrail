@@ -1,8 +1,8 @@
 #pragma once
 
 #include <gio/gio.h>
-#include <QtCore/QString>
-#include <QtGui/QImage>
+#include <gdk/gdk.h>
+#include <string>
 #include <functional>
 
 namespace Contrail {
@@ -24,14 +24,14 @@ public:
   CallNotification(const CallNotification &) = delete;
   CallNotification &operator=(const CallNotification &) = delete;
 
-  void showIncoming(const QString &name, const QString &status, const QImage &userpic);
+  void showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic);
   // Only takes the place of the incoming call's notification, a call started here gets none.
-  void showOngoing(const QString &name, const QString &status);
+  void showOngoing(const std::string &name, const std::string &status);
   void close();
 
 private:
   enum class State { None, Incoming, Ongoing };
-  void send(const QString &name, const QString &status);
+  void send(const std::string &name, const std::string &status);
   void sent(guint32 id);
   void invoked(guint32 id, const char *action);
   void closed(guint32 id);
@@ -47,10 +47,10 @@ private:
   bool _inFlight = false;
   bool _resend = false;
   bool _dismissed = false;
-  QString _name;
-  QString _status;
-  QString _shown;
-  QImage _userpic;
+  std::string _name;
+  std::string _status;
+  std::string _shown;
+  GdkTexture *_userpic = nullptr;
 };
 
 } // namespace Contrail

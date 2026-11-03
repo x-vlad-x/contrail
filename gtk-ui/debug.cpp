@@ -22,6 +22,9 @@
 //   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
 //   edit-last (the up arrow in the empty field)
+//   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
+//   call-state|hide|present|speaker | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
+//   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -108,7 +111,9 @@ void Run(MainWindow &window, const std::string &command) {
   const auto space = command.find(' ');
   const auto name = command.substr(0, space);
   const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
-  if (name == "mem") {
+  if (name.starts_with("call-")) {
+    window.debugCall(name.substr(5), rest);
+  } else if (name == "mem") {
     // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
     // is the main arena's only.
     const auto info = mallinfo2();

@@ -2,7 +2,7 @@
 
 #include "app.hpp"
 
-#include "lang/lang_keys.h"
+#include "td/strings.hpp"
 
 namespace Contrail {
 namespace {
@@ -16,12 +16,17 @@ constexpr auto kAccept = "call-accept";
 constexpr auto kDecline = "call-decline";
 constexpr auto kHangup = "call-hangup";
 
-GVariant *ImageData(const QImage &image) {
-  const auto rgba = image.convertToFormat(QImage::Format_RGBA8888);
-  auto *bytes = g_bytes_new(rgba.constBits(), rgba.sizeInBytes());
-  auto *data = g_variant_new_from_bytes(G_VARIANT_TYPE_BYTESTRING, bytes, TRUE);
+GVariant *ImageData(GdkTexture *image) {
+  auto *downloader = gdk_texture_downloader_new(image);
+  gdk_texture_downloader_set_format(downloader, GDK_MEMORY_R8G8B8A8);
+  gsize stride = 0;
+  auto *bytes = gdk_texture_downloader_download_bytes(downloader, &stride);
+  auto *data = g_variant_new_from_bytes(G_VARIANT_TYPE("ay"), bytes, TRUE);
   g_bytes_unref(bytes);
-  return g_variant_new("(iiibii@ay)", rgba.width(), rgba.height(), int(rgba.bytesPerLine()), TRUE, 8, 4, data);
+  auto *result = g_variant_new("(iiibii@ay)", gdk_texture_get_width(image), gdk_texture_get_height(image),
+      int(stride), TRUE, 8, 4, data);
+  gdk_texture_downloader_free(downloader);
+  return result;
 }
 
 } // namespace
@@ -58,14 +63,14 @@ CallNotification::~CallNotification() {
   g_object_unref(_cancellable);
 }
 
-void CallNotification::showIncoming(const QString &name, const QString &status, const QImage &userpic) {
+void CallNotification::showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic) {
   if (_dismissed) return;
   _state = State::Incoming;
-  _userpic = userpic;
+  g_set_object(&_userpic, userpic);
   send(name, status);
 }
 
-void CallNotification::showOngoing(const QString &name, const QString &status) {
+void CallNotification::showOngoing(const std::string &name, const std::string &status) {
   if (_dismissed || _state == State::None) return;
   _state = State::Ongoing;
   send(name, status);
@@ -75,7 +80,7 @@ void CallNotification::close() {
   _state = State::None;
   _dismissed = false;
   _shown.clear();
-  _userpic = QImage();
+  g_clear_object(&_userpic);
   // A notification still being shown is closed once its id is known.
   if (_inFlight) return;
   if (_bus && _id) {
@@ -85,10 +90,10 @@ void CallNotification::close() {
   _id = 0;
 }
 
-void CallNotification::send(const QString &name, const QString &status) {
+void CallNotification::send(const std::string &name, const std::string &status) {
   if (!_bus) return;
   const auto incoming = _state == State::Incoming;
-  const auto shown = QString::number(int(_state)) + u'\n' + name + u'\n' + status;
+  const auto shown = std::to_string(int(_state)) + '\n' + name + '\n' + status;
   if (shown == _shown) return;
   _shown = shown;
   _name = name;
@@ -105,15 +110,15 @@ void CallNotification::send(const QString &name, const QString &status) {
   // A tap on the notification itself brings up the call window (after unlocking).
   g_variant_builder_add(actions, "s", "default");
   g_variant_builder_add(actions, "s", "");
-  const auto action = [&](const char *id, const QString &label) {
+  const auto action = [&](const char *id, const std::string &label) {
     g_variant_builder_add(actions, "s", id);
-    g_variant_builder_add(actions, "s", label.toUtf8().constData());
+    g_variant_builder_add(actions, "s", label.c_str());
   };
   if (incoming) {
-    action(kDecline, tr::lng_call_decline(tr::now));
-    action(kAccept, tr::lng_call_accept(tr::now));
+    action(kDecline, Tr("lng_call_decline"));
+    action(kAccept, Tr("lng_call_accept"));
   } else {
-    action(kHangup, tr::lng_call_end_call(tr::now));
+    action(kHangup, Tr("lng_call_end_call"));
   }
   auto *hints = g_variant_builder_new(G_VARIANT_TYPE_VARDICT);
   g_variant_builder_add(hints, "{sv}", "desktop-entry", g_variant_new_string(kAppId));
@@ -125,13 +130,13 @@ void CallNotification::send(const QString &name, const QString &status) {
   // The call rings by itself (Ringer): no sound or vibration of the notification's own.
   // (Not suppress-sound: Phosh takes it for vibration.)
   g_variant_builder_add(hints, "{sv}", "x-phosh-fb-profile", g_variant_new_string("none"));
-  if (!_userpic.isNull()) {
+  if (_userpic != nullptr) {
     g_variant_builder_add(hints, "{sv}", "image-data", ImageData(_userpic));
   }
 
   g_dbus_connection_call(_bus, kService, kPath, kInterface, "Notify",
-      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.toUtf8().constData(),
-          status.toUtf8().constData(), actions, hints, 0),
+      g_variant_new("(susssasa{sv}i)", "Contrail", _id, kAppId, name.c_str(),
+          status.c_str(), actions, hints, 0),
       G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
         const auto self = static_cast<CallNotification *>(data);

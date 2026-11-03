@@ -1,6 +1,7 @@
 #include "main_window.hpp"
 
 #include "scroll_helpers.hpp"
+#include "calls.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
@@ -56,7 +57,15 @@ MainWindow::MainWindow(GtkApplication *application) {
   _toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
   _stack = GTK_STACK(gtk_stack_new());
   gtk_stack_set_transition_type(_stack, GTK_STACK_TRANSITION_TYPE_CROSSFADE);
-  adw_toast_overlay_set_child(_toasts, GTK_WIDGET(_stack));
+  // Section calls: a persistent button above all pages returns to the call.
+  auto *pages = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  _callBar = adw_banner_new("");
+  adw_banner_set_use_markup(ADW_BANNER(_callBar), FALSE);
+  Connect<void(AdwBanner *)>(_callBar, "button-clicked", [this](AdwBanner *) { if (_call) _call->present(); });
+  gtk_box_append(GTK_BOX(pages), _callBar);
+  gtk_widget_set_vexpand(GTK_WIDGET(_stack), TRUE);
+  gtk_box_append(GTK_BOX(pages), GTK_WIDGET(_stack));
+  adw_toast_overlay_set_child(_toasts, pages);
   adw_application_window_set_content(ADW_APPLICATION_WINDOW(_window), GTK_WIDGET(_toasts));
   gtk_stack_add_named(_stack, MakeLoadingPage(), "loading");
   buildChats();
@@ -123,6 +132,8 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::clearChats() {
+  _call = nullptr;
+  setCallStatus({});
   dropForwardPicker();
   _forwardDrafts.clear();
   if (_chat) adw_navigation_page_set_child(_contentPage, _placeholder);
@@ -166,6 +177,7 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
   _store = std::make_unique<Td::Store>(session.client(), [this](const api::message &message) {
     return Td::MessagePreview(message, *_store);
   });
+  _call = std::make_unique<CallView>(*this, *_store);
   _language = language;
   _stringsAsked = false;
   _stringsReady = false;
@@ -477,3 +489,16 @@ void MainWindow::debugLogin(const std::string &step, const std::string &value) {
 }
 
 }  // namespace Contrail
+
+// Section calls: shared window hooks kept together for the TDLib migration.
+namespace Contrail {
+void MainWindow::startCall(Td::UserId user, bool video) { if (_call) _call->start(user, video); }
+void MainWindow::setCallStatus(const std::string &text) {
+  adw_banner_set_button_label(ADW_BANNER(_callBar), Tr("lng_call_box_title").c_str());
+  adw_banner_set_title(ADW_BANNER(_callBar), text.c_str());
+  adw_banner_set_revealed(ADW_BANNER(_callBar), !text.empty());
+}
+void MainWindow::debugCall(const std::string &action, const std::string &argument) {
+  if (_call) _call->debug(action, argument);
+}
+} // namespace Contrail

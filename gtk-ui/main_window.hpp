@@ -12,6 +12,7 @@
 
 namespace Contrail {
 
+class CallView;
 class ChatList;
 class ChatView;
 class LoginView;
@@ -62,6 +63,11 @@ class MainWindow final {
   [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
   void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
 
+  // Section calls: the call survives navigation between chats.
+  void startCall(Td::UserId user, bool video = false);
+  void setCallStatus(const std::string &text);
+  void debugCall(const std::string &action, const std::string &argument);
+
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
   void debugOpenTopic(int index);
@@ -88,6 +94,8 @@ class MainWindow final {
   GtkWidget *_placeholder = nullptr;
   Td::Session *_session = nullptr;
   std::unique_ptr<Td::Store> _store;
+  std::unique_ptr<CallView> _call;
+  GtkWidget *_callBar = nullptr;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;

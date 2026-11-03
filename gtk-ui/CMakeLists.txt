@@ -119,3 +119,22 @@ if (CONTRAIL_TESTS)
   target_compile_definitions(td-message-text-test PRIVATE
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()
+
+# Section calls: signaling and the scripted media also build without WebRTC.
+target_sources(contrail_core PRIVATE call_backend.cpp call_media_scenario.cpp calls.cpp
+  audio_route.cpp proximity.cpp call_shell.cpp call_notification.cpp call_lockscreen.cpp)
+pkg_check_modules(CONTRAIL_CALL_SHELL REQUIRED IMPORTED_TARGET json-glib-1.0)
+target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_CALL_SHELL)
+pkg_check_modules(CONTRAIL_LAYER_SHELL QUIET IMPORTED_TARGET gtk4-layer-shell-0)
+if (CONTRAIL_LAYER_SHELL_FOUND)
+  target_compile_definitions(contrail_core PRIVATE CONTRAIL_LAYER_SHELL)
+  target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_LAYER_SHELL)
+endif()
+option(CONTRAIL_CALLS "Build sound and video for 1:1 calls" OFF)
+if (NOT CONTRAIL_CALLS)
+  target_sources(contrail_core PRIVATE call_media_stub.cpp)
+endif()
+if (CONTRAIL_TESTS)
+  add_executable(td-call-test ${ROOT}/tests/td/call-test.cpp)
+  target_link_libraries(td-call-test PRIVATE contrail_core)
+endif()

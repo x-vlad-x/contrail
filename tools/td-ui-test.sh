@@ -464,4 +464,56 @@ c 'tap-text 2 #contrail' 1
 c tree 0.5
 grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
+# Section calls: 1:1 signaling, audio/video controls and return from any chat.
+section_calls() {
+  echo "calls. Incoming and outgoing calls"
+  start 120
+  c 'call-incoming' 0.5
+  local line
+  line=$(asked 'call-state:' call-state)
+  [[ $line == *'active=1 incoming=1'* && $line == *'visible=1'* ]] || fail "no incoming call: $line"
+  c 'call-accept' 1
+  line=$(asked 'call-state:' call-state)
+  [[ $line == *'stage=6 active=1 incoming=0'* && $line == *'emojis="😀 🍀 🚀 🐾"'* ]] || fail "not answered: $line"
+  c 'call-mute' 0.2
+  [[ $(asked 'call-state:' call-state) == *'muted=1'* ]] || fail "microphone not muted"
+  c 'call-hide' 0.2
+  c 'chat 0' 1
+  [[ $(asked 'call-state:' call-state) == *'active=1'*'visible=0'* ]] || fail "navigation ended or showed the call"
+  c 'call-present' 0.2
+  [[ $(asked 'call-state:' call-state) == *'visible=1'* ]] || fail "no return to the call"
+  c 'call-reconnecting' 0.2
+  [[ $(asked 'call-state:' call-state) == *'stage=7 active=1'* ]] || fail "no reconnecting state"
+  c 'call-established' 0.2
+  c 'call-near 1' 0.2
+  [[ $(asked 'call-state:' call-state) == *'shield=1'* ]] || fail "no proximity shield"
+  c 'call-near 0' 0.2
+  c 'call-hangup' 0.3
+  [[ $(asked 'call-state:' call-state) == *'active=0'*'shield=0'* ]] || fail "the call did not finish"
+  c 'call-incoming-video' 0.3
+  c 'call-accept' 1
+  line=$(asked 'call-state:' call-state)
+  [[ $line == *'remote=160 local=160'* ]] || fail "no video: $line"
+  c 'call-switch-camera' 0.2
+  [[ $(asked 'call-state:' call-state) == *'camera=scenario-back'* ]] || fail "camera did not switch"
+  c 'call-camera' 0.2
+  [[ $(asked 'call-state:' call-state) == *'camera= remote=160 local=0'* ]] || fail "camera did not stop"
+  c 'call-camera' 0.3
+  [[ $(asked 'call-state:' call-state) == *'local=160'* ]] || fail "camera did not start"
+  c 'call-remote-video-off' 0.3
+  [[ $(asked 'call-state:' call-state) == *'remote=0 local=160'* ]] || fail "remote video did not stop"
+  c 'call-hangup' 0.2
+  c 'call-start 1' 1.2
+  [[ $(asked 'call-state:' call-state) == *'stage=6 active=1'* ]] || fail "outgoing call not connected"
+  c 'call-busy' 0.2
+  [[ $(asked 'call-state:' call-state) == *'stage=10 active=0'* ]] || fail "no busy state"
+  c 'call-start 1' 1.2
+  c 'call-failed' 0.2
+  [[ $(asked 'call-state:' call-state) == *'stage=11 active=0'* ]] || fail "no failure state"
+  c 'call-start 1' 1.2
+  c 'call-rated' 0.3
+  c 'call-rate 5' 0.3
+  stop
+}
+section_calls
 echo "PASS"
