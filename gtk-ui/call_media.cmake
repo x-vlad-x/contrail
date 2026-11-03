@@ -74,7 +74,7 @@ target_compile_definitions(contrail_tgcalls PUBLIC
   WEBRTC_DUMMY_AUDIO_BUILD WEBRTC_ENABLE_PROTOBUF=0 WEBRTC_HAVE_DCSCTP WEBRTC_HAVE_SCTP
   WEBRTC_INCLUDE_INTERNAL_AUDIO_DEVICE WEBRTC_LIBRARY_IMPL WEBRTC_LINUX
   WEBRTC_NON_STATIC_TRACE_EVENT_HANDLERS=1 WEBRTC_POSIX WEBRTC_USE_H264 WEBRTC_USE_PIPEWIRE WEBRTC_USE_X11)
-target_compile_options(contrail_tgcalls PRIVATE -Wno-deprecated-declarations -ffunction-sections -fdata-sections)
+target_compile_options(contrail_tgcalls PRIVATE -Wno-deprecated-declarations -Wno-deprecated -ffunction-sections -fdata-sections)
 target_link_libraries(contrail_tgcalls PUBLIC
   ${CONTRAIL_CALL_DEPS}/lib/libtg_owt.a ${CONTRAIL_CALL_DEPS}/lib/librnnoise.a
   PkgConfig::CONTRAIL_MEDIA_DEPS OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB Threads::Threads ${CMAKE_DL_LIBS})

@@ -11,8 +11,11 @@ source api-credentials.env
 BUILD=${BUILD_DIR:-build-td/$ARCH}  # Another directory lets two builds run side by side.
 ARGS=()
 # Section calls: media remains optional when the WebRTC prefix is not mounted.
+# Without CONTRAIL_CALLS the build has them when WebRTC is there (gtk-ui/CMakeLists.txt), whatever was cached.
 if [[ -n ${CONTRAIL_CALLS:-} ]]; then
   ARGS+=(-DCONTRAIL_CALLS="$CONTRAIL_CALLS")
+else
+  ARGS+=(-UCONTRAIL_CALLS)
 fi
 if [[ $ARCH == aarch64 ]]; then
   ARGS+=(-DCMAKE_TOOLCHAIN_FILE=/src/build-env/aarch64-toolchain.cmake)

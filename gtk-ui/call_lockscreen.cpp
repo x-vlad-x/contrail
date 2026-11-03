@@ -5,6 +5,7 @@
 #include "td/strings.hpp"
 
 #ifdef CONTRAIL_LAYER_SHELL
+#include <gdk/wayland/gdkwayland.h>
 #include <gtk4-layer-shell.h>
 #endif // CONTRAIL_LAYER_SHELL
 
@@ -52,7 +53,8 @@ LockScreenCall::~LockScreenCall() {
 
 bool LockScreenCall::Supported() {
 #ifdef CONTRAIL_LAYER_SHELL
-  return gtk_layer_is_supported();
+  // Off Wayland (an X11 desktop) the library asks for a Wayland display and complains.
+  return GDK_IS_WAYLAND_DISPLAY(gdk_display_get_default()) && gtk_layer_is_supported();
 #else // CONTRAIL_LAYER_SHELL
   return false;
 #endif // CONTRAIL_LAYER_SHELL
