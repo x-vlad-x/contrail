@@ -26,7 +26,7 @@
 //   loc-service | in the picker: loc-send, loc-venue N, loc-search TEXT, loc-move LAT LON, loc-mine, loc-state |
 //   on a location's map (tap N on its message): loc-mine, loc-state, loc-stop | loc-close (the dialog shown)
 //   loc-live (the picker's live location row) | profile [CHAT_ID] (the card of the open chat) | profile-state
-//   profile-member N | profile-mute | contacts | contacts-state | contacts-search TEXT | contacts-open N | about
+//   profile-member N | profile-mute | profile-call 0|1 (1: video) | contacts | contacts-state | contacts-search TEXT | contacts-open N | about
 //   live-locations (what is shared from here) | live-update (a fix taken and sent now) | live-bar | live-bar-tap
 //   live-map (of the open chat) | on the shared map: live-state, live-share (its button), live-row N
 //   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
@@ -34,7 +34,7 @@
 //   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
 //   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
 //   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
-//   proxy-enable N | proxy-remove N | proxy-link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
+//   proxy-enable N | proxy-remove N | proxy-link URL | link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
 //   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
 //   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
 //   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop

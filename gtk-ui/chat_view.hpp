@@ -381,11 +381,6 @@ class ChatView final {
 
   // True: opens by itself once downloaded (a video); false: only if the answer finds it here already.
   std::unordered_map<Td::FileId, bool> _openWhenLoaded;
-  struct SaveTarget {
-    std::string name;  // Empty: the downloaded file's.
-    bool photo = false;
-  };
-  std::unordered_map<Td::FileId, SaveTarget> _saveWhenLoaded;
 
   std::unique_ptr<MessageItem> _sponsored;
   std::set<Td::FileId> _sponsoredWaiting;  // Its media, being downloaded before it is shown.

@@ -197,6 +197,45 @@ GtkWidget *MakeLabel(std::string text, std::vector<Tag> tags) {
   return label;
 }
 
+// An invite link (t.me/+..., joinchat): a chat already joined opens at once; otherwise its name and members, and
+// joining on Join (or asking to, for a chat that approves its members), then it opens.
+void OpenInvite(MainWindow &window, const std::string &link, const api::chatInviteLinkInfo &info) {
+  if (info.chat_id_ && info.accessible_for_ == 0) {
+    window.openChat(info.chat_id_);
+    return;
+  }
+  if (!window.widget()) return;
+  const auto channel = info.type_ && info.type_->get_id() == api::inviteLinkChatTypeChannel::ID;
+  const auto members = TrCount(channel ? "lng_chat_status_subscribers" : "lng_chat_status_members", info.member_count_);
+  const auto join = Tr(info.creates_join_request_ ? "lng_group_request_to_join"
+                       : channel                 ? "lng_profile_join_channel"
+                                                 : "lng_profile_join_group");
+  auto body = members;
+  if (!info.description_.empty()) body += "\n\n" + info.description_;
+  auto *dialog = adw_alert_dialog_new(info.title_.c_str(), body.c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "join", join.c_str(),
+                                 nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "join", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [link](AdwAlertDialog *, const char *response) {
+    auto *window = GetApp().window;
+    if (g_strcmp0(response, "join") != 0 || !window || !window->store()) return;
+    window->store()->client().send(api::make_object<api::joinChatByInviteLink>(link), [](Td::ObjectPtr object) {
+      auto *window = GetApp().window;
+      if (!object || !window) return;
+      if (object->get_id() == api::chat::ID) {
+        window->openChat(static_cast<api::chat &>(*object).id_);
+      } else if (object->get_id() == api::error::ID) {
+        // A chat that approves its members: the request went, and the server says so.
+        ShowToast(static_cast<api::error &>(*object).message_);
+      }
+    });
+  });
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("invite: title=\"%s\" body=\"%s\" join=\"%s\"", info.title_.c_str(),
+                                            body.c_str(), join.c_str());
+  adw_dialog_present(ADW_DIALOG(dialog), window.widget());
+}
+
 }  // namespace
 
 std::size_t Utf8Offset(std::string_view text, int utf16Offset) {
@@ -333,6 +372,15 @@ void OpenTelegramLink(const std::string &href) {
                 failed);
             break;
           }
+          case api::internalLinkTypeChatInvite::ID: {
+            const auto link = static_cast<api::internalLinkTypeChatInvite &>(*object).invite_link_;
+            client.request<api::chatInviteLinkInfo>(
+                api::make_object<api::checkChatInviteLink>(link), lifetime,
+                [window, link](api::chatInviteLinkInfo &info) { OpenInvite(*window, link, info); },
+                [](api::error &) { ShowToast(Tr("lng_group_invite_bad_link")); });
+            break;
+          }
+          case api::internalLinkTypeSettings::ID: window->openSettings(); break;
           case api::internalLinkTypeProxy::ID:
             ConfirmAddProxy(*window, std::move(static_cast<api::internalLinkTypeProxy &>(*object).proxy_));
             break;

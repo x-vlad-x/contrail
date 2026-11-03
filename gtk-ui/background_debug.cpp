@@ -63,7 +63,7 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
       notifier->debugAction(std::atoll(rest.c_str()), action.substr(0, space),
                             space == std::string::npos ? std::string() : action.substr(space + 1));
     }
-  } else if (name == "proxy-link") {
+  } else if (name == "proxy-link" || name == "link") {
     // As a tap on the link in a message.
     OpenTelegramLink(rest);
   } else if (name == "proxy") {

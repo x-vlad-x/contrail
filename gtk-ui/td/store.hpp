@@ -58,6 +58,7 @@ struct Chat {
   std::int64_t draftReplyTo = 0;
   bool canSendBasic = true;  // The chat's permissions for everybody; a group's own status can narrow this.
   bool canPinAll = false;    // The members may pin messages (the chat's permissions for everybody).
+  bool canSendFilesAll = true;  // The members may send photos, videos, files or voice (the chat's permissions).
   bool forum = false;        // A supergroup with topics: its messages are read and written in them.
   bool supergroup = false;
 };
@@ -72,6 +73,13 @@ struct Group {
   // Pins messages by its own rights (an admin, the owner, restricted), or as every member may (Chat::canPinAll).
   bool canPin = false;
   bool pinAsMembers = true;
+  // Admins and the owner send files and skip slow mode whatever the members may; a restricted member by its own.
+  bool admin = false;
+  bool canSendFiles = true;
+  bool filesAsMembers = true;
+  // Slow mode (a supergroup's full info): the seconds between messages, and when this account may send again.
+  int slowModeDelay = 0;
+  std::int64_t slowModeUntil = 0;  // g_get_monotonic_time() microseconds.
 };
 
 // A topic of a group with topics. What its row shows is kept as a chat's is (the name in `row.title`; `row.muted`
@@ -144,6 +152,14 @@ class Store final {
   [[nodiscard]] const Group *group(const Chat &chat) const;
   // Whether a text can be sent here at all: "join" or "mute" go in the place of the field otherwise.
   [[nodiscard]] bool canWrite(const Chat &chat) const;
+  // Photos, videos, files and voice messages, as 0.3.1's Data::CanSendAnyOf(FilesSendRestrictions()).
+  [[nodiscard]] bool canSendFiles(const Chat &chat) const;
+  // Slow mode of a supergroup for this account: the seconds left until the next message (0 when it may send now),
+  // and whether it holds at all (then only one message goes at a time).
+  [[nodiscard]] int slowModeLeft(const Chat &chat) const;
+  [[nodiscard]] bool slowModeApplies(const Chat &chat) const;
+  // A supergroup's full info, from its update or an answer to getSupergroupFullInfo.
+  void setSupergroupFullInfo(std::int64_t supergroup, const api::supergroupFullInfo &info);
   // Whether this account may pin and unpin messages in the chat: otherwise it can only hide the pinned bar.
   [[nodiscard]] bool canPin(const Chat &chat) const;
   [[nodiscard]] UserId selfId() const { return _selfId; }

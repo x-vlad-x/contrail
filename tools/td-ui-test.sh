@@ -22,7 +22,7 @@
 #      the picker sending the device's position, a place nearby, a place found by name and a point on the map;
 #      live locations: the bar, one's own sent, moved, on the shared map and stopped there, and going on after a
 #      restart; the chat's card with a group's members, a member's card, muting from it; the contacts with a
-#      search; About;
+#      search; About; a call from a person's card;
 #   11. the photo viewer: the full size shown, a pinch up to 6x and no further, a drag within the edges, a double
 #      tap and Ctrl+wheel, Save to Pictures, its textures gone once it is closed, by itself or with its chat.
 #   12. the player: a voice message downloading plays, pauses, plays on, the next voice message follows by itself; a
@@ -34,7 +34,10 @@
 #   14. sending files: the refused ones and why, the dialog's tiles, removing one, its title and switches, a photo and a
 #      video in an album with the caption on the photo, as documents, twelve photos in albums of ten and two in
 #      order, the caption's limit, the upload's progress and a tap that stops it; pasting a picture, files and text
-#      (and paste-test, which needs a display).
+#      (and paste-test, which needs a display); no dialog where media are forbidden; slow mode: one message at a
+#      time, then the time left;
+#   15. invite links: a chat joined opens, another asks to join and opens, an expired one says so; tg://settings; a
+#      file saved before it came is saved with its chat closed.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -554,15 +557,21 @@ section_places() {
   [[ $(asked 'Live bar:' live-bar) == *'text="Boris" stop=0 active=1' ]] || fail "the bar after stopping"
   # The chat's card: the group's description and members, a member's card, muting from it.
   c profile 1.5
-  [[ $(asked 'Profile: name' profile-state) == *'name="Places" status="3 members" mute=0 info: [Description=Where we meet] members: "Vlad" "Anna Places" "Boris Places"'* ]] \
+  [[ $(asked 'Profile: name' profile-state) == *'name="Places" status="3 members" mute=0 calls=0 info: [Description=Where we meet] members: "Vlad" "Anna Places" "Boris Places"'* ]] \
     || fail "the group's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
   c 'profile-member 1' 1.5
-  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places" status="last seen '*'mute=0 info: [Mobile=+79990001001] [Bio=Loves maps]'* ]] \
+  [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places" status="last seen '*'mute=0 calls=2 info: [Mobile=+79990001001] [Bio=Loves maps]'* ]] \
     || fail "a member's card: $(grep 'Profile: name' "$WORK/log.txt" | tail -1)"
   c profile-mute 1
   [[ $(asked 'Profile: name' profile-state) == *'name="Anna Places"'*' mute=1 '* ]] || fail "not muted from the card"
   c loc-close 0.5
   c back 1
+  # A person's card calls, as the chat's header does.
+  c profile 1.5
+  c 'profile-member 1' 1.5
+  c 'profile-call 0' 1.5
+  [[ $(asked 'call-state:' call-state) == *'active=1'* ]] || fail "the card's call didn't start: $(asked 'call-state:' call-state)"
+  c call-hangup 1
   # The contacts: all of them, a search with the server's answer, a tap opening the chat; About.
   c contacts 1.5
   [[ $(asked 'Contacts:' contacts-state) == *'rows: "Anna Places" "Boris Places" "Friend 1" "Friend 2" "Friend 3"' ]] \
@@ -645,6 +654,19 @@ section_background() {
   c bg-close 2
   c bg-open 2
   [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  # A topic comes back where it was too, not at its reading place further down: its message on top is shown again.
+  c 'chat 40' 2
+  c 'topic 2' 2
+  for _ in 1 2 3; do c 'scroll -900' 0.5; done
+  sleep 1
+  local top again
+  top=$(bg | sed -n 's/.* place=\([0-9]*\)\/.*/\1/p')
+  [[ -n $top && $top != 0 ]] || fail "no place up in the topic: $(bg)"
+  c bg-close 2
+  c bg-open 3
+  [[ $(asked 'chat topic=' state) == *'chat topic=3 '* ]] || fail "the topic didn't come back: $(asked 'chat topic=' state)"
+  again=$(bg | sed -n 's/.* place=\([0-9]*\)\/.*/\1/p')
+  [[ -n $again && $again != 0 ]] && (( again <= top )) || fail "the topic came back at $again, not at $top"
   clean
   # A network gone and back: TDLib is told once each time.
   [[ $(asked 'network:' net-state) == *'sent=0'* ]] || fail "the network type sent at the start: $(asked 'network:' net-state)"
@@ -1045,11 +1067,65 @@ section_media_send_attach() {
   c attach-paste 1
   [[ $(asked 'attach field:' attach-field) == *'"Pasted text"'* ]] || fail "pasted text: $(asked 'attach field:' attach-field)"
   [[ $(attach) == *'no dialog'* ]] || fail "text opened the dialog"
+  # Where no media may be sent the dialog doesn't open: the group with topics allows only text.
+  c 'chat 40' 2
+  c 'topic 2' 2
+  c "attach-files $F/small.jpg" 1
+  grep -q 'toast: Sorry, no way to send media here :(' "$WORK/log.txt" || fail "media weren't refused where forbidden"
+  [[ $(attach) == *'no dialog'* ]] || fail "a dialog where media are forbidden: $(attach)"
+  # Slow mode in Places: one message at a time, then the time left until the next.
+  c 'chat 43' 3
+  c "attach-files $F/small.jpg|$F/notes.txt" 3
+  c attach-send 1
+  grep -q "toast: Slow mode is enabled. You can't send more than one message at a time." "$WORK/log.txt" \
+    || fail "two messages went in slow mode"
+  [[ $(attach) == *'entries=2 '* ]] || fail "the dialog didn't stay for slow mode: $(attach)"
+  c 'attach-remove 1' 0.3
+  before=$(sent)
+  c attach-send 1
+  (( $(sent) == before + 1 )) || fail "the one photo wasn't sent in slow mode"
+  c "attach-files $F/small.jpg" 2
+  c attach-send 1
+  grep -q 'toast: Slow Mode is active.' "$WORK/log.txt" || fail "slow mode didn't say to wait"
+  grep -A1 'toast: Slow Mode is active.' "$WORK/log.txt" | grep -q 'next message in [23][0-9] seconds' \
+    || fail "the time left: $(grep -A1 'toast: Slow Mode' "$WORK/log.txt")"
+  c attach-cancel 1
   grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
   stop
   echo "   ok"
 }
 section_media_send_attach
+# Section links: invite links and tg://settings, as tdesktop's openLocalUrl() opened them for 0.3.1; a save that
+# outlives its chat.
+section_links() {
+  echo "15. Invite links, saving after the chat is closed"
+  start 60
+  c 'link https://t.me/+places' 2
+  [[ $(asked 'chat topic=' state) == *' id=-700'* ]] || fail "a joined chat's invite didn't open it"
+  c 'link https://t.me/+hikers' 1
+  local line
+  line=$(asked 'invite:' 'dialog')
+  grep -q 'invite: title="Hikers" body="7 members' "$WORK/log.txt" || fail "the invite: $(grep 'invite:' "$WORK/log.txt")"
+  c 'dialog-answer join' 2
+  grep -q 'Scenario: joined by https://t.me/+hikers' "$WORK/log.txt" || fail "Join didn't join"
+  [[ $(asked 'chat topic=' state) == *' id=-600'* ]] || fail "the chat joined didn't open"
+  c 'link https://t.me/+gone' 1
+  grep -q 'toast: This invite link is invalid or has expired.' "$WORK/log.txt" || fail "an expired invite"
+  c 'link tg://settings' 1.5
+  [[ $(asked 'settings:' settings-state) == *'account="Vlad"'* ]] || fail "tg://settings didn't open the settings"
+  # A file saved before it came: the chat is closed, the download goes on and the file is saved, as in 0.3.1.
+  c 'chat 42' 3
+  c 'menu 14' 1.5
+  c 'menu-do save' 0.3
+  c back 1
+  sleep 4
+  grep -q 'toast: Image was saved to your Downloads folder' "$WORK/log.txt" || fail "closing the chat forgot the save"
+  [[ -f $WORK/downloads/report.pdf ]] || fail "no report.pdf in Downloads after closing the chat"
+  ! grep -E 'CRITICAL|Gtk-WARNING' "$WORK/log.txt" | grep -v 'Vulkan' | head -3 | grep . || fail "GTK complained"
+  stop
+  echo "   ok"
+}
+section_links
 # Section calls: 1:1 signaling, audio/video controls and return from any chat.
 section_calls() {
   echo "calls. Incoming and outgoing calls"

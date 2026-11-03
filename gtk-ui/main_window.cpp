@@ -5,6 +5,7 @@
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "dialogs.hpp"
 #include "live_location.hpp"
 #include "local_state.hpp"
 #include "login.hpp"
@@ -264,6 +265,8 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
     return Td::MessagePreview(message, *_store);
   });
   _call = std::make_unique<CallView>(*this, *_store);
+  // The card of a person calls too, as in 0.3.1.
+  SetProfileCallHandler([this](Td::UserId user, bool video) { startCall(user, video); });
   // Live locations go on in the background, with or without a window on the screen.
   Live().setStore(_store.get());
   _network = std::make_unique<NetworkWatch>(session.client());
@@ -739,8 +742,12 @@ void MainWindow::releaseWindow() {
 void MainWindow::restoreChat() {
   const auto saved = std::exchange(_saved, std::nullopt);
   if (!saved || !saved->chat || !_store || !_store->chat(saved->chat)) return;
-  if (saved->topic) openTopic(saved->chat, saved->topic);
-  else openChat(saved->chat);
+  if (saved->topic) {
+    // A topic opens at the message that was on top: its history is the topic's, not the group's.
+    openTopic(saved->chat, saved->topic, saved->message);
+    return;
+  }
+  openChat(saved->chat);
   if (_chat && _chat->chat() == saved->chat) _chat->restorePlace({saved->message, saved->y});
 }
 

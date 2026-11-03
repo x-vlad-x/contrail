@@ -101,6 +101,7 @@ class ProfileCard final {
   GtkWidget *_status = nullptr;
   GtkWidget *_info = nullptr;
   std::vector<GtkWidget *> _infoRows;
+  std::vector<GtkWidget *> _callRows;  // A call, then a video call: a person's card only.
   GtkWidget *_mute = nullptr;
   GtkWidget *_members = nullptr;
   GtkWidget *_membersList = nullptr;
@@ -178,6 +179,7 @@ void ProfileCard::build() {
         if (CallHandler()) CallHandler()(id, video);
       });
       adw_preferences_group_add(ADW_PREFERENCES_GROUP(actions), call);
+      _callRows.push_back(call);
     }
   }
   if (!self) {
@@ -363,8 +365,13 @@ void ProfileCard::showMembers(std::vector<std::pair<Td::UserId, std::string>> me
   gtk_widget_set_visible(_members, !members.empty());
 }
 
-// profile-state | profile-member N (a tap on member N) | profile-mute
+// profile-state | profile-member N (a tap on member N) | profile-mute | profile-call 0|1 (1: video)
 void ProfileCard::debug(const std::string &name, const std::string &rest) {
+  if (name == "profile-call") {
+    const auto index = std::size_t(std::atoi(rest.c_str()));
+    if (index < _callRows.size()) g_signal_emit_by_name(_callRows[index], "activated");
+    return;
+  }
   if (name == "profile-member" && _membersList) {
     if (auto *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_membersList), std::atoi(rest.c_str()))) {
       g_signal_emit_by_name(_membersList, "row-activated", row);
@@ -384,9 +391,10 @@ void ProfileCard::debug(const std::string &name, const std::string &rest) {
       members += std::string(" \"") + adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)) + "\"";
     }
   }
-  g_message("Profile: name=\"%s\" status=\"%s\" mute=%d info:%s members:%s", gtk_label_get_text(GTK_LABEL(_name)),
-            gtk_label_get_text(GTK_LABEL(_status)), _mute ? int(adw_switch_row_get_active(ADW_SWITCH_ROW(_mute))) : -1,
-            info.c_str(), members.c_str());
+  g_message("Profile: name=\"%s\" status=\"%s\" mute=%d calls=%d info:%s members:%s",
+            gtk_label_get_text(GTK_LABEL(_name)), gtk_label_get_text(GTK_LABEL(_status)),
+            _mute ? int(adw_switch_row_get_active(ADW_SWITCH_ROW(_mute))) : -1, int(_callRows.size()), info.c_str(),
+            members.c_str());
 }
 
 // --- contacts ----------------------------------------------------------------
