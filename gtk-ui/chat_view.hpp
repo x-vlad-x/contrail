@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app.hpp"
+#include "attach_media.hpp"
 #include "td/store.hpp"
 
 #include <cstdint>
@@ -17,6 +18,10 @@
 namespace Contrail {
 
 class ChatLiveBar;
+class AttachDialog;
+class AudioPlayer;
+class ClipboardReader;
+class VoiceRecordBar;
 class MainWindow;
 class MessageWidget;
 struct ForwardDraft;
@@ -50,8 +55,10 @@ class ChatView final {
 
   // What the messages ask for.
   void openChat(Td::ChatId chat);
-  // There is no photo viewer yet: the photo opens outside, once it is downloaded.
+  // A photo opens in the viewer (photo_viewer.hpp); a picture that isn't one of a photo's sizes opens outside.
   void openPhoto(const MessageItem &item, Td::FileId file);
+  // The viewer's Save: as the menu's, the photo copied to Pictures once it is downloaded.
+  void saveFromViewer(std::int64_t id) { saveFile(id); }
   // A tap on a file: opens it if it is here, stops its download if it runs, starts one otherwise. Videos, GIFs,
   // stickers and pictures open by themselves once downloaded, as in 0.3.1; other files with a second tap.
   void openDocument(const MessageItem &item, Td::FileId file);
@@ -71,6 +78,21 @@ class ChatView final {
   void sendContent(Td::api::object_ptr<Td::api::InputMessageContent> content);
   // Who shares a live location here, under the header (null in a channel).
   [[nodiscard]] ChatLiveBar *liveBar() const { return _liveBar.get(); }
+  // The window's player, told what follows in this chat: after a voice message the next one, after a song the next
+  // song, as far as they are loaded. Null without an account.
+  [[nodiscard]] AudioPlayer *player();
+  // A voice message may be recorded here now: the field is there and nothing is being edited.
+  [[nodiscard]] bool canRecordVoice() const;
+  [[nodiscard]] std::int64_t replyToId() const { return _replyToId; }
+  // The voice message recorded here was sent (it took the reply along) or deleted.
+  void recordingEnded(bool sent);
+  [[nodiscard]] VoiceRecordBar *recordBar() const { return _recordBar.get(); }
+  // A tap on a file of a message still being sent: the upload stops and the message goes, as TDLib does it.
+  void cancelUpload(const MessageItem &item);
+  // paste (as Ctrl+V) | files PATH|PATH (as the file chooser) | copy-image PATH, copy-files PATH|PATH, copy-text TEXT
+  // (the clipboard as another program would fill it) | field (the field's text) | anything else to the dialog
+  // (AttachDialog::debugAction).
+  void debugAttach(const std::string &action);
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -113,6 +135,9 @@ class ChatView final {
   [[nodiscard]] Place place() const;
   void restorePlace(Place place);
   void debugSponsored() const;
+  // play N (message N's voice or song, as its button) | pause | seek FRACTION | drag FRACTION (along the bar,
+  // let go there) | stop.
+  void debugPlayer(const std::string &what);
 
  private:
   // One call of a function some time later. Started again, it waits from the start.
@@ -321,6 +346,16 @@ class ChatView final {
   guint _closeSource = 0;
 
   std::int64_t _replyToId = 0;
+  std::unique_ptr<VoiceRecordBar> _recordBar;
+  // Files to send: chosen, or pasted (a paste is read in the background first).
+  void chooseFiles();
+  void paste();
+  void pasteText(const std::string &text);
+  void openAttach(const std::vector<std::string> &paths, GdkTexture *image = nullptr, const std::string &textOnCancel = {});
+  bool sendAttachments(const std::vector<AttachFile> &files, bool compress, bool group, const std::string &caption,
+                       std::int64_t replyTo);
+  std::unique_ptr<ClipboardReader> _pasteReader;
+  std::weak_ptr<AttachDialog> _attach;
   bool _forwardShown = false;  // The bar shows the messages to forward.
   std::int64_t _editing = 0;
   bool _editPending = false;

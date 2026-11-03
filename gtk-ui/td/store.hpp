@@ -113,6 +113,14 @@ struct File {
   std::string path;   // Set when the download is complete.
   bool downloading = false;
   bool complete = false;
+  // For a player reading a file while it downloads: where TDLib keeps its parts (set before it is complete), and
+  // the part downloaded without a gap from where the download started (local.download_offset).
+  std::string partialPath;
+  std::int64_t prefixOffset = 0;
+  std::int64_t prefix = 0;
+  // A file this account sends: how much of it is on the server.
+  std::int64_t uploaded = 0;
+  bool uploading = false;
 };
 
 class Store final {
@@ -140,6 +148,8 @@ class Store final {
   [[nodiscard]] bool canPin(const Chat &chat) const;
   [[nodiscard]] UserId selfId() const { return _selfId; }
   [[nodiscard]] ChatId repliesChatId() const { return _repliesChatId; }
+  // How long a caption may be (TDLib's message_caption_length_max, larger with Premium).
+  [[nodiscard]] int captionLimit() const { return _captionLimit; }
   // The public name of a user's chat or a supergroup, without the "@". Empty when there is none.
   [[nodiscard]] std::string username(const Chat &chat) const;
   // Null while nobody does anything in the chat.
@@ -156,6 +166,8 @@ class Store final {
   void loadMore(ListKind kind, int limit = 50);
   // Asks for a file; progress comes through onFile. Priority 1 to 32, higher goes first.
   void download(FileId id, int priority = 1);
+  // Downloads from `offset` on (TDLib then moves its download there): what a player needs next.
+  void downloadFrom(FileId id, int priority, std::int64_t offset);
   void cancelDownload(FileId id);
   // `failed` as in Client::request: without it the error goes to the client's handler.
   using Failed = std::function<void(api::error &)>;
@@ -252,6 +264,7 @@ class Store final {
   bool _scopeMuted[3] = {};  // Private chats, groups, channels.
   UserId _selfId = 0;
   ChatId _repliesChatId = 0;
+  int _captionLimit = 1024;
   api::object_ptr<api::ConnectionState> _connection;
   api::object_ptr<api::ReactionType> _defaultReaction;
   std::vector<Subscriber<ChatHandler>> _chatHandlers;

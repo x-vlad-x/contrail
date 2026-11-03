@@ -147,12 +147,40 @@ std::string ZoomViewState(GtkWidget *view) {
   const auto &data = Data(view);
   const auto rect = Zoom::Displayed(data.state, data.image, data.view);
   const auto middle = Zoom::ImagePointAt(data.state, data.image, data.view, {data.view.width / 2., data.view.height / 2.});
-  char buffer[256];
-  snprintf(buffer, sizeof(buffer), "scale=%.3f photo=%.1f,%.1f %.1fx%.1f view=%.0fx%.0f middle=%.4f,%.4f texture=%dx%d",
-           data.state.scale, rect.x, rect.y, rect.width, rect.height, data.view.width, data.view.height, middle.x,
-           middle.y, data.texture ? gdk_texture_get_width(data.texture) : 0,
-           data.texture ? gdk_texture_get_height(data.texture) : 0);
-  return buffer;
+  // With a point whatever the locale says: the tests read it.
+  const auto number = [](double value, const char *format) {
+    char buffer[G_ASCII_DTOSTR_BUF_SIZE];
+    return std::string(g_ascii_formatd(buffer, sizeof(buffer), format, value));
+  };
+  return "scale=" + number(data.state.scale, "%.3f") + " photo=" + number(rect.x, "%.1f") + "," + number(rect.y, "%.1f")
+      + " " + number(rect.width, "%.1f") + "x" + number(rect.height, "%.1f") + " view=" + number(data.view.width, "%.0f")
+      + "x" + number(data.view.height, "%.0f") + " middle=" + number(middle.x, "%.4f") + "," + number(middle.y, "%.4f")
+      + " texture=" + std::to_string(data.texture ? gdk_texture_get_width(data.texture) : 0) + "x"
+      + std::to_string(data.texture ? gdk_texture_get_height(data.texture) : 0);
+}
+
+void ZoomViewDebug(GtkWidget *view, const std::string &action) {
+  auto &data = Data(view);
+  const auto middle = Zoom::Point{data.view.width / 2., data.view.height / 2.};
+  // The numbers with a point, whatever the locale.
+  const auto gap = action.find(' ');
+  const auto name = action.substr(0, gap);
+  const char *rest = gap == std::string::npos ? nullptr : action.c_str() + gap + 1;
+  char *end = nullptr;
+  const auto a = rest ? g_ascii_strtod(rest, &end) : 0.;
+  const auto has = rest && end != rest;
+  const auto b = has ? g_ascii_strtod(end, nullptr) : 0.;
+  const auto is = [&](const char *what) { return has && name == what; };
+  if (is("pinch")) {
+    Apply(view, Zoom::Pinch(data.state, middle, a, middle, data.image, data.view));
+  } else if (is("pan")) {
+    Apply(view, Zoom::Pan(data.state, {a, b}, data.image, data.view));
+  } else if (is("double")) {
+    Apply(view, Zoom::DoubleTap(data.state, {a, b}, data.image, data.view));
+  } else if (is("wheel")) {
+    const auto anchor = Zoom::ImagePointAt(data.state, data.image, data.view, middle);
+    Apply(view, Zoom::Place(data.state.scale * std::pow(1.15, -a), anchor, middle, data.image, data.view));
+  }
 }
 
 }  // namespace Contrail

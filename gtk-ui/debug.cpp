@@ -35,6 +35,14 @@
 //   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
 //   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
 //   proxy-enable N | proxy-remove N | proxy-link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
+//   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
+//   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
+//   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop
+//   voice-state | voice-start (locked, as the keyboard) | voice-hold | voice-drag DX DY | voice-release | voice-send
+//   voice-delete (a voice message recorded from the open chat's composer)
+//   attach-paste | attach-files PATH|PATH | attach-send | attach-cancel | attach-documents on|off | attach-group on|off
+//   attach-caption TEXT | attach-remove N | attach-state (the attach dialog of the open chat) | attach-copy-image PATH
+//   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
 #include "debug.hpp"
 
 #include "background_debug.hpp"
@@ -46,6 +54,10 @@
 #include "live_map.hpp"
 #include "location_ui.hpp"
 #include "main_window.hpp"
+#include "media/audio_player.hpp"
+#include "media/voice_recorder.hpp"
+#include "voice_record_bar.hpp"
+#include "photo_viewer.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
 
@@ -296,6 +308,20 @@ void Run(MainWindow &window, const std::string &command) {
   } else if (LocationDebugCommand(window, name, rest)) {
   } else if (ProfileDebugCommand(window, name, rest)) {
   } else if (LiveMapDebugCommand(window, name, rest)) {
+  } else if (name.starts_with("attach-") && window.chatView()) {
+    window.chatView()->debugAttach(name.substr(7) + (rest.empty() ? "" : " " + rest));
+  } else if (name.starts_with("voice-")) {
+    if (window.chatView() && window.chatView()->recordBar()) {
+      window.chatView()->recordBar()->debug(name.substr(6) + (rest.empty() ? "" : " " + rest));
+    } else if (const auto recorder = window.recorder(); recorder && name == "voice-state") {
+      g_message("voice: no chat %s", recorder->debugState().c_str());
+    }
+  } else if (name == "player-state") {
+    if (const auto player = window.player()) g_message("player: %s", player->debugState().c_str());
+  } else if (name.starts_with("player-") && window.chatView()) {
+    window.chatView()->debugPlayer(name.substr(7) + (rest.empty() ? "" : " " + rest));
+  } else if (name.starts_with("viewer-")) {
+    PhotoViewerDebug(window, name.substr(7) + (rest.empty() ? "" : " " + rest));
   } else if (name == "login") {
     const auto gap = rest.find(' ');
     window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));

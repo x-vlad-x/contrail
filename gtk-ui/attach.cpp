@@ -1,51 +1,96 @@
 #include "attach.hpp"
 
-#include "lang/lang_keys.h"
-#include "storage/localimageloader.h"
-#include "storage/storage_media_prepare.h"
-#include "ui/chat/attach/attach_prepare.h"
-#include "ui/chat/attach/attach_send_files_way.h"
-#include "ui/text/format_values.h"
+#include "picture_decode.hpp"
+#include "td/strings.hpp"
 
-#include <QtCore/QFileInfo>
+#include <adwaita.h>
+
+#include <algorithm>
+#include <cstdlib>
+#include <utility>
 
 namespace Contrail {
 namespace {
 
-constexpr auto kPreviewWidth = 320;  // The thumbnails' source size, a tile is 104 px wide (up to 3x).
+constexpr auto kPreviewSize = 312;  // A tile is 104 px wide, up to 3x.
 constexpr auto kTileSize = 104;
 
-const char *FileIcon(const Ui::PreparedFile &file) {
+const char *FileIcon(const AttachFile &file) {
   switch (file.type) {
-    case Ui::PreparedFile::Type::Music: return "audio-x-generic-symbolic";
-    case Ui::PreparedFile::Type::Video: return "video-x-generic-symbolic";
-    case Ui::PreparedFile::Type::Photo: return "image-x-generic-symbolic";
+    case AttachType::Music: return "audio-x-generic-symbolic";
+    case AttachType::Video: return "video-x-generic-symbolic";
+    case AttachType::Photo:
+    case AttachType::Animation: return "image-x-generic-symbolic";
     default: return "text-x-generic-symbolic";
   }
 }
 
-// Why a file can't be sent: the same reasons Telegram Desktop gives (Storage::PrepareMediaList).
-QString RefusalReason(const QString &path, bool premium) {
-  const auto info = QFileInfo(path);
-  const auto size = info.size();
-  if (info.isDir() || !info.exists() || !info.isFile() || !info.isReadable() || size <= 0) {
-    return tr::lng_send_image_empty(tr::now, lt_name, info.fileName().isEmpty() ? path : info.fileName());
-  } else if (size > kFileSizePremiumLimit || (size > kFileSizeLimit && !premium)) {
-    const auto limit = premium ? kFileSizePremiumLimit : kFileSizeLimit;
-    return info.fileName() + u": "_q + tr::lng_file_size_limit1(tr::now, lt_size, Ui::FormatSizeText(limit));
+std::string SizeText(std::int64_t size) {
+  char buffer[32];
+  if (size >= 1024 * 1024) {
+    g_ascii_formatd(buffer, sizeof(buffer), "%.1f", double(size) / (1024 * 1024));
+    return std::string(buffer) + " MB";
   }
-  return QString();
+  if (size >= 1024) {
+    g_ascii_formatd(buffer, sizeof(buffer), "%.1f", double(size) / 1024);
+    return std::string(buffer) + " KB";
+  }
+  return std::to_string(size) + " B";
+}
+
+// What a file is prepared from, and what it gives.
+struct Job {
+  std::string path;
+  GdkTexture *image = nullptr;  // A pasted picture, written to `path` first.
+  std::string directory;
+  AttachFile file;
+  GdkTexture *preview = nullptr;
+  ~Job() {
+    g_clear_object(&image);
+    g_clear_object(&preview);
+  }
+};
+
+void Prepare(Job &job) {
+  if (job.image && !SaveTexturePng(job.image, job.path)) return;
+  job.file = PrepareAttachFile(job.path, job.directory);
+  if (job.image) job.file.name.clear();  // A pasted picture has no name of its own.
+  const auto &file = job.file;
+  const auto &source = file.type == AttachType::Photo     ? file.photoPath
+                       : file.type == AttachType::Video   ? file.thumbnailPath
+                       : file.type == AttachType::Animation ? file.path
+                                                          : std::string();
+  if (source.empty()) return;
+  if (auto *pixbuf = DecodePictureFile(source.c_str(), kPreviewSize, kPreviewSize)) {
+    job.preview = TextureFromPixbuf(pixbuf);
+  }
 }
 
 }  // namespace
 
-// --- reading the clipboard -------------------------------------------------------------------------
+// --- reading the clipboard ---------------------------------------------------------------------------
+
+ClipboardReader::Result::Result(Result &&other) noexcept
+    : files(std::move(other.files)), image(std::exchange(other.image, nullptr)), text(std::move(other.text)) {}
+
+ClipboardReader::Result &ClipboardReader::Result::operator=(Result &&other) noexcept {
+  if (this != &other) {
+    g_clear_object(&image);
+    files = std::move(other.files);
+    image = std::exchange(other.image, nullptr);
+    text = std::move(other.text);
+  }
+  return *this;
+}
+
+ClipboardReader::Result::~Result() {
+  g_clear_object(&image);
+}
 
 struct ClipboardReader::Pending {
   ClipboardReader *owner = nullptr;
   GdkClipboard *clipboard = nullptr;
   GCancellable *cancellable = nullptr;
-  PasteKind kind = PasteKind::Text;
   bool hasImage = false;
   bool hasText = false;
   std::function<void(Result &&)> done;
@@ -55,7 +100,7 @@ struct ClipboardReader::Pending {
     g_object_unref(cancellable);
     g_object_unref(clipboard);
   }
-  // The reader is gone (another chat, a new paste): drop the answer.
+  // The reader is gone (another chat, a new paste): the answer is dropped.
   [[nodiscard]] bool abandoned() const { return !owner || g_cancellable_is_cancelled(cancellable); }
   void readFiles();
   void readImage();
@@ -64,25 +109,30 @@ struct ClipboardReader::Pending {
 };
 
 void ClipboardReader::Pending::readFiles() {
-  gdk_clipboard_read_value_async(clipboard, GDK_TYPE_FILE_LIST, G_PRIORITY_DEFAULT, cancellable,
+  gdk_clipboard_read_value_async(
+      clipboard, GDK_TYPE_FILE_LIST, G_PRIORITY_DEFAULT, cancellable,
       +[](GObject *source, GAsyncResult *res, gpointer data) {
         auto *self = static_cast<Pending *>(data);
-        const auto value = gdk_clipboard_read_value_finish(GDK_CLIPBOARD(source), res, nullptr);
-        if (self->abandoned()) { delete self; return; }
+        const auto *value = gdk_clipboard_read_value_finish(GDK_CLIPBOARD(source), res, nullptr);
+        if (self->abandoned()) {
+          delete self;
+          return;
+        }
         if (value) {
           auto *list = static_cast<GdkFileList *>(g_value_get_boxed(value));
           auto *files = list ? gdk_file_list_get_files(list) : nullptr;
           self->result.files = SplitPastedFiles(files);
           g_slist_free(files);
         }
-        if (!self->result.files.local.isEmpty() || !self->result.files.remote.isEmpty()) {
+        if (!self->result.files.local.empty() || !self->result.files.remote.empty()) {
           self->finish();
         } else if (self->hasImage) {
           self->readImage();
         } else {
           self->readText();
         }
-      }, this);
+      },
+      this);
 }
 
 void ClipboardReader::Pending::readImage() {
@@ -90,17 +140,14 @@ void ClipboardReader::Pending::readImage() {
     auto *self = static_cast<Pending *>(data);
     auto *texture = gdk_clipboard_read_texture_finish(GDK_CLIPBOARD(source), res, nullptr);
     if (self->abandoned()) {
-      if (texture) g_object_unref(texture);
+      g_clear_object(&texture);
       delete self;
       return;
     }
-    if (texture) {
-      self->result.image = TextureToImage(texture);
-      g_object_unref(texture);
-    }
-    // A picture often comes with text (a spreadsheet's cells, an address): it goes to the field if the
-    // picture isn't sent, as in Telegram Desktop.
-    if (self->hasText || self->result.image.isNull()) {
+    self->result.image = texture;
+    // A picture often comes with text (a spreadsheet's cells, an address): it goes to the field if the picture
+    // isn't sent, as in Telegram Desktop.
+    if (self->hasText || !self->result.image) {
       self->readText();
     } else {
       self->finish();
@@ -118,7 +165,7 @@ void ClipboardReader::Pending::readText() {
       return;
     }
     if (text) {
-      self->result.text = Q(text);
+      self->result.text = text;
       g_free(text);
     }
     self->finish();
@@ -130,7 +177,7 @@ void ClipboardReader::Pending::finish() {
   auto result = std::move(this->result);
   owner->_pending = nullptr;
   delete this;
-  RunCoreEvent([&] { done(std::move(result)); });
+  done(std::move(result));
 }
 
 ClipboardReader::ClipboardReader(GdkClipboard *clipboard, PasteKind kind, std::function<void(Result &&)> done)
@@ -138,7 +185,6 @@ ClipboardReader::ClipboardReader(GdkClipboard *clipboard, PasteKind kind, std::f
   _pending->owner = this;
   _pending->clipboard = GDK_CLIPBOARD(g_object_ref(clipboard));
   _pending->cancellable = g_cancellable_new();
-  _pending->kind = kind;
   _pending->done = std::move(done);
   auto *types = gdk_content_formats_union_deserialize_gtypes(gdk_content_formats_ref(gdk_clipboard_get_formats(clipboard)));
   _pending->hasImage = gdk_content_formats_contain_gtype(types, GDK_TYPE_TEXTURE);
@@ -153,7 +199,7 @@ ClipboardReader::ClipboardReader(GdkClipboard *clipboard, PasteKind kind, std::f
 
 ClipboardReader::~ClipboardReader() {
   if (_pending) {
-    // The pending read deletes itself when GIO reports the cancellation.
+    // The read pending deletes itself when GIO reports the cancellation.
     _pending->owner = nullptr;
     g_cancellable_cancel(_pending->cancellable);
   }
@@ -162,25 +208,34 @@ ClipboardReader::~ClipboardReader() {
 // --- the dialog ------------------------------------------------------------------------------------
 
 struct AttachDialog::Entry {
-  int64 id = 0;
-  QString name;
-  std::unique_ptr<Ui::PreparedFile> file;  // Empty while it is prepared.
-  GtkWidget *child = nullptr;              // In the flow box.
-  GtkWidget *slot = nullptr;               // The preview, or a spinner.
+  std::int64_t id = 0;
+  std::string name;
+  bool ready = false;      // Prepared.
+  AttachFile file;
+  GtkWidget *child = nullptr;  // In the flow box.
+  GtkWidget *slot = nullptr;   // The preview, or a spinner.
 };
 
-base::weak_ptr<AttachDialog> AttachDialog::Show(Args &&args) {
-  auto *self = new AttachDialog(std::move(args));
-  AttachData(self->_dialog, "contrail-attach", std::unique_ptr<AttachDialog>(self));
-  auto result = base::make_weak(self);
-  adw_dialog_present(ADW_DIALOG(self->_dialog), self->_args.parent);
+std::weak_ptr<AttachDialog> AttachDialog::Show(Args &&args) {
+  auto self = std::make_shared<AttachDialog>(std::move(args));
+  auto result = std::weak_ptr<AttachDialog>(self);
+  auto *dialog = self->_dialog;
+  AttachData(dialog, "contrail-attach", std::make_unique<std::shared_ptr<AttachDialog>>(std::move(self)));
+  if (const auto strong = result.lock(); strong && !strong->_entries.empty()) {
+    adw_dialog_present(ADW_DIALOG(dialog), strong->_args.parent);
+  } else {
+    // Every file was refused: the window shows why, there is nothing to choose.
+    g_object_ref_sink(dialog);
+    g_object_unref(dialog);
+  }
   return result;
 }
 
-AttachDialog::AttachDialog(Args &&args) : _args(std::move(args)) {
+AttachDialog::AttachDialog(Args &&args) : _args(std::move(args)), _cancellable(g_cancellable_new()) {
+  _directory = AttachDirectory();
   build();
-  if (!_args.image.isNull()) {
-    prepareImage(std::move(_args.image));
+  if (_args.image) {
+    prepareImage(std::exchange(_args.image, nullptr));
   } else {
     prepare(_args.paths);
   }
@@ -188,36 +243,57 @@ AttachDialog::AttachDialog(Args &&args) : _args(std::move(args)) {
 }
 
 AttachDialog::~AttachDialog() {
-  invalidate_weak_ptrs(this);
+  *_alive = false;
+  g_cancellable_cancel(_cancellable);
+  g_object_unref(_cancellable);
+  g_clear_object(&_args.image);
   _signals.clear();
 }
 
 void AttachDialog::close() {
-  if (_dialog) adw_dialog_force_close(ADW_DIALOG(_dialog));
+  if (_dialog && !_closing) {
+    _closing = true;
+    adw_dialog_force_close(ADW_DIALOG(_dialog));
+  }
 }
 
-void AttachDialog::debugAction(const QString &action) {
-  if (action == u"send"_q) {
+void AttachDialog::debugAction(const std::string &action) {
+  if (action == "send") {
     send();
-  } else if (action == u"cancel"_q) {
+    return;
+  } else if (action == "cancel") {
     close();
-  } else if (action.startsWith(u"documents "_q)) {
-    adw_switch_row_set_active(ADW_SWITCH_ROW(_asDocuments), action.endsWith(u"on"_q));
-  } else if (action.startsWith(u"group "_q)) {
-    adw_switch_row_set_active(ADW_SWITCH_ROW(_group), action.endsWith(u"on"_q));
-  }
-  auto prepared = 0;
-  for (const auto &entry : _entries) {
-    if (entry->file) {
-      ++prepared;
-      g_message("Attach entry: type=%d size=%lld preview=%dx%d name=%s", int(entry->file->type),
-                (long long)entry->file->size, entry->file->preview.width(), entry->file->preview.height(),
-                U8(entry->file->displayName).c_str());
+    return;
+  } else if (action.starts_with("documents ")) {
+    adw_switch_row_set_active(ADW_SWITCH_ROW(_asDocuments), action.ends_with("on"));
+  } else if (action.starts_with("group ")) {
+    adw_switch_row_set_active(ADW_SWITCH_ROW(_group), action.ends_with("on"));
+  } else if (action.starts_with("caption ")) {
+    const auto text = action.substr(8);
+    gtk_text_buffer_set_text(gtk_text_view_get_buffer(GTK_TEXT_VIEW(_caption)), text.data(), int(text.size()));
+  } else if (action.starts_with("remove ")) {
+    const auto index = std::size_t(std::atoi(action.c_str() + 7));
+    if (index < _entries.size()) {
+      remove(_entries[index]->id);
+      if (_entries.empty()) return;
     }
   }
-  g_message("Attach state: entries=%d prepared=%d documents=%d group=%d send=%d", int(_entries.size()), prepared,
-            int(adw_switch_row_get_active(ADW_SWITCH_ROW(_asDocuments))),
-            int(adw_switch_row_get_active(ADW_SWITCH_ROW(_group))), int(gtk_widget_get_sensitive(_sendButton)));
+  auto ready = 0;
+  for (const auto &entry : _entries) {
+    if (!entry->ready) continue;
+    ++ready;
+    const auto &file = entry->file;
+    g_message("attach entry: type=%d size=%lld %dx%d duration=%d thumbnail=%d photo=%d name=%s", int(file.type),
+              (long long)file.size, file.width, file.height, file.duration, int(!file.thumbnailPath.empty()),
+              int(!file.photoPath.empty()), file.name.c_str());
+  }
+  g_message("attach state: entries=%zu ready=%d documents=%d documentsShown=%d group=%d groupShown=%d send=%d "
+            "refused=\"%s\" title=\"%s\"",
+            _entries.size(), ready, int(adw_switch_row_get_active(ADW_SWITCH_ROW(_asDocuments))),
+            int(gtk_widget_get_visible(_asDocuments)), int(adw_switch_row_get_active(ADW_SWITCH_ROW(_group))),
+            int(gtk_widget_get_visible(_group)), int(gtk_widget_get_sensitive(_sendButton)),
+            gtk_widget_get_visible(_refused) ? gtk_label_get_text(GTK_LABEL(_refused)) : "",
+            adw_dialog_get_title(ADW_DIALOG(_dialog)));
 }
 
 void AttachDialog::build() {
@@ -229,17 +305,20 @@ void AttachDialog::build() {
   auto *header = adw_header_bar_new();
   adw_header_bar_set_show_start_title_buttons(ADW_HEADER_BAR(header), FALSE);
   adw_header_bar_set_show_end_title_buttons(ADW_HEADER_BAR(header), FALSE);
-  auto *cancel = gtk_button_new_with_label(U8(tr::lng_cancel(tr::now)).c_str());
+  auto *cancel = gtk_button_new_with_label(Tr("lng_cancel").c_str());
   _signals.clicked(cancel, [this] { close(); });
   adw_header_bar_pack_start(ADW_HEADER_BAR(header), cancel);
-  _sendButton = gtk_button_new_with_label(U8(tr::lng_send_button(tr::now)).c_str());
+  _sendButton = gtk_button_new_with_label(Tr("lng_send_button").c_str());
   gtk_widget_add_css_class(_sendButton, "suggested-action");
   _signals.clicked(_sendButton, [this] { send(); });
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), _sendButton);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
 
   auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
-  SetMarginAll(box, 12);
+  gtk_widget_set_margin_start(box, 12);
+  gtk_widget_set_margin_end(box, 12);
+  gtk_widget_set_margin_top(box, 12);
+  gtk_widget_set_margin_bottom(box, 12);
   // Shown here rather than as a toast: the dialog would cover it.
   _refused = gtk_label_new(nullptr);
   gtk_label_set_wrap(GTK_LABEL(_refused), TRUE);
@@ -260,12 +339,11 @@ void AttachDialog::build() {
 
   auto *options = adw_preferences_group_new();
   _asDocuments = adw_switch_row_new();
-  _signals.connect<void(GObject *, GParamSpec *)>(_asDocuments, "notify::active", [this](GObject *, GParamSpec *) {
-    refresh();
-  });
+  _signals.connect<void(GObject *, GParamSpec *)>(_asDocuments, "notify::active",
+                                                  [this](GObject *, GParamSpec *) { refresh(); });
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(options), _asDocuments);
   _group = adw_switch_row_new();
-  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_group), U8(tr::lng_send_grouped(tr::now)).c_str());
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_group), Tr("lng_send_grouped").c_str());
   adw_switch_row_set_active(ADW_SWITCH_ROW(_group), TRUE);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(options), _group);
   gtk_box_append(GTK_BOX(box), options);
@@ -282,8 +360,9 @@ void AttachDialog::build() {
   _caption = gtk_text_view_new();
   gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(_caption), GTK_WRAP_WORD_CHAR);
   gtk_text_view_set_accepts_tab(GTK_TEXT_VIEW(_caption), FALSE);
-  gtk_text_view_set_input_hints(GTK_TEXT_VIEW(_caption), GtkInputHints(GTK_INPUT_HINT_SPELLCHECK | GTK_INPUT_HINT_WORD_COMPLETION
-      | GTK_INPUT_HINT_EMOJI | GTK_INPUT_HINT_UPPERCASE_SENTENCES));
+  gtk_text_view_set_input_hints(GTK_TEXT_VIEW(_caption),
+                                GtkInputHints(GTK_INPUT_HINT_SPELLCHECK | GTK_INPUT_HINT_WORD_COMPLETION
+                                              | GTK_INPUT_HINT_EMOJI | GTK_INPUT_HINT_UPPERCASE_SENTENCES));
   gtk_widget_add_css_class(_caption, "message-input");
   auto *captionScroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(captionScroll), GTK_POLICY_NEVER, GTK_POLICY_EXTERNAL);
@@ -294,19 +373,18 @@ void AttachDialog::build() {
   gtk_widget_set_hexpand(captionScroll, TRUE);
   gtk_widget_add_css_class(captionScroll, "message-input-frame");
   gtk_box_append(GTK_BOX(bottom), captionScroll);
-  const auto placeholderText = tr::lng_photo_caption(tr::now);
-  auto *placeholder = gtk_label_new(U8(placeholderText).c_str());
-  gtk_label_set_width_chars(GTK_LABEL(placeholder), std::min(int(placeholderText.size()), 24));
+  const auto placeholderText = Tr("lng_photo_caption");
+  auto *placeholder = gtk_label_new(placeholderText.c_str());
+  gtk_label_set_width_chars(GTK_LABEL(placeholder), std::min(int(g_utf8_strlen(placeholderText.c_str(), -1)), 24));
   gtk_widget_add_css_class(placeholder, "dim-label");
   gtk_widget_set_can_target(placeholder, FALSE);
   gtk_label_set_xalign(GTK_LABEL(placeholder), 0);
   gtk_text_view_add_overlay(GTK_TEXT_VIEW(_caption), placeholder, 0, 0);
   auto *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(_caption));
-  _signals.connect<void(GtkTextBuffer *)>(buffer, "changed", [placeholder](GtkTextBuffer *buffer) {
-    gtk_widget_set_visible(placeholder, gtk_text_buffer_get_char_count(buffer) == 0);
+  _signals.connect<void(GtkTextBuffer *)>(buffer, "changed", [placeholder](GtkTextBuffer *changed) {
+    gtk_widget_set_visible(placeholder, gtk_text_buffer_get_char_count(changed) == 0);
   });
-  const auto caption = _args.caption.toUtf8();
-  gtk_text_buffer_set_text(buffer, caption.constData(), caption.size());
+  gtk_text_buffer_set_text(buffer, _args.caption.data(), int(_args.caption.size()));
   // Enter sends, Shift+Enter starts a new line, as in the message field.
   auto *keys = gtk_event_controller_key_new();
   gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
@@ -323,67 +401,76 @@ void AttachDialog::build() {
   adw_dialog_set_child(ADW_DIALOG(_dialog), view);
   adw_dialog_set_focus(ADW_DIALOG(_dialog), _caption);
 
-  _signals.connect<void(AdwDialog *)>(_dialog, "closed", [this](AdwDialog *) {
+  // Not through _signals, which holds what it connects to: the dialog holds this, and would never go.
+  Connect<void(AdwDialog *)>(_dialog, "closed", [this](AdwDialog *) {
+    _closing = true;
+    g_cancellable_cancel(_cancellable);
     if (!_sent && _args.cancelled) {
-      // The callback may destroy the chat, and the dialog with it: keep it alive meanwhile.
+      // The callback may destroy the chat, and the dialog with it: it is moved out first.
       auto cancelled = std::move(_args.cancelled);
       cancelled();
     }
   });
 }
 
-void AttachDialog::prepare(const QStringList &paths) {
-  auto refused = QStringList();
+void AttachDialog::prepare(const std::vector<std::string> &paths) {
+  auto refused = std::vector<std::string>();
   for (const auto &path : paths) {
-    if (const auto reason = RefusalReason(path, _args.premium); !reason.isEmpty()) {
-      refused.push_back(reason);
+    if (auto reason = AttachRefusal(path, _args.premium); !reason.empty()) {
+      refused.push_back(std::move(reason));
       continue;
     }
-    auto file = std::make_unique<Ui::PreparedFile>(path);
-    file->size = QFileInfo(path).size();
-    startPreparing(std::move(file));
+    startPreparing(path, nullptr);
   }
-  if (refused.isEmpty()) {
-  } else if (_entries.empty()) {
+  if (refused.empty()) return;
+  if (_entries.empty()) {
     // Nothing to show: the window shows why.
     for (const auto &reason : refused) ShowToast(reason);
-  } else {
-    gtk_label_set_text(GTK_LABEL(_refused), U8(refused.join('\n')).c_str());
-    gtk_widget_set_visible(_refused, TRUE);
+    return;
   }
+  auto text = std::string();
+  for (const auto &reason : refused) text += (text.empty() ? "" : "\n") + reason;
+  gtk_label_set_text(GTK_LABEL(_refused), text.c_str());
+  gtk_widget_set_visible(_refused, TRUE);
 }
 
-void AttachDialog::prepareImage(QImage &&image) {
-  auto file = std::make_unique<Ui::PreparedFile>(QString());
-  file->information = std::make_unique<Ui::PreparedFileInformation>();
-  file->id = ++_nextId;
-  addEntry(file->id, QString());
-  const auto id = file->id;
-  const auto sideLimit = PhotoSideLimit();  // Read on the main thread.
-  // The picture becomes a photo to send (encoding, the preview) in the background.
-  crl::async([weak = base::make_weak(this), id, sideLimit, image = std::move(image), file = std::move(file)]() mutable {
-    FileLoadTask::FillImageInformation(std::move(image), false, file->information);
-    Storage::PrepareDetails(*file, kPreviewWidth, sideLimit);
-    crl::on_main([weak, id, file = std::move(file)]() mutable {
-      if (const auto strong = weak.get()) strong->prepared(id, std::move(file));
-    });
+void AttachDialog::prepareImage(GdkTexture *image) {
+  auto *name = g_strdup_printf("pasted-%lld.png", (long long)g_get_real_time());
+  auto *path = g_build_filename(_directory.c_str(), name, nullptr);
+  startPreparing(path, image);
+  g_free(path);
+  g_free(name);
+}
+
+void AttachDialog::startPreparing(const std::string &path, GdkTexture *image) {
+  const auto id = ++_nextId;
+  addEntry(id, image ? std::string() : path.substr(path.rfind('/') + 1));
+  auto *job = new Job{.path = path, .image = image, .directory = _directory};
+  struct Context {
+    std::weak_ptr<bool> alive;
+    AttachDialog *self = nullptr;
+    std::int64_t id = 0;
+  };
+  auto *task = g_task_new(nullptr, _cancellable, +[](GObject *, GAsyncResult *result, gpointer data) {
+    auto *context = static_cast<Context *>(data);
+    auto *job = static_cast<Job *>(g_task_propagate_pointer(G_TASK(result), nullptr));
+    if (job && !context->alive.expired() && *context->alive.lock()) {
+      context->self->prepared(context->id, std::move(job->file), std::exchange(job->preview, nullptr));
+    }
+    delete job;
+    delete context;
+  }, new Context{_alive, this, id});
+  g_task_set_task_data(task, job, nullptr);
+  g_task_run_in_thread(task, +[](GTask *task, gpointer, gpointer data, GCancellable *cancellable) {
+    auto *job = static_cast<Job *>(data);
+    if (!g_cancellable_is_cancelled(cancellable)) Prepare(*job);
+    // The cancelled ones go too: the callback frees the job.
+    g_task_return_pointer(task, job, +[](gpointer pointer) { delete static_cast<Job *>(pointer); });
   });
+  g_object_unref(task);
 }
 
-void AttachDialog::startPreparing(std::unique_ptr<Ui::PreparedFile> file) {
-  file->id = ++_nextId;
-  addEntry(file->id, file->displayName);
-  const auto id = file->id;
-  const auto sideLimit = PhotoSideLimit();  // Read on the main thread.
-  crl::async([weak = base::make_weak(this), id, sideLimit, file = std::move(file)]() mutable {
-    Storage::PrepareDetails(*file, kPreviewWidth, sideLimit);
-    crl::on_main([weak, id, file = std::move(file)]() mutable {
-      if (const auto strong = weak.get()) strong->prepared(id, std::move(file));
-    });
-  });
-}
-
-void AttachDialog::addEntry(int64 id, const QString &name) {
+void AttachDialog::addEntry(std::int64_t id, const std::string &name) {
   auto entry = std::make_unique<Entry>();
   entry->id = id;
   entry->name = name;
@@ -396,7 +483,7 @@ void AttachDialog::addEntry(int64 id, const QString &name) {
   gtk_widget_set_size_request(spinner, 24, 24);
   adw_bin_set_child(ADW_BIN(entry->slot), spinner);
   gtk_overlay_set_child(GTK_OVERLAY(overlay), entry->slot);
-  auto *remove = MakeIconButton("window-close-symbolic", U8(tr::lng_box_remove(tr::now)).c_str(), "osd");
+  auto *remove = MakeIconButton("window-close-symbolic", Tr("lng_box_remove").c_str(), "osd");
   gtk_widget_add_css_class(remove, "circular");
   gtk_widget_add_css_class(remove, "attach-remove");
   gtk_widget_set_halign(remove, GTK_ALIGN_END);
@@ -409,26 +496,27 @@ void AttachDialog::addEntry(int64 id, const QString &name) {
   _entries.push_back(std::move(entry));
 }
 
-void AttachDialog::prepared(int64 id, std::unique_ptr<Ui::PreparedFile> file) {
+void AttachDialog::prepared(std::int64_t id, AttachFile file, GdkTexture *preview) {
   const auto i = std::find_if(_entries.begin(), _entries.end(), [&](const auto &e) { return e->id == id; });
-  if (i == _entries.end()) return;  // Removed meanwhile.
+  if (i == _entries.end() || _closing) {  // Removed meanwhile.
+    g_clear_object(&preview);
+    return;
+  }
   (*i)->file = std::move(file);
-  fillTile(**i);
+  (*i)->ready = true;
+  fillTile(**i, preview);
+  g_clear_object(&preview);
   refresh();
 }
 
-void AttachDialog::fillTile(Entry &entry) {
-  const auto &file = *entry.file;
+void AttachDialog::fillTile(Entry &entry, GdkTexture *preview) {
+  const auto &file = entry.file;
   GtkWidget *content = nullptr;
-  if (!file.preview.isNull()) {
-    auto *picture = gtk_picture_new();
+  if (preview) {
+    auto *picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(preview));
     gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
     gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
-    if (auto *texture = ToTexture(file.preview)) {
-      gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
-      g_object_unref(texture);
-    }
-    if (file.type == Ui::PreparedFile::Type::Video) {
+    if (file.type == AttachType::Video) {
       auto *overlay = gtk_overlay_new();
       gtk_overlay_set_child(GTK_OVERLAY(overlay), picture);
       auto *play = gtk_image_new_from_icon_name("media-playback-start-symbolic");
@@ -447,12 +535,12 @@ void AttachDialog::fillTile(Entry &entry) {
     auto *icon = gtk_image_new_from_icon_name(FileIcon(file));
     gtk_image_set_pixel_size(GTK_IMAGE(icon), 32);
     gtk_box_append(GTK_BOX(box), icon);
-    auto *name = gtk_label_new(U8(file.displayName.isEmpty() ? tr::lng_in_dlg_file(tr::now) : file.displayName).c_str());
+    auto *name = gtk_label_new(file.name.empty() ? Tr("lng_in_dlg_file").c_str() : file.name.c_str());
     gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_MIDDLE);
     gtk_label_set_max_width_chars(GTK_LABEL(name), 10);
     gtk_widget_add_css_class(name, "caption");
     gtk_box_append(GTK_BOX(box), name);
-    auto *size = gtk_label_new(U8(Ui::FormatSizeText(file.size)).c_str());
+    auto *size = gtk_label_new(SizeText(file.size).c_str());
     gtk_widget_add_css_class(size, "caption");
     gtk_widget_add_css_class(size, "dim-label");
     gtk_box_append(GTK_BOX(box), size);
@@ -461,7 +549,7 @@ void AttachDialog::fillTile(Entry &entry) {
   adw_bin_set_child(ADW_BIN(entry.slot), content);
 }
 
-void AttachDialog::remove(int64 id) {
+void AttachDialog::remove(std::int64_t id) {
   const auto i = std::find_if(_entries.begin(), _entries.end(), [&](const auto &e) { return e->id == id; });
   if (i == _entries.end()) return;
   gtk_flow_box_remove(GTK_FLOW_BOX(_flow), (*i)->child);
@@ -474,60 +562,56 @@ void AttachDialog::remove(int64 id) {
 }
 
 void AttachDialog::refresh() {
-  if (_entries.empty()) {
-    // Every file was refused.
-    crl::on_main(this, [=] { close(); });
-    return;
-  }
+  if (_entries.empty()) return;  // Every file was refused: Show() doesn't present it.
   auto ready = true, media = false, images = true;
   for (const auto &entry : _entries) {
-    if (!entry->file) {
+    if (!entry->ready) {
       ready = false;
       images = false;
       continue;
     }
-    using Type = Ui::PreparedFile::Type;
-    media = media || entry->file->type == Type::Photo || entry->file->type == Type::Video;
-    images = images && entry->file->type == Type::Photo;
+    const auto type = entry->file.type;
+    media = media || type == AttachType::Photo || type == AttachType::Video || type == AttachType::Animation;
+    images = images && type == AttachType::Photo;
   }
   const auto count = int(_entries.size());
   const auto asDocuments = adw_switch_row_get_active(ADW_SWITCH_ROW(_asDocuments));
-  adw_dialog_set_title(ADW_DIALOG(_dialog), U8((images && !asDocuments) ? tr::lng_send_images_selected(tr::now, lt_count, count)
-                                                                        : tr::lng_send_files_selected(tr::now, lt_count, count)).c_str());
+  adw_dialog_set_title(ADW_DIALOG(_dialog),
+                       TrCount((images && !asDocuments) ? "lng_send_images_selected" : "lng_send_files_selected", count)
+                           .c_str());
   adw_preferences_row_set_title(ADW_PREFERENCES_ROW(_asDocuments),
-      U8(count > 1 ? tr::lng_send_as_documents(tr::now) : tr::lng_send_as_documents_one(tr::now)).c_str());
+                                Tr(count > 1 ? "lng_send_as_documents" : "lng_send_as_documents_one").c_str());
   gtk_widget_set_visible(_asDocuments, media);
   gtk_widget_set_visible(_group, count > 1);
   gtk_widget_set_sensitive(_sendButton, ready);
 }
 
-void AttachDialog::send() {
-  if (_sent || _entries.empty()) return;
-  for (const auto &entry : _entries) {
-    if (!entry->file) return;
-  }
-  auto list = Ui::PreparedList();
-  for (auto &entry : _entries) {
-    list.files.push_back(std::move(*entry->file));
-  }
-  auto way = Ui::SendFilesWay();
-  way.setSendImagesAsPhotos(!adw_switch_row_get_active(ADW_SWITCH_ROW(_asDocuments)));
-  way.setGroupFiles(adw_switch_row_get_active(ADW_SWITCH_ROW(_group)));
+std::string AttachDialog::caption() const {
   auto *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(_caption));
   GtkTextIter start, end;
   gtk_text_buffer_get_bounds(buffer, &start, &end);
   auto *text = gtk_text_buffer_get_text(buffer, &start, &end, FALSE);
-  const auto caption = Q(text).trimmed();
+  auto result = std::string(text);
   g_free(text);
-  if (_args.send && _args.send(list, way, caption)) {
+  const auto first = result.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  return result.substr(first, result.find_last_not_of(" \t\r\n") - first + 1);
+}
+
+void AttachDialog::send() {
+  if (_sent || _entries.empty()) return;
+  auto files = std::vector<AttachFile>();
+  for (const auto &entry : _entries) {
+    if (!entry->ready) return;
+    files.push_back(entry->file);
+  }
+  const auto compress = !adw_switch_row_get_active(ADW_SWITCH_ROW(_asDocuments));
+  const auto group = adw_switch_row_get_active(ADW_SWITCH_ROW(_group));
+  if (_args.send && _args.send(files, compress, group, caption())) {
     _sent = true;
     close();
-    return;
   }
-  // Not sent (an error was shown): the files stay here.
-  for (auto i = 0; i != int(_entries.size()) && i != int(list.files.size()); ++i) {
-    *_entries[i]->file = std::move(list.files[i]);
-  }
+  // Not sent: an error was shown, the files stay here.
 }
 
 }  // namespace Contrail

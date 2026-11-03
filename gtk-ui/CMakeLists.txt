@@ -76,6 +76,7 @@ add_library(contrail_core STATIC
   map_view.cpp
   memory_trim.cpp
   message.cpp
+  photo_viewer.cpp
   picture_decode.cpp
   reactions.cpp
   td/chat_row.cpp
@@ -88,7 +89,8 @@ add_library(contrail_core STATIC
   td/strings.cpp
   text.cpp
   topic_list.cpp
-  userpics.cpp)
+  userpics.cpp
+  zoom_view.cpp)
 # Settings and the app in the background: notifications, the tray icon, memory, the proxy.
 target_sources(contrail_core PRIVATE
   background_debug.cpp
@@ -144,6 +146,31 @@ if (CONTRAIL_TESTS)
   target_link_libraries(memory-pressure-test PRIVATE contrail_core)
   # Its checks are asserts: kept in a release build too.
   target_compile_options(memory-pressure-test PRIVATE -UNDEBUG)
+  # The viewer's and the player's arithmetic, without a display.
+  add_executable(zoom-geometry-test ${ROOT}/tests/zoom-geometry.cpp)
+  target_include_directories(zoom-geometry-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_executable(media-progress-test ${ROOT}/tests/media-progress.cpp)
+  target_include_directories(media-progress-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_compile_definitions(td-message-text-test PRIVATE
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
+endif()
+
+# Section media-view: voice messages and music are played and recorded through FFmpeg and OpenAL.
+pkg_check_modules(CONTRAIL_PLAYER_DEPS REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libavutil openal)
+target_sources(contrail_core PRIVATE media/audio_player.cpp media/voice_recorder.cpp voice_record_bar.cpp)
+target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_PLAYER_DEPS)
+if (CONTRAIL_TESTS)
+  add_executable(voice-waveform-test ${ROOT}/tests/td/voice-waveform-test.cpp)
+  target_link_libraries(voice-waveform-test PRIVATE contrail_core)
+endif()
+
+# Section media-send: files sent from the attach dialog and the clipboard.
+pkg_check_modules(CONTRAIL_ATTACH_DEPS REQUIRED IMPORTED_TARGET libswscale)
+target_sources(contrail_core PRIVATE attach.cpp attach_media.cpp)
+target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_ATTACH_DEPS)
+if (CONTRAIL_TESTS)
+  add_executable(paste-test ${ROOT}/tests/paste.cpp)
+  target_link_libraries(paste-test PRIVATE contrail_core)
+  add_executable(attach-test ${ROOT}/tests/td/attach-test.cpp)
+  target_link_libraries(attach-test PRIVATE contrail_core)
 endif()

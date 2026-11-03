@@ -23,6 +23,18 @@
 #      live locations: the bar, one's own sent, moved, on the shared map and stopped there, and going on after a
 #      restart; the chat's card with a group's members, a member's card, muting from it; the contacts with a
 #      search; About;
+#   11. the photo viewer: the full size shown, a pinch up to 6x and no further, a drag within the edges, a double
+#      tap and Ctrl+wheel, Save to Pictures, its textures gone once it is closed, by itself or with its chat.
+#   12. the player: a voice message downloading plays, pauses, plays on, the next voice message follows by itself; a
+#      song downloaded slower than it plays waits for its data, a seek far ahead moves the download there, the next
+#      song follows; a drag along the bar; it plays on with the chat closed; stopped, its thread is gone.
+#   13. recording a voice message: the microphone only with an empty field, held and let go it is sent as Ogg Opus
+#      with its waveform and plays; a tap only says to hold, slid left it is deleted, slid up it records on with the
+#      chat closed and is sent from it opened again; another chat ends it; it pauses what plays.
+#   14. sending files: the refused ones and why, the dialog's tiles, removing one, its title and switches, a photo and a
+#      video in an album with the caption on the photo, as documents, twelve photos in albums of ten and two in
+#      order, the caption's limit, the upload's progress and a tap that stops it; pasting a picture, files and text
+#      (and paste-test, which needs a display).
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -31,11 +43,16 @@ missing=$(ldd "$BIN" | awk '/not found/{print $1}')
 if [[ -n $missing ]]; then
   LIBS=~/.cache/contrail-scenario/libs
   mkdir -p "$LIBS"
-  for lib in $missing; do
-    [[ -e $LIBS/$lib ]] || podman run --rm -v "$LIBS":/out:z localhost/contrail-desktop \
-      sh -c "cp -L /usr/lib/x86_64-linux-gnu/$lib /out/" || { echo "no $lib in localhost/contrail-desktop" >&2; exit 1; }
-  done
   export LD_LIBRARY_PATH=$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  # A library copied may need others missing here (FFmpeg's do): ldd sees them once it is there.
+  for _ in 1 2 3 4 5; do
+    [[ -n $missing ]] || break
+    for lib in $missing; do
+      [[ -e $LIBS/$lib ]] || podman run --rm -v "$LIBS":/out:z localhost/contrail-desktop \
+        sh -c "cp -L /usr/lib/x86_64-linux-gnu/$lib /out/" || { echo "no $lib in localhost/contrail-desktop" >&2; exit 1; }
+    done
+    missing=$(ldd "$BIN" | awk '/not found/{print $1}')
+  done
 fi
 if [[ -z ${CONTRAIL_UI_INNER:-} ]]; then
   exec env CONTRAIL_UI_INNER=1 dbus-run-session -- xvfb-run -a -s '-screen 0 420x900x24' "$0" "$BIN"
@@ -172,7 +189,7 @@ start 120
 c 'chat 1' 3
 c forward 1
 line=$(asked 'forward picker:' forward-picker)
-[[ $line == *'page=chats forum=0 shown=43 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
+[[ $line == *'page=chats forum=0 shown=44 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
   || fail "the chats to forward to: $line"
 c 'forward-search club' 0.5
 line=$(asked 'forward picker:' forward-picker)
@@ -742,4 +759,295 @@ section_background() {
   echo "   ok"
 }
 section_background
+# Section media-view: the photo viewer.
+viewer() { asked 'viewer:' viewer-state; }
+section_media_view_viewer() {
+  echo "11. The photo viewer"
+  start 150
+  c 'chat 42' 3
+  c 'tap 20' 1.5
+  local line
+  line=$(viewer)
+  [[ $line == *'open=1 message='*' shown=1/2 size=2560x1920 loading=0 '*'scale=1.000 '*'texture=2560x1920'* ]] \
+    || fail "the viewer didn't show the full photo: $line"
+  c tree 0.5
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  # A pinch zooms around the middle, up to 6x and no further.
+  c 'viewer-pinch 2' 0.3
+  line=$(viewer)
+  [[ $line == *'scale=2.000 '*'middle=0.5000,0.5000'* ]] || fail "the pinch: $line"
+  c 'viewer-pinch 10' 0.3
+  [[ $(viewer) == *'scale=6.000 '* ]] || fail "zoomed past 6x: $(viewer)"
+  # A drag moves the zoomed photo, never past its edge.
+  c 'viewer-pan 100 0' 0.3
+  line=$(viewer)
+  [[ $line != *'middle=0.5000,0.5000'* ]] || fail "the drag didn't move it: $line"
+  c 'viewer-pan 100000 100000' 0.3
+  [[ $(viewer) == *'photo=0.0,0.0 '* ]] || fail "dragged past the edge: $(viewer)"
+  # A double tap goes back to the whole photo, another zooms in where it was.
+  c 'viewer-double 100 100' 0.3
+  [[ $(viewer) == *'scale=1.000 '* ]] || fail "a double tap on a zoomed photo: $(viewer)"
+  c 'viewer-double 100 100' 0.3
+  [[ $(viewer) == *'scale=2.500 '* ]] || fail "a double tap: $(viewer)"
+  c 'viewer-double 100 100' 0.3
+  # Ctrl+wheel: up zooms in, down out.
+  c 'viewer-wheel -1' 0.3
+  [[ $(viewer) == *'scale=1.150 '* ]] || fail "Ctrl+wheel: $(viewer)"
+  c 'viewer-wheel 5' 0.3
+  [[ $(viewer) == *'scale=1.000 '* ]] || fail "Ctrl+wheel out: $(viewer)"
+  # Save copies the photo to Pictures.
+  c viewer-save 1
+  ls "$WORK"/pictures/photo_*.jpg > /dev/null 2>&1 || fail "Save in the viewer put nothing in Pictures"
+  # Closed, its textures go.
+  c 'viewer-close' 1.5
+  line=$(viewer)
+  [[ $line == *'open=0 textures=0'* ]] || fail "the textures stayed after closing: $line"
+  # A chat closed under the viewer takes it along.
+  c 'tap 20' 1.5
+  c back 1.5
+  [[ $(viewer) == *'open=0 textures=0'* ]] || fail "the viewer stayed with its chat closed: $(viewer)"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  echo "   ok"
+}
+section_media_view_viewer
+
+# Section media-view: the player. The sound goes nowhere (OpenAL's null output).
+player() { asked 'player:' player-state; }
+# Waits up to $2 seconds for the player's state to match $1.
+player_until() {
+  local line
+  for _ in $(seq $(( ${2:-5} * 5 ))); do
+    line=$(player)
+    [[ $line == $1 ]] && return 0
+    sleep 0.2
+  done
+  fail "the player never got to $1: $line"
+}
+position() { player | sed -n 's/.* position=\([0-9.]*\).*/\1/p'; }
+# The app's threads, without GLib's shared pool: its idle threads come and go with any async call.
+own_threads() { cat /proc/"$P"/task/*/comm | grep -vc '^pool-'; }
+section_media_view_player() {
+  echo "12. The player"
+  export ALSOFT_DRIVERS=null
+  start 150
+  local threads line before after
+  threads=$(own_threads)
+  c 'chat 44' 3
+  line=$(asked 'chat media:' 'media 2')
+  [[ $line == *'document="0:03"'*'icon=media-playback-start-symbolic'* ]] || fail "a voice message before it plays: $line"
+  # A voice message not downloaded yet: "Loading…", then it plays.
+  c 'player-play 2' 0.3
+  player_until '*status=loading message=2 *' 2
+  player_until '*status=playing message=2 *thread=1*' 6
+  line=$(asked 'chat media:' 'media 2')
+  [[ $line == *'document="0:0'?' / 0:03"'*'icon=media-playback-pause-symbolic'* ]] || fail "a voice message playing: $line"
+  # A pause keeps the place, a tap plays on from it.
+  c player-pause 0.5
+  before=$(position)
+  sleep 0.6
+  after=$(position)
+  [[ $(player) == *'status=paused '* && $before == "$after" ]] || fail "the pause: $before then $after, $(player)"
+  [[ $(asked 'chat media:' 'media 2') == *'icon=media-playback-start-symbolic'* ]] || fail "the icon of a paused one"
+  c 'player-play 2' 0.8
+  player_until '*status=playing message=2 *' 2
+  # It ends, the next voice message plays, and nothing after it: the song isn't a voice message.
+  player_until '*status=playing message=3 *' 6
+  player_until '*status=stopped *thread=0*' 5
+  [[ $(asked 'chat media:' 'media 2') == *'document="0:03"'*'bar=0 '* ]] || fail "the bar after the end"
+  # A song downloaded slower than it plays waits for its data.
+  c 'player-play 4' 0.3
+  player_until '*status=playing message=4 *' 8
+  player_until '*waiting=1*' 10
+  line=$(asked 'chat media:' 'media 4')
+  [[ $line == *'fill='*'Loading…'* || $line == *'Loading…'*'fill='* ]] || fail "waiting doesn't show: $line"
+  # A seek far ahead asks for the download from there.
+  c 'player-seek 0.9' 0.3
+  player_until '*status=playing message=4 position=11.*' 8
+  grep -q 'media file 4000003 asked from [1-9]' "$WORK/log.txt" || fail "the download wasn't moved for the seek"
+  # The next song follows; a drag along its bar plays it from there.
+  player_until '*status=playing message=5 *' 8
+  c 'player-drag 0.5' 0.5
+  line=$(player)
+  [[ $line == *'status=playing message=5 position=2.'* || $line == *'status=playing message=5 position=3.'* ]] \
+    || fail "the drag: $line"
+  # The chat closed, the song plays on.
+  c back 1
+  [[ $(player) == *'status=playing message=5 '* ]] || fail "closing the chat stopped the song: $(player)"
+  c 'chat 44' 2
+  c player-stop 0.5
+  [[ $(player) == *'status=stopped '*'thread=0'* ]] || fail "stopped: $(player)"
+  (( $(own_threads) <= threads + 1 )) || fail "threads stayed: $threads before, $(own_threads) now"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  unset ALSOFT_DRIVERS
+  echo "   ok"
+}
+section_media_view_player
+
+# Section media-view: recording a voice message. The microphone is the scenario's tone.
+voice() { asked 'voice:' voice-state; }
+section_media_view_recording() {
+  echo "13. Recording a voice message"
+  export ALSOFT_DRIVERS=null CONTRAIL_SCENARIO_MICROPHONE=1
+  start 150
+  local line sent
+  c 'chat 44' 3
+  [[ $(voice) == *'recording=0 '*'mic=1 bar=0 '* ]] || fail "the microphone with an empty field: $(voice)"
+  c 'type Hello' 0.3
+  [[ $(voice) == *'mic=0 '* ]] || fail "the microphone with a text: $(voice)"
+  c 'type' 0.3
+  [[ $(voice) == *'mic=1 '* ]] || fail "the microphone after the text went: $(voice)"
+  # Held: the bar, the lock above; let go, it is sent.
+  c voice-hold 1.6
+  line=$(voice)
+  [[ $line == *'recording=1 holding=1 locked=0 '*'bar=1 time=0:01'*' lock=1 active=1 '*'thread=1'* ]] \
+    || fail "recording while held: $line"
+  c 'voice-drag -60 -10' 0.3
+  [[ $(voice) == *'recording=1 '*' hint=0.6'* ]] || fail "slide to cancel doesn't follow the finger: $(voice)"
+  c voice-release 1
+  line=$(voice)
+  [[ $line == *'recording=0 '*'mic=1 bar=0 '*'active=0 '*'thread=0 sent=2s waveform=63'* ]] || fail "sent: $line"
+  grep -q 'Scenario: voice message sent: duration=2 waveform=63 size=[1-9]' "$WORK/log.txt" || fail "nothing sent"
+  # It is Ogg Opus that plays, as long as it was recorded.
+  c 'player-play 7' 0.3
+  player_until '*status=playing message=7 *length=1.[5-9]*' 5
+  c player-stop 0.3
+  # A tap only says to hold the button.
+  c voice-hold 0.1
+  c voice-release 0.5
+  grep -q 'toast: Please hold' "$WORK/log.txt" || fail "a tap didn't say to hold"
+  # Slid left, it is deleted.
+  c voice-hold 1.2
+  c 'voice-drag -130 0' 0.5
+  [[ $(voice) == *'recording=0 '*'bar=0 '*'active=0 '* ]] || fail "slid left: $(voice)"
+  sent=$(grep -c 'Scenario: voice message sent' "$WORK/log.txt")
+  (( sent == 1 )) || fail "$sent sent after deleting"
+  # Slid up, it records on without the finger, with the chat closed too.
+  c voice-hold 0.5
+  c 'voice-drag 0 -100' 0.3
+  [[ $(voice) == *'recording=1 holding=0 locked=1 '*'lock=0 '* ]] || fail "locked: $(voice)"
+  c back 1.5
+  [[ $(voice) == *'active=1 '* ]] || fail "closing the chat ended the recording: $(voice)"
+  c 'chat 44' 2
+  line=$(voice)
+  [[ $line == *'recording=1 holding=0 locked=1 '*'bar=1 '*'active=1 '* ]] || fail "the chat opened again: $line"
+  c voice-send 1
+  grep -q 'Scenario: voice message sent: duration=[3-9]' "$WORK/log.txt" || fail "the locked one wasn't sent"
+  # Another chat opened ends it.
+  c voice-start 1
+  c 'chat 0' 2
+  [[ $(voice) == *'recording=0 '*'active=0 '* ]] || fail "another chat didn't end it: $(voice)"
+  (( $(grep -c 'Scenario: voice message sent' "$WORK/log.txt") == 2 )) || fail "the one ended by another chat was sent"
+  # It pauses what plays.
+  c 'chat 44' 2
+  c 'player-play 3' 0.3
+  player_until '*status=playing message=3 *' 4
+  c voice-start 0.5
+  [[ $(player) == *'status=paused '* ]] || fail "the player plays on while recording: $(player)"
+  c voice-delete 0.5
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  unset ALSOFT_DRIVERS CONTRAIL_SCENARIO_MICROPHONE
+  echo "   ok"
+}
+section_media_view_recording
+
+# Section media-send: files sent from the attach dialog and the clipboard.
+attach() { asked 'attach state:' attach-state; }
+sent() { grep -c 'Scenario: sent ' "$WORK/log.txt" || true; }
+section_media_send_attach() {
+  echo "14. Sending files"
+  "$(dirname "$BIN")/paste-test" > /dev/null || fail "paste-test"
+  start 150
+  local F=$WORK/files line before
+  mkdir -p "$F/folder"
+  magick -size 3000x2000 xc:skyblue "$F/photo.png"
+  magick -size 400x300 xc:orange "$F/small.jpg"
+  ffmpeg -loglevel error -f lavfi -i testsrc=size=320x240:rate=10 -t 2 -pix_fmt yuv420p "$F/clip.mp4"
+  printf 'notes\n' > "$F/notes.txt"
+  : > "$F/empty.txt"
+  head -c 2097152 /dev/urandom > "$F/big.bin"
+  truncate -s 2100M "$F/huge.bin"  # Sparse: nothing is written.
+  c 'chat 2' 3
+  # Nothing that can be sent: the window says why, no dialog.
+  c "attach-files $F/empty.txt|$F/folder" 1
+  grep -q 'toast: File: empty.txt is empty' "$WORK/log.txt" || fail "an empty file wasn't refused"
+  grep -q 'toast: File: folder is empty' "$WORK/log.txt" || fail "a folder wasn't refused"
+  [[ $(attach) == *'no dialog'* ]] || fail "a dialog for nothing to send: $(attach)"
+  c "attach-files $F/huge.bin" 1
+  grep -q "toast: huge.bin: The document can't be sent, because it is larger than 2000 MB." "$WORK/log.txt" \
+    || fail "a file too large wasn't refused"
+  # Some refused: the dialog says why; a photo, a video and a file.
+  c "attach-files $F/photo.png|$F/clip.mp4|$F/notes.txt|$F/empty.txt" 3
+  line=$(attach)
+  [[ $line == *'entries=3 ready=3 documents=0 documentsShown=1 group=1 groupShown=1 send=1 refused="File: empty.txt is empty and can'"'"'t be sent." title="3 files selected"'* ]] \
+    || fail "the dialog: $line"
+  grep -q 'attach entry: type=1 size=[0-9]* 2560x170[67] .*thumbnail=0 photo=1' "$WORK/log.txt" || fail "the photo wasn't made 2560 wide"
+  grep -q 'attach entry: type=2 size=[0-9]* 320x240 duration=2 thumbnail=1' "$WORK/log.txt" || fail "the video's thumbnail"
+  c 'attach-remove 2' 0.3
+  [[ $(attach) == *'entries=2 '* ]] || fail "removing one: $(attach)"
+  # An album of the photo and the video, the caption on the photo.
+  before=$(sent)
+  c 'attach-caption Hello' 0.3
+  c attach-send 1
+  [[ $(attach) == *'no dialog'* ]] || fail "the dialog stayed after Send: $(attach)"
+  (( $(sent) == before + 2 )) || fail "$(( $(sent) - before )) sent instead of 2"
+  grep -q 'Scenario: sent photo .*album=1 caption="Hello"' "$WORK/log.txt" || fail "the photo with the caption in an album"
+  grep -q 'Scenario: sent video .*thumbnail=1 album=1 caption=""' "$WORK/log.txt" || fail "the video in the album"
+  sleep 2
+  [[ $(asked 'chat media:' 'media 0') == *'[photo] ['* ]] || fail "the album isn't one row: $(asked 'chat media:' 'media 0')"
+  # Only photos: "images", and as documents one album of files.
+  c "attach-files $F/small.jpg|$F/photo.png" 3
+  [[ $(attach) == *'title="2 images selected"'* ]] || fail "images: $(attach)"
+  c 'attach-documents on' 0.3
+  [[ $(attach) == *'documents=1 '*'title="2 files selected"'* ]] || fail "as documents: $(attach)"
+  c attach-send 1
+  grep -q 'Scenario: sent document name=small.jpg .*album=2' "$WORK/log.txt" || fail "as documents in an album"
+  grep -q 'Scenario: sent document name=photo.png .*album=2' "$WORK/log.txt" || fail "the second document"
+  # Twelve photos: albums of ten and two, in order.
+  local list=
+  for i in $(seq 12); do cp "$F/small.jpg" "$F/p$i.jpg"; list+="${list:+|}$F/p$i.jpg"; done
+  c "attach-files $list" 4
+  [[ $(attach) == *'entries=12 ready=12 '* ]] || fail "twelve: $(attach)"
+  before=$(sent)
+  c attach-send 1.5
+  (( $(sent) == before + 12 )) || fail "$(( $(sent) - before )) of twelve sent"
+  (( $(grep -c 'Scenario: sent photo .*album=3 ' "$WORK/log.txt") == 10 )) || fail "the first album isn't ten"
+  (( $(grep -c 'Scenario: sent photo .*album=4 ' "$WORK/log.txt") == 2 )) || fail "the second album isn't two"
+  # A caption too long: said, and the files stay.
+  c "attach-files $F/notes.txt" 2
+  c "attach-caption $(printf 'x%.0s' $(seq 1100))" 0.3
+  c attach-send 1
+  grep -q 'toast: You.ve reached the media caption limit. Please make the caption shorter by 76 characters.' "$WORK/log.txt" \
+    || fail "the caption's limit"
+  [[ $(attach) == *'entries=1 '* ]] || fail "the files went with a caption too long: $(attach)"
+  c attach-cancel 1
+  # A large file: its upload's progress, and a tap stops it.
+  c "attach-files $F/big.bin" 2
+  c attach-send 1.5
+  line=$(asked 'chat media:' 'media 0')
+  [[ $line == *'local=1 '*'document="'*' MB · '*'%"'*'progress='*'icon=process-stop-symbolic'* ]] || fail "the upload's progress: $line"
+  c 'tap 0 0' 1
+  grep -q 'Scenario: upload of file [0-9]* stopped at [1-9]' "$WORK/log.txt" || fail "the tap didn't stop the upload"
+  [[ $(asked 'chat media:' 'media 0') != *'local=1 '* ]] || fail "the message stopped stays"
+  # Pasted: a picture goes to the dialog, its text back to the field when it is cancelled; files; text stays text.
+  c "attach-copy-image $F/small.jpg" 0.3
+  c attach-paste 2
+  # (The plural form is the language's: LANG=C has none of its own.)
+  [[ $(attach) == *'entries=1 ready=1 '*'title="1 image'* ]] || fail "a pasted picture: $(attach)"
+  c attach-cancel 1
+  c "attach-copy-files $F/notes.txt|$F/clip.mp4" 0.3
+  c attach-paste 3
+  [[ $(attach) == *'entries=2 ready=2 '* ]] || fail "pasted files: $(attach)"
+  c attach-cancel 1
+  c 'attach-copy-text Pasted text' 0.3
+  c attach-paste 1
+  [[ $(asked 'attach field:' attach-field) == *'"Pasted text"'* ]] || fail "pasted text: $(asked 'attach field:' attach-field)"
+  [[ $(attach) == *'no dialog'* ]] || fail "text opened the dialog"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  echo "   ok"
+}
+section_media_send_attach
 echo "PASS"

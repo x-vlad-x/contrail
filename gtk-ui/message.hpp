@@ -1,11 +1,13 @@
 #pragma once
 
 #include "app.hpp"
+#include "media/audio_player.hpp"
 #include "td/store.hpp"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,12 @@ struct MessageItem {
   [[nodiscard]] std::int64_t id() const { return data->id_; }
   [[nodiscard]] bool local() const { return data->sending_state_ != nullptr; }  // Sending, or failed to.
 };
+
+// The photo of a message (or of its link preview) that has `file` among its sizes, null when there is none.
+[[nodiscard]] const Td::api::photo *PhotoWithFile(const Td::api::MessageContent *content, Td::FileId file);
+
+// What the player plays of a voice message or a song, nothing for other messages.
+[[nodiscard]] std::optional<AudioPlayer::Track> PlayerTrack(const Td::api::message &message);
 
 // What a reply shows of the message it answers.
 struct ReplyPreview {
@@ -109,6 +117,10 @@ class MessageWidget final {
     GtkWidget *ring = nullptr;
     bool voice = false;
     int duration = 0;
+    // A voice message's or a song's bar: the position, and how much has come while it streams (its fill level).
+    GtkWidget *voiceProgress = nullptr;
+    bool voiceNote = false;
+    bool seeking = false;  // A finger or the mouse moves the position: the bar shows where it is.
     std::string fallbackStatus;  // A video's length, "GIF": what stands there without a download.
     // A location: its map comes from TDLib's answer, which mustn't land in a cell built again since.
     std::shared_ptr<char> location;
@@ -128,7 +140,11 @@ class MessageWidget final {
   GtkWidget *buildPhoto(Cell &cell, const Td::api::photo &photo, int maxWidth, bool preview = false);
   GtkWidget *buildSticker(Cell &cell, const Td::api::sticker &sticker);
   GtkWidget *buildDocument(Cell &cell, const Td::api::file &file, const std::string &name, const char *icon);
-  GtkWidget *buildVoice(Cell &cell, const Td::api::file &file, int duration, const std::string &title);
+  GtkWidget *buildVoice(Cell &cell, const Td::api::file &file, int duration, const std::string &title, bool voiceNote);
+  [[nodiscard]] AudioPlayer::Track trackOf(const Cell &cell) const;
+  void setupSeeking(Cell &cell);
+  void cancelSeeking();
+  void updatePlayback(const AudioPlayer::State &state);
   GtkWidget *buildVideoThumb(Cell &cell, int width, int height, const Td::api::minithumbnail *mini,
                              const Td::api::thumbnail *thumbnail, const Td::api::file &file, int duration, bool gif,
                              bool round, int maxWidth);
@@ -172,6 +188,8 @@ class MessageWidget final {
   guint _highlightTimeout = 0;
   guint _liveTimer = 0;  // Live locations: "updated N minutes ago" and the time left go on.
   SignalConnections _signals;
+  Td::Lifetime _playerLifetime;  // While a cell plays through the player: made again with the cells.
+  bool _playerWatched = false;
 };
 
 }  // namespace Contrail

@@ -8,6 +8,8 @@
 #include "local_state.hpp"
 #include "login.hpp"
 #include "memory_guard.hpp"
+#include "media/audio_player.hpp"
+#include "media/voice_recorder.hpp"
 #include "memory_trim.hpp"
 #include "network.hpp"
 #include "notifications.hpp"
@@ -164,6 +166,8 @@ void MainWindow::clearChats() {
   updateTray();
   _authorized = false;
   _saved = std::nullopt;
+  _player = nullptr;
+  _recorder = nullptr;
   _store = nullptr;
 }
 
@@ -184,6 +188,16 @@ void MainWindow::clearViews() {
   _topics = nullptr;
   _archive = nullptr;
   _chatList = nullptr;
+}
+
+VoiceRecorder *MainWindow::recorder() {
+  if (!_recorder && _store) _recorder = std::make_unique<VoiceRecorder>(*_store);
+  return _recorder.get();
+}
+
+AudioPlayer *MainWindow::player() {
+  if (!_player && _store) _player = std::make_unique<AudioPlayer>(*_store);
+  return _player.get();
 }
 
 void MainWindow::present() {
