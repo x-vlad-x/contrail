@@ -96,6 +96,14 @@ void SettingsView::buildBackground(GtkWidget *prefs) {
   adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group), Tr("lng_settings_window_close").c_str());
   addSwitch(group, "background", Tr("lng_settings_run_in_background"), Settings().background);
   adw_preferences_page_add(ADW_PREFERENCES_PAGE(prefs), ADW_PREFERENCES_GROUP(group));
+
+  auto *network = adw_preferences_group_new();
+  auto *proxy = adw_button_row_new();
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(proxy), Tr("lng_proxy_settings").c_str());
+  adw_button_row_set_start_icon_name(ADW_BUTTON_ROW(proxy), "network-server-symbolic");
+  Connect<void(AdwButtonRow *)>(proxy, "activated", [this](AdwButtonRow *) { _window.openProxy(); });
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(network), proxy);
+  adw_preferences_page_add(ADW_PREFERENCES_PAGE(prefs), ADW_PREFERENCES_GROUP(network));
 }
 
 void SettingsView::buildOther(GtkWidget *prefs) {

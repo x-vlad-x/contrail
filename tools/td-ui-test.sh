@@ -579,6 +579,35 @@ section_background() {
   c 'settings-set notify 1' 0.3
   c 'settings-set background 0' 1
   [[ $(bg) == *'window=1 visible=1 background=0 tray=none'* ]] || fail "the tray icon stayed: $(bg)"
+  # The proxies: added through the dialog, used, checked, edited, removed, turned off and on.
+  proxies() { asked 'proxy: use' proxy-state; }
+  c settings 1
+  c proxy 1
+  [[ $(proxies) == *'proxy: use=0' ]] || fail "proxies before any was added: $(proxies)"
+  c 'proxy-add socks5 good.example 1080 user secret' 0.5
+  line=$(proxies)
+  [[ $line == *'use=1 [0 SOCKS5 good.example:1080 enabled status="connecting…"]' ]] || fail "not used: $line"
+  sleep 2
+  [[ $(proxies) == *'[0 SOCKS5 good.example:1080 enabled status="online"]' ]] || fail "not connected: $(proxies)"
+  c 'proxy-add mtproto down.example 443' 0.5
+  grep -q 'proxy: dialog save=0' "$WORK/log.txt" || fail "an MTProto proxy without a secret can be saved"
+  c 'proxy-add mtproto down.example 443 dd0123456789abcdef' 2.5
+  line=$(proxies)
+  [[ $line == *'[0 SOCKS5 good.example:1080 status="available (ping: 42 ms)"] [1 MTProto down.example:443 enabled status="online"]' ]] \
+    || fail "two proxies: $line"
+  c 'proxy-enable 0' 2.5
+  [[ $(proxies) == *'enabled status="online"] [1 MTProto down.example:443 status="not available"]' ]] \
+    || fail "the other one: $(proxies)"
+  c 'proxy-edit 0 http good.example 8080' 1
+  c 'proxy-remove 1' 1
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="'* ]] || fail "edited and removed: $(proxies)"
+  [[ $(proxies) != *'[1 '* ]] || fail "not removed: $(proxies)"
+  c 'proxy-use 0' 1
+  [[ $(proxies) == *'use=0 [0 HTTP good.example:8080 status="available (ping: 42 ms)"]' ]] || fail "turned off: $(proxies)"
+  c 'proxy-use 1' 2.5
+  [[ $(proxies) == *'use=1 [0 HTTP good.example:8080 enabled status="online"]' ]] || fail "turned on again: $(proxies)"
+  c back 0.5
+  c back 0.5
   # Logging out asks first; then a new session starts, without "you were logged out".
   c settings-logout 0.5
   [[ $(asked 'dialog:' dialog) == *'heading="Are you sure you want to log out?"'* ]] || fail "no question before logging out"

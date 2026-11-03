@@ -24,7 +24,10 @@
 //   edit-last (the up arrow in the empty field)
 //   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
 //   launcher) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
-//   mem-guard (its state) | mem-simulate low|critical | notify-state | proxy-...
+//   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
+//   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
+//   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
+//   proxy-enable N | proxy-remove N
 #include "debug.hpp"
 
 #include "background_debug.hpp"

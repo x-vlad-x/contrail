@@ -9,6 +9,7 @@
 #include "memory_guard.hpp"
 #include "memory_trim.hpp"
 #include "notifications.hpp"
+#include "proxy.hpp"
 #include "settings.hpp"
 #include "td/message_text.hpp"
 #include "td/session.hpp"
@@ -175,6 +176,7 @@ void MainWindow::clearViews() {
     adw_navigation_view_replace(_sidebarNav, nullptr, 0);
     adw_navigation_view_remove(_sidebarNav, _chatList->page());
   }
+  _proxy = nullptr;
   _settings = nullptr;
   _topics = nullptr;
   _archive = nullptr;
@@ -579,6 +581,28 @@ void MainWindow::openSettings() {
       }
     }, this);
   });
+}
+
+void MainWindow::openProxy() {
+  if (!_store || !_settings || !_window) return;
+  if (!_proxy) {
+    _proxy = std::make_unique<ProxyView>(*_store, *this);
+    Connect<void(AdwNavigationPage *)>(_proxy->page(), "hidden", [this](AdwNavigationPage *) {
+      g_idle_add_once(+[](gpointer data) {
+        auto *self = static_cast<MainWindow *>(data);
+        if (self->_proxy && self->_sidebarNav
+            && adw_navigation_view_find_page(self->_sidebarNav, "proxy") != self->_proxy->page()) {
+          self->_proxy = nullptr;
+        }
+      }, this);
+    });
+  }
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (adw_navigation_view_find_page(_sidebarNav, "proxy")) {
+    adw_navigation_view_pop_to_page(_sidebarNav, _proxy->page());
+  } else {
+    adw_navigation_view_push(_sidebarNav, _proxy->page());
+  }
 }
 
 void MainWindow::showAbout() {

@@ -19,6 +19,7 @@ class ChatView;
 class LoginView;
 class MemoryGuard;
 class Notifier;
+class ProxyView;
 class SettingsView;
 class TrayIcon;
 class TopicList;
@@ -72,6 +73,9 @@ class MainWindow final {
   void openSettings();
   void showAbout();
   [[nodiscard]] SettingsView *settingsView() const { return _settings.get(); }
+  // The proxies, over the settings.
+  void openProxy();
+  [[nodiscard]] ProxyView *proxyView() const { return _proxy.get(); }
   // "Run in the background" was turned on or off: the tray icon, and whether closing the window quits.
   void backgroundChanged();
   // The window goes and its interface with it; TDLib, notifications and calls stay. Opening the app builds it
@@ -136,6 +140,7 @@ class MainWindow final {
   };
   GtkApplication *_application = nullptr;
   std::unique_ptr<SettingsView> _settings;
+  std::unique_ptr<ProxyView> _proxy;
   std::unique_ptr<TrayIcon> _tray;
   std::unique_ptr<Notifier> _notifier;  // While signed in, with or without the window.
   std::unique_ptr<MemoryGuard> _memoryGuard;

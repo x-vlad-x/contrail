@@ -4,6 +4,7 @@
 #include "main_window.hpp"
 #include "memory_guard.hpp"
 #include "notifications.hpp"
+#include "proxy.hpp"
 #include "settings.hpp"
 #include "tray.hpp"
 
@@ -53,6 +54,28 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
     if (auto *notifier = window.notifier()) {
       notifier->debugAction(std::atoll(rest.c_str()), action.substr(0, space),
                             space == std::string::npos ? std::string() : action.substr(space + 1));
+    }
+  } else if (name == "proxy") {
+    window.openProxy();
+  } else if (name.starts_with("proxy-")) {
+    auto *proxy = window.proxyView();
+    if (!proxy) {
+      g_message("proxy: closed");
+    } else if (name == "proxy-state") {
+      proxy->debugState();
+    } else if (name == "proxy-add") {
+      proxy->debugAdd(rest);
+    } else if (name == "proxy-edit") {
+      const auto gap = rest.find(' ');
+      proxy->debugAdd(gap == std::string::npos ? std::string() : rest.substr(gap + 1), std::atoi(rest.c_str()));
+    } else if (name == "proxy-use") {
+      proxy->debugUse(std::atoi(rest.c_str()) != 0);
+    } else if (name == "proxy-enable") {
+      proxy->debugEnable(std::atoi(rest.c_str()));
+    } else if (name == "proxy-remove") {
+      proxy->debugRemove(std::atoi(rest.c_str()));
+    } else {
+      return false;
     }
   } else {
     return false;

@@ -87,6 +87,7 @@ target_sources(contrail_core PRIVATE
   background_debug.cpp
   memory_guard.cpp
   notifications.cpp
+  proxy.cpp
   settings.cpp
   tray.cpp)
 

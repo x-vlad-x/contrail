@@ -2068,8 +2068,8 @@ class ScenarioTransport final : public Transport {
   // --- settings and the app in the background ------------------------------------
 
   template <typename Type>
-  static Type *As(api::Object *object) {
-    return object && object->get_id() == Type::ID ? static_cast<Type *>(object) : nullptr;
+  static const Type *As(const api::Object *object) {
+    return object && object->get_id() == Type::ID ? static_cast<const Type *>(object) : nullptr;
   }
 
   bool backgroundRequest(std::uint64_t id, api::Function &function) {
@@ -2128,6 +2128,45 @@ class ScenarioTransport final : public Transport {
         _notes.clear();
         answer(id, api::make_object<api::ok>());
         return true;
+      case api::getProxies::ID:
+        answer(id, addedProxies());
+        return true;
+      case api::addProxy::ID:
+      case api::editProxy::ID: {
+        const auto edit = function.get_id() == api::editProxy::ID;
+        auto &proxy = edit ? static_cast<api::editProxy &>(function).proxy_ : static_cast<api::addProxy &>(function).proxy_;
+        const auto enable = edit ? static_cast<api::editProxy &>(function).enable_ : static_cast<api::addProxy &>(function).enable_;
+        auto it = edit ? std::ranges::find(_proxies, static_cast<api::editProxy &>(function).proxy_id_, &Proxy::id)
+                       : _proxies.end();
+        if (edit && it == _proxies.end()) {
+          answer(id, api::make_object<api::error>(400, "PROXY_NOT_FOUND"));
+          return true;
+        }
+        if (!edit) it = _proxies.insert(_proxies.end(), Proxy{.id = ++_proxyIds});
+        it->proxy = CopyProxy(*proxy);
+        if (enable) useProxy(it->id);
+        answer(id, addedProxy(*it));
+        return true;
+      }
+      case api::enableProxy::ID:
+        useProxy(static_cast<api::enableProxy &>(function).proxy_id_);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::disableProxy::ID:
+        useProxy(0);
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::removeProxy::ID:
+        std::erase_if(_proxies, [&](const Proxy &proxy) { return proxy.id == static_cast<api::removeProxy &>(function).proxy_id_; });
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::pingProxy::ID: {
+        // A server named "down..." doesn't answer.
+        const auto &proxy = static_cast<api::pingProxy &>(function).proxy_;
+        if (proxy && proxy->server_.starts_with("down")) answer(id, api::make_object<api::error>(400, "Connection refused"));
+        else answer(id, api::make_object<api::seconds>(0.042));
+        return true;
+      }
       case api::logOut::ID:
         // As TDLib does: the session ends and its data goes; the program starts a new client.
         answer(id, api::make_object<api::ok>());
@@ -2162,6 +2201,48 @@ class ScenarioTransport final : public Transport {
         kNotifyGroup, api::make_object<api::notificationGroupTypeMessages>(), chat, chat, 1, int(_notes.size()),
         std::move(added), std::vector<std::int32_t>()));
   }
+
+  struct Proxy {
+    std::int32_t id = 0;
+    api::object_ptr<api::proxy> proxy;
+    bool enabled = false;
+    std::int32_t lastUsed = 0;
+  };
+  static api::object_ptr<api::proxy> CopyProxy(const api::proxy &proxy) {
+    auto type = api::object_ptr<api::ProxyType>();
+    if (const auto socks = As<api::proxyTypeSocks5>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeSocks5>(socks->username_, socks->password_);
+    } else if (const auto http = As<api::proxyTypeHttp>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeHttp>(http->username_, http->password_, http->http_only_);
+    } else if (const auto mtproto = As<api::proxyTypeMtproto>(proxy.type_.get())) {
+      type = api::make_object<api::proxyTypeMtproto>(mtproto->secret_);
+    }
+    return api::make_object<api::proxy>(proxy.server_, proxy.port_, std::move(type));
+  }
+  api::object_ptr<api::addedProxy> addedProxy(const Proxy &proxy) {
+    return api::make_object<api::addedProxy>(proxy.id, proxy.lastUsed, proxy.enabled, std::string(),
+                                             CopyProxy(*proxy.proxy));
+  }
+  api::object_ptr<api::addedProxies> addedProxies() {
+    auto result = api::make_object<api::addedProxies>();
+    for (const auto &proxy : _proxies) result->proxies_.push_back(addedProxy(proxy));
+    return result;
+  }
+  // As TDLib does when the way to the servers changes: connecting for a moment, then connected.
+  void useProxy(std::int32_t id) {
+    for (auto &proxy : _proxies) {
+      proxy.enabled = proxy.id == id;
+      if (proxy.enabled) proxy.lastUsed = kNow;
+    }
+    update(api::make_object<api::updateConnectionState>(
+        id ? api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnectingToProxy>())
+           : api::object_ptr<api::ConnectionState>(api::make_object<api::connectionStateConnecting>())));
+    later(1500, [this] {
+      update(api::make_object<api::updateConnectionState>(api::make_object<api::connectionStateReady>()));
+    });
+  }
+  std::vector<Proxy> _proxies;
+  std::int32_t _proxyIds = 0;
 
   static constexpr auto kNotifyChat = std::int64_t(5);
   static constexpr auto kNotifyGroup = std::int32_t(1);
