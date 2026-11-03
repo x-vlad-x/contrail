@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -58,6 +60,24 @@ constexpr auto kCustomThumbnailFile = 2000002;
 constexpr auto kCustomAnimatedFile = 2000003;
 constexpr auto kUnreadReactionChat = std::int64_t(2);
 constexpr auto kReactionBurstMs = 150u;
+// A channel below the reactions one with a post of every kind the chat shows: text with entities among emoji, a
+// video, a GIF, a sticker, polls, a contact, a link preview with a picture, a file, a photo, service messages; and a
+// sponsored message after the newest post. Its video, GIF and file come in steps once asked for
+// (cancelDownloadFile stops them). Anywhere, sending "/fail text" fails and can be sent again, "/slow text" is
+// confirmed after a while. Friend 3's newest message has a bot command and a mention.
+constexpr auto kShowcaseId = std::int64_t(-600);
+constexpr auto kShowcaseGroupId = std::int64_t(600);
+constexpr auto kShowcaseOrder = std::int64_t(1) << 29;
+constexpr auto kShowcaseMessages = 20;
+constexpr auto kShowcaseVideoFile = 3000001;
+constexpr auto kShowcaseGifFile = 3000002;
+constexpr auto kShowcaseStickerFile = 3000003;
+constexpr auto kShowcaseDocumentFile = 3000004;
+constexpr auto kSponsoredMessageId = std::int64_t(5);
+constexpr auto kDownloadStepMs = 200u;
+constexpr auto kDownloadStep = std::int64_t(128 * 1024);
+constexpr auto kSlowSendMs = 1500u;
+constexpr auto kCommandChat = std::int64_t(3);
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -66,6 +86,10 @@ int MessagesInChat() {
     return value ? std::max(std::atoi(value), 120) : 120;
   }();
   return result;
+}
+
+int Count(std::int64_t chat) {
+  return chat == kShowcaseId ? kShowcaseMessages : MessagesInChat();
 }
 
 api::object_ptr<api::formattedText> Formatted(const std::string &text) {
@@ -245,6 +269,83 @@ api::object_ptr<api::MessageContent> PhotoContent(int index) {
   return content;
 }
 
+// UTF-16 units, as TDLib counts the entities.
+int Utf16Length(std::string_view text) {
+  auto units = 0;
+  for (const auto c : text) {
+    const auto byte = static_cast<unsigned char>(c);
+    if ((byte & 0xC0) != 0x80) units += (byte >= 0xF0) ? 2 : 1;
+  }
+  return units;
+}
+
+// `text` with the entities given to parts of it.
+class Marked {
+ public:
+  explicit Marked(std::string text) : _text(Formatted(text)) {}
+  Marked &&mark(const std::string &part, api::object_ptr<api::TextEntityType> type) && {
+    const auto at = _text->text_.find(part);
+    if (at != std::string::npos) {
+      _text->entities_.push_back(api::make_object<api::textEntity>(Utf16Length(_text->text_.substr(0, at)),
+                                                                   Utf16Length(part), std::move(type)));
+    }
+    return std::move(*this);
+  }
+  api::object_ptr<api::formattedText> take() && { return std::move(_text); }
+
+ private:
+  api::object_ptr<api::formattedText> _text;
+};
+
+api::object_ptr<api::MessageContent> TextContent(api::object_ptr<api::formattedText> text) {
+  auto content = api::make_object<api::messageText>();
+  content->text_ = std::move(text);
+  return content;
+}
+
+std::int64_t ShowcaseSize(std::int32_t file) {
+  switch (file) {
+    case kShowcaseVideoFile: return 3 * 1024 * 1024;
+    case kShowcaseGifFile: return 800 * 1024;
+    case kShowcaseDocumentFile: return 1536 * 1024;
+    default: return 30 * 1024;
+  }
+}
+
+// What a download of the showcase ends with: nothing plays it here, so what it holds doesn't matter. The sticker is
+// a real picture.
+std::string ShowcasePath(std::int32_t file) {
+  if (file == kShowcaseStickerFile) return EmojiFile("sticker.png", 0x60c060ff);
+  auto *name = g_strdup_printf("showcase-%d.bin", file);
+  auto *path = g_build_filename(g_get_user_cache_dir(), "contrail-scenario", name, nullptr);
+  auto result = std::string(path);
+  g_free(path);
+  g_free(name);
+  if (!g_file_test(result.c_str(), G_FILE_TEST_EXISTS)) g_file_set_contents(result.c_str(), "scenario", -1, nullptr);
+  return result;
+}
+
+api::object_ptr<api::poll> MakePoll(bool voted) {
+  auto poll = api::make_object<api::poll>();
+  poll->id_ = voted ? 2 : 1;
+  poll->question_ = Formatted(voted ? "Which one do you carry?" : "Which phone runs Contrail best?");
+  const char *answers[] = {"FLX1s", "PinePhone", "Librem 5"};
+  const int percents[] = {50, 30, 20};
+  for (auto i = 0; i < 3; ++i) {
+    auto option = api::make_object<api::pollOption>();
+    option->id_ = std::to_string(i);
+    option->text_ = Formatted(answers[i]);
+    option->voter_count_ = voted ? percents[i] / 10 : 0;
+    option->vote_percentage_ = voted ? percents[i] : 0;
+    option->is_chosen_ = voted && i == 0;
+    poll->options_.push_back(std::move(option));
+  }
+  poll->total_voter_count_ = voted ? 10 : 12;
+  poll->is_anonymous_ = true;
+  poll->type_ = api::make_object<api::pollTypeRegular>();
+  return poll;
+}
+
 std::string MessageText(int index) {
   switch (index % 5) {
     case 0: return "Message " + std::to_string(index);
@@ -268,6 +369,8 @@ class ScenarioTransport final : public Transport {
     if (_source) g_source_remove(_source);
     if (_ticker) g_source_remove(_ticker);
     if (_burst) g_source_remove(_burst);
+    if (_downloadTicker) g_source_remove(_downloadTicker);
+    for (auto *later : std::set<Later *>(_later)) g_source_remove(later->source);
   }
 
   void start(Sink sink) override {
@@ -280,7 +383,10 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
-    if (forumRequest(id, *function) || pinnedRequest(id, *function) || reactionRequest(id, *function)) return;
+    if (showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
+        || reactionRequest(id, *function)) {
+      return;
+    }
     switch (function->get_id()) {
       case api::setTdlibParameters::ID:
         answer(id, api::make_object<api::ok>());
@@ -467,6 +573,7 @@ class ScenarioTransport final : public Transport {
     }
     addForum();
     addReactionsChannel();
+    addShowcase();
     update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("\xE2\x9D\xA4")));
     if (!_fullList) return;
     addOtherChats();
@@ -633,6 +740,7 @@ class ScenarioTransport final : public Transport {
   }
 
   api::object_ptr<api::message> messageAt(std::int64_t chatId, int index) {
+    if (chatId == kShowcaseId) return showcaseMessage(index);
     const auto sender = index % 3 == 0 ? kSelfId : chatId;
     auto message = MakeMessage(chatId, index * kIdStep, sender, kNow - (MessagesInChat() - index) * 600, MessageText(index));
     if (chatId == kReactionsChannelId) {
@@ -644,6 +752,12 @@ class ScenarioTransport final : public Transport {
       message->content_ = std::move(content);
     }
     if (WithPhotos() && index % 4 == 1) message->content_ = PhotoContent(index);
+    if (chatId == kCommandChat && index == MessagesInChat()) {
+      message->content_ = TextContent(Marked("Try /help, or ask @friend1")
+                                          .mark("/help", api::make_object<api::textEntityTypeBotCommand>())
+                                          .mark("@friend1", api::make_object<api::textEntityTypeMention>())
+                                          .take());
+    }
     if (chatId == 1 && index == kPinnedPhoto) {
       auto photo = api::move_object_as<api::messagePhoto>(PhotoContent(index));
       photo->photo_->minithumbnail_ = MiniThumbnail();
@@ -664,15 +778,16 @@ class ScenarioTransport final : public Transport {
   ObjectPtr history(api::getChatHistory &request) {
     auto result = api::make_object<api::messages>();
     const auto chatId = request.chat_id_;
-    auto newest = request.from_message_id_ ? int(request.from_message_id_ / kIdStep) : MessagesInChat() + 1;
+    const auto count = Count(chatId);
+    auto newest = request.from_message_id_ ? int(request.from_message_id_ / kIdStep) : count + 1;
     // from_message_id itself is included only with a negative offset, as in TDLib.
     newest -= request.offset_;
     if (request.offset_ == 0) --newest;
-    if (newest > MessagesInChat() + _sentExtra[chatId]) newest = MessagesInChat() + _sentExtra[chatId];
+    if (newest > count + _sentExtra[chatId]) newest = count + _sentExtra[chatId];
     for (auto index = newest; index >= 1 && int(result->messages_.size()) < request.limit_; --index) {
       result->messages_.push_back(messageAt(chatId, index));
     }
-    result->total_count_ = MessagesInChat();
+    result->total_count_ = count;
     return result;
   }
 
@@ -682,7 +797,66 @@ class ScenarioTransport final : public Transport {
         && request.input_message_content_->get_id() == api::inputMessageText::ID) {
       text = static_cast<api::inputMessageText &>(*request.input_message_content_).text_->text_;
     }
+    if (text.starts_with("/fail ")) return failing(request.chat_id_, text.substr(6));
+    if (text.starts_with("/slow ")) return outgoing(request.chat_id_, Entry{.text = text.substr(6)}, kSlowSendMs);
     return outgoing(request.chat_id_, Entry{.text = text});
+  }
+
+  // A message that fails to be sent, a moment after it was: it stays with its error until it is sent again.
+  api::object_ptr<api::message> failing(std::int64_t chatId, const std::string &text) {
+    const auto temporary = (Count(chatId) + _sentExtra[chatId] + 1) * kIdStep + 1 + 2 * (++_failures);
+    const auto pending = [=] {
+      auto message = MakeMessage(chatId, temporary, kSelfId, kNow, text);
+      message->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
+      return message;
+    };
+    update(api::make_object<api::updateNewMessage>(pending()));
+    later(300, [this, chatId, temporary, text] {
+      auto failed = MakeMessage(chatId, temporary + 1, kSelfId, kNow, text);
+      auto state = api::make_object<api::messageSendingStateFailed>();
+      state->error_ = api::make_object<api::error>(400, "Scenario: not sent");
+      state->can_retry_ = true;
+      failed->sending_state_ = std::move(state);
+      _failed[{chatId, temporary + 1}] = text;
+      update(api::make_object<api::updateMessageSendFailed>(std::move(failed), temporary,
+                                                            api::make_object<api::error>(400, "Scenario: not sent")));
+    });
+    return pending();
+  }
+
+  // As TDLib does: the failed message goes, and a new one is sent in its place.
+  ObjectPtr resend(api::resendMessages &request) {
+    auto result = api::make_object<api::messages>();
+    for (const auto id : request.message_ids_) {
+      const auto it = _failed.find({request.chat_id_, id});
+      if (it == _failed.end()) continue;
+      const auto text = it->second;
+      _failed.erase(it);
+      update(api::make_object<api::updateDeleteMessages>(request.chat_id_, std::vector<std::int64_t>{id}, true, false));
+      result->messages_.push_back(outgoing(request.chat_id_, Entry{.text = text}));
+    }
+    result->total_count_ = int(result->messages_.size());
+    return result;
+  }
+
+  // Once, `ms` from now, unless the scenario has gone.
+  struct Later {
+    ScenarioTransport *self = nullptr;
+    std::function<void()> callback;
+    guint source = 0;
+  };
+  void later(guint ms, std::function<void()> callback) {
+    auto *data = new Later{this, std::move(callback), 0};
+    data->source = g_timeout_add_full(
+        G_PRIORITY_DEFAULT, ms,
+        +[](gpointer pointer) -> gboolean {
+          auto *later = static_cast<Later *>(pointer);
+          later->self->_later.erase(later);
+          later->callback();
+          return G_SOURCE_REMOVE;
+        },
+        data, +[](gpointer pointer) { delete static_cast<Later *>(pointer); });
+    _later.insert(data);
   }
 
   // --- what this account sent or forwarded ---------------------------------------
@@ -732,8 +906,9 @@ class ScenarioTransport final : public Transport {
                                                                       std::string());
   }
 
-  api::object_ptr<api::message> outgoing(std::int64_t chatId, Entry entry) {
-    const auto index = MessagesInChat() + ++_sentExtra[chatId];
+  // `delay`: the server confirms it that much later.
+  api::object_ptr<api::message> outgoing(std::int64_t chatId, Entry entry, guint delay = 0) {
+    const auto index = Count(chatId) + ++_sentExtra[chatId];
     const auto id = index * kIdStep;
     _entries[{chatId, id}] = std::move(entry);
     const auto temporary = id + 1;
@@ -742,10 +917,15 @@ class ScenarioTransport final : public Transport {
     pending->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
     auto shown = messageAt(chatId, index);
     shown->id_ = temporary;
+    shown->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
     update(api::make_object<api::updateNewMessage>(std::move(shown)));
-    update(api::make_object<api::updateMessageSendSucceeded>(messageAt(chatId, index), temporary));
-    update(api::make_object<api::updateChatLastMessage>(chatId, messageAt(chatId, index),
-                                                        std::vector<api::object_ptr<api::chatPosition>>()));
+    const auto succeeded = [this, chatId, index, temporary] {
+      update(api::make_object<api::updateMessageSendSucceeded>(messageAt(chatId, index), temporary));
+      update(api::make_object<api::updateChatLastMessage>(chatId, messageAt(chatId, index),
+                                                          std::vector<api::object_ptr<api::chatPosition>>()));
+    };
+    if (delay) later(delay, succeeded);
+    else succeeded();
     return pending;
   }
 
@@ -758,7 +938,7 @@ class ScenarioTransport final : public Transport {
       return topicMessage(topic->id, index, index > kTopicMessages ? _sentTexts[id] : "");
     }
     const auto index = int(id / kIdStep);
-    if (index < 1 || index > MessagesInChat() + _sentExtra[chatId]) return nullptr;
+    if (index < 1 || index > Count(chatId) + _sentExtra[chatId]) return nullptr;
     return messageAt(chatId, index);
   }
 
@@ -1203,6 +1383,341 @@ class ScenarioTransport final : public Transport {
     }
   }
 
+  // --- the showcase channel, sponsored messages, links, downloads ------------------
+
+  void addShowcase() {
+    auto group = api::make_object<api::supergroup>();
+    group->id_ = kShowcaseGroupId;
+    group->member_count_ = 1200;
+    group->is_channel_ = true;
+    group->status_ = api::make_object<api::chatMemberStatusMember>(0);
+    update(api::make_object<api::updateSupergroup>(std::move(group)));
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kShowcaseId;
+    chat->type_ = api::make_object<api::chatTypeSupergroup>(kShowcaseGroupId, true);
+    chat->title_ = "Showcase";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->last_message_ = messageAt(kShowcaseId, kShowcaseMessages);
+    chat->last_read_inbox_message_id_ = kShowcaseMessages * kIdStep;
+    chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kShowcaseOrder, false, nullptr));
+    _orders[kShowcaseId] = {kShowcaseOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+  }
+
+  // As TDLib has it now: the sticker is here from the start, the rest once its download has come.
+  api::object_ptr<api::file> showcaseFile(std::int32_t id) {
+    const auto size = ShowcaseSize(id);
+    const auto it = _downloads.find(id);
+    const auto downloaded = (id == kShowcaseStickerFile) ? size : (it == _downloads.end() ? 0 : it->second.downloaded);
+    const auto complete = downloaded >= size;
+    auto local = api::make_object<api::localFile>();
+    local->path_ = complete ? ShowcasePath(id) : std::string();
+    local->can_be_downloaded_ = true;
+    local->is_downloading_active_ = it != _downloads.end() && it->second.active;
+    local->is_downloading_completed_ = complete;
+    local->downloaded_size_ = downloaded;
+    local->downloaded_prefix_size_ = downloaded;
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->size_ = size;
+    file->local_ = std::move(local);
+    file->remote_ = api::make_object<api::remoteFile>();
+    return file;
+  }
+
+  api::object_ptr<api::message> showcaseMessage(int index) {
+    auto message = MakeMessage(kShowcaseId, index * kIdStep, kSelfId, kNow - (kShowcaseMessages - index) * 600, "");
+    message->sender_id_ = api::make_object<api::messageSenderChat>(kShowcaseId);
+    message->is_outgoing_ = false;
+    message->is_channel_post_ = true;
+    const auto user = [&](std::int64_t id) {
+      message->sender_id_ = api::make_object<api::messageSenderUser>(id);
+      message->is_channel_post_ = false;
+    };
+    switch (index) {
+      case 1: message->content_ = api::make_object<api::messageSupergroupChatCreate>("Showcase"); break;
+      case 2:
+        message->content_ = TextContent(
+            Marked("😀 Bold, italic and a link; 👍 then @friend1, #contrail, /help, t.me/friend1/5 and a tg link")
+                .mark("Bold", api::make_object<api::textEntityTypeBold>())
+                .mark("italic", api::make_object<api::textEntityTypeItalic>())
+                .mark("a link", api::make_object<api::textEntityTypeTextUrl>("https://example.org/page"))
+                .mark("@friend1", api::make_object<api::textEntityTypeMention>())
+                .mark("#contrail", api::make_object<api::textEntityTypeHashtag>())
+                .mark("/help", api::make_object<api::textEntityTypeBotCommand>())
+                .mark("t.me/friend1/5", api::make_object<api::textEntityTypeUrl>())
+                .mark("a tg link", api::make_object<api::textEntityTypeTextUrl>("tg://resolve?domain=friend2"))
+                .take());
+        break;
+      case 3: message->content_ = api::make_object<api::messageChatChangeTitle>("Showcase"); break;
+      case 4: {
+        auto video = api::make_object<api::video>();
+        video->duration_ = 42;
+        video->width_ = 1280;
+        video->height_ = 720;
+        video->file_name_ = "clip.mp4";
+        video->mime_type_ = "video/mp4";
+        video->minithumbnail_ = MiniThumbnail();
+        video->video_ = showcaseFile(kShowcaseVideoFile);
+        auto content = api::make_object<api::messageVideo>();
+        content->video_ = std::move(video);
+        content->caption_ = Formatted("A video");
+        message->content_ = std::move(content);
+        break;
+      }
+      case 5: {
+        auto animation = api::make_object<api::animation>();
+        animation->duration_ = 3;
+        animation->width_ = 320;
+        animation->height_ = 240;
+        animation->file_name_ = "loop.mp4";
+        animation->mime_type_ = "video/mp4";
+        animation->minithumbnail_ = MiniThumbnail();
+        animation->animation_ = showcaseFile(kShowcaseGifFile);
+        auto content = api::make_object<api::messageAnimation>();
+        content->animation_ = std::move(animation);
+        content->caption_ = Formatted(std::string());
+        message->content_ = std::move(content);
+        break;
+      }
+      case 6: {
+        auto sticker = api::make_object<api::sticker>();
+        sticker->id_ = 77;
+        sticker->width_ = 512;
+        sticker->height_ = 512;
+        sticker->emoji_ = "😀";
+        sticker->format_ = api::make_object<api::stickerFormatWebp>();
+        sticker->full_type_ = api::make_object<api::stickerFullTypeRegular>(nullptr);
+        sticker->sticker_ = showcaseFile(kShowcaseStickerFile);
+        message->content_ = api::make_object<api::messageSticker>(std::move(sticker), false);
+        break;
+      }
+      case 7:
+      case 8: {
+        auto content = api::make_object<api::messagePoll>();
+        content->poll_ = MakePoll(index == 8);
+        content->description_ = Formatted(std::string());
+        message->content_ = std::move(content);
+        break;
+      }
+      case 9:
+        message->content_ = api::make_object<api::messageContact>(
+            api::make_object<api::contact>("491701234567", "Anna", "K", std::string(), 0));
+        break;
+      case 10: {
+        auto content = api::move_object_as<api::messageText>(TextContent(
+            Marked("Read https://example.org/article")
+                .mark("https://example.org/article", api::make_object<api::textEntityTypeUrl>())
+                .take()));
+        auto photo = api::make_object<api::photo>();
+        photo->minithumbnail_ = MiniThumbnail();
+        photo->sizes_.push_back(PhotoSize(3, "m", 320, 240));
+        photo->sizes_.push_back(PhotoSize(3, "w", 2560, 1920));
+        auto page = api::make_object<api::linkPreview>();
+        page->url_ = "https://example.org/article";
+        page->display_url_ = "example.org/article";
+        page->site_name_ = "Example";
+        page->title_ = "A page with a picture";
+        page->description_ = Formatted("Its picture comes with the preview, and the chat goes on scrolling.");
+        page->type_ = api::make_object<api::linkPreviewTypeArticle>(std::move(photo));
+        content->link_preview_ = std::move(page);
+        message->content_ = std::move(content);
+        break;
+      }
+      case 11:
+        user(2);
+        message->content_ = api::make_object<api::messageChatAddMembers>(std::vector<std::int64_t>{4});
+        break;
+      case 12: message->content_ = api::make_object<api::messagePinMessage>(2 * kIdStep); break;
+      case 13: {
+        auto photo = api::make_object<api::chatPhoto>();
+        photo->sizes_.push_back(PhotoSize(4, "a", 320, 240));
+        message->content_ = api::make_object<api::messageChatChangePhoto>(std::move(photo));
+        break;
+      }
+      case 14: {
+        auto document = api::make_object<api::document>();
+        document->file_name_ = "report.pdf";
+        document->mime_type_ = "application/pdf";
+        document->document_ = showcaseFile(kShowcaseDocumentFile);
+        message->content_ = api::make_object<api::messageDocument>(std::move(document), Formatted(std::string()));
+        break;
+      }
+      case 15:
+        message->content_ = TextContent(Formatted(
+            "A long line to wrap: "
+            "https://example.org/a/very/long/path/without/any/spaces/that/has/to/break/somewhere/inside/the/bubble "
+            "and Donaudampfschifffahrtsgesellschaftskapitänswitwenrentenversicherungsanstalt, then 😀😀😀 at the "
+            "end of it all, written to be wider than any phone and most windows."));
+        break;
+      case 16:
+        user(3);
+        message->content_ = api::make_object<api::messageChatJoinByLink>();
+        break;
+      case 17:
+        user(5);
+        message->content_ = api::make_object<api::messageChatDeleteMember>(5);
+        break;
+      case 18:
+        message->content_ = TextContent(Marked("🎉 A secret: hidden words 🙈, ask Friend 2 about it")
+                                            .mark("hidden words", api::make_object<api::textEntityTypeSpoiler>())
+                                            .mark("Friend 2", api::make_object<api::textEntityTypeMentionName>(2))
+                                            .take());
+        break;
+      case 19: message->content_ = api::make_object<api::messageChatDeletePhoto>(); break;
+      default: {
+        auto content = api::move_object_as<api::messagePhoto>(PhotoContent(index));
+        content->caption_ = Formatted("A photo with a caption");
+        message->content_ = std::move(content);
+        break;
+      }
+    }
+    return message;
+  }
+
+  api::object_ptr<api::sponsoredMessages> sponsoredMessages(std::int64_t chat) {
+    auto result = api::make_object<api::sponsoredMessages>();
+    if (chat != kShowcaseId) return result;
+    auto message = api::make_object<api::sponsoredMessage>();
+    message->message_id_ = kSponsoredMessageId;
+    message->can_be_reported_ = true;
+    message->content_ = TextContent(Formatted("Contrail: Telegram for the phones that run Linux."));
+    message->sponsor_ = api::make_object<api::advertisementSponsor>("https://t.me/friend1", nullptr,
+                                                                     "Sponsor: Example Ltd");
+    message->title_ = "Contrail";
+    message->button_text_ = "View Channel";
+    message->additional_info_ = "Ads by Telegram";
+    result->messages_.push_back(std::move(message));
+    return result;
+  }
+
+  // "friend3" is Friend 3's chat; "t.me/friend3/45" its message 45.
+  static std::int64_t FriendOf(std::string_view name) {
+    if (!name.starts_with("friend")) return 0;
+    const auto id = std::atoll(std::string(name.substr(6)).c_str());
+    return (id >= 1 && id <= kChatCount) ? id : 0;
+  }
+
+  static std::string LinkPath(std::string link) {
+    for (const auto *prefix : {"https://", "http://", "t.me/", "tg://resolve?domain="}) {
+      if (link.starts_with(prefix)) link.erase(0, std::string_view(prefix).size());
+    }
+    return link;
+  }
+
+  ObjectPtr internalLink(const std::string &link) {
+    const auto path = LinkPath(link);
+    if (!link.starts_with("tg:") && link.find("t.me/") == std::string::npos) {
+      return api::make_object<api::error>(400, "Not a Telegram link");
+    }
+    const auto slash = path.find('/');
+    const auto name = path.substr(0, slash);
+    if (slash != std::string::npos) return api::make_object<api::internalLinkTypeMessage>(link);
+    if (link.starts_with("tg://resolve?")) {
+      return api::make_object<api::internalLinkTypePublicChat>(name, std::string(), false, std::string());
+    }
+    if (link.starts_with("tg:")) return api::make_object<api::internalLinkTypeUnknownDeepLink>(link);
+    return api::make_object<api::internalLinkTypePublicChat>(name, std::string(), false, std::string());
+  }
+
+  ObjectPtr messageLinkInfo(const std::string &link) {
+    const auto path = LinkPath(link);
+    const auto slash = path.find('/');
+    const auto chat = FriendOf(path.substr(0, slash));
+    if (!chat || slash == std::string::npos) return api::make_object<api::error>(400, "Not found");
+    auto info = api::make_object<api::messageLinkInfo>();
+    info->is_public_ = true;
+    info->chat_id_ = chat;
+    info->message_ = messageAt(chat, std::atoi(path.c_str() + slash + 1));
+    return info;
+  }
+
+  void downloadTick() {
+    auto any = false;
+    for (auto &[file, download] : _downloads) {
+      if (!download.active) continue;
+      download.downloaded = std::min(download.downloaded + kDownloadStep, ShowcaseSize(file));
+      download.active = download.downloaded < ShowcaseSize(file);
+      any = any || download.active;
+      update(api::make_object<api::updateFile>(showcaseFile(file)));
+    }
+    if (!any && _downloadTicker) {
+      g_source_remove(_downloadTicker);
+      _downloadTicker = 0;
+    }
+  }
+
+  bool showcaseRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::getChatSponsoredMessages::ID:
+        answer(id, sponsoredMessages(static_cast<api::getChatSponsoredMessages &>(function).chat_id_));
+        return true;
+      case api::clickChatSponsoredMessage::ID: {
+        const auto &request = static_cast<api::clickChatSponsoredMessage &>(function);
+        g_message("Scenario: sponsored message %lld clicked, media=%d", (long long)request.message_id_,
+                  int(request.is_media_click_));
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::viewMessages::ID: {
+        const auto &request = static_cast<api::viewMessages &>(function);
+        if (request.chat_id_ == kShowcaseId && std::ranges::count(request.message_ids_, kSponsoredMessageId)) {
+          g_message("Scenario: sponsored message %lld viewed", (long long)kSponsoredMessageId);
+        }
+        return false;
+      }
+      case api::searchPublicChat::ID: {
+        const auto chat = FriendOf(static_cast<api::searchPublicChat &>(function).username_);
+        if (chat) answer(id, makeChat(chat));
+        else answer(id, api::make_object<api::error>(400, "USERNAME_NOT_OCCUPIED"));
+        return true;
+      }
+      case api::getInternalLinkType::ID:
+        answer(id, internalLink(static_cast<api::getInternalLinkType &>(function).link_));
+        return true;
+      case api::getMessageLinkInfo::ID:
+        answer(id, messageLinkInfo(static_cast<api::getMessageLinkInfo &>(function).url_));
+        return true;
+      case api::resendMessages::ID:
+        answer(id, resend(static_cast<api::resendMessages &>(function)));
+        return true;
+      case api::downloadFile::ID: {
+        const auto file = static_cast<api::downloadFile &>(function).file_id_;
+        if (file >= 1000000 && file < 2000000) {
+          // A photo: on disk from the start, and TDLib tells so in its answer.
+          const auto large = file % 10 == 1;
+          auto size = PhotoSize((file - 1000000) / 10, "x", large ? 2560 : 320, large ? 1920 : 240);
+          answer(id, std::move(size->photo_));
+          return true;
+        }
+        if (file < kShowcaseVideoFile || file > kShowcaseDocumentFile) return false;
+        auto &download = _downloads[file];
+        if (file != kShowcaseStickerFile && download.downloaded < ShowcaseSize(file)) {
+          download.active = true;
+          if (!_downloadTicker) {
+            _downloadTicker = g_timeout_add(kDownloadStepMs, +[](gpointer data) -> gboolean {
+              static_cast<ScenarioTransport *>(data)->downloadTick();
+              return G_SOURCE_CONTINUE;
+            }, this);
+          }
+        }
+        answer(id, showcaseFile(file));
+        return true;
+      }
+      case api::cancelDownloadFile::ID: {
+        const auto file = static_cast<api::cancelDownloadFile &>(function).file_id_;
+        if (const auto it = _downloads.find(file); it != _downloads.end() && it->second.active) {
+          it->second.active = false;
+          update(api::make_object<api::updateFile>(showcaseFile(file)));
+        }
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
   // --- the group with topics ---------------------------------------------------
 
   struct Topic {
@@ -1573,6 +2088,15 @@ class ScenarioTransport final : public Transport {
   std::map<std::pair<std::int64_t, std::int64_t>, Reactions> _reactions;  // By chat and message id, once asked.
   bool _reactionRead = false;
   bool _customDownloaded = false;
+  struct Download {
+    std::int64_t downloaded = 0;
+    bool active = false;
+  };
+  std::map<std::int32_t, Download> _downloads;  // The showcase's files asked for.
+  guint _downloadTicker = 0;
+  std::map<std::pair<std::int64_t, std::int64_t>, std::string> _failed;  // Not sent, by chat and message id.
+  int _failures = 0;
+  std::set<Later *> _later;
   guint _burst = 0;
   unsigned _burstSeed = 1;
   int _burstUpdates = 0;

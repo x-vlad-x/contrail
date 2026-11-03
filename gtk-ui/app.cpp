@@ -76,6 +76,9 @@ void ShowToast(const std::string &text) {
 }
 
 void OpenUri(const std::string &uri) {
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("open: %s", uri.c_str());
+  // The scenario has no account and no network: what would open is only told.
+  if (g_getenv("CONTRAIL_SCENARIO")) return;
   auto *launcher = gtk_uri_launcher_new(uri.c_str());
   auto *parent = GetApp().window ? GTK_WINDOW(GetApp().window->widget()) : nullptr;
   gtk_uri_launcher_launch(launcher, parent, nullptr, nullptr, nullptr);

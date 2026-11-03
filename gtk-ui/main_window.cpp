@@ -140,7 +140,16 @@ void MainWindow::present() {
 }
 
 void MainWindow::showToast(const std::string &text) {
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("toast: %s", text.c_str());
   adw_toast_overlay_add_toast(_toasts, adw_toast_new(text.c_str()));
+}
+
+void MainWindow::searchChats(const std::string &query) {
+  if (!_chatList || !_sidebarNav) return;
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  // As Back would: the archive or a group's topics go first.
+  adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
+  _chatList->startSearch(query);
 }
 
 void MainWindow::detach() {

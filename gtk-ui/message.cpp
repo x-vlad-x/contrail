@@ -624,6 +624,8 @@ MessageWidget::MessageWidget(Items items, ChatView &chat) : _items(std::move(ite
 }
 
 MessageWidget::~MessageWidget() {
+  // A menu open on this message mustn't outlive the row it is a child of (GTK warns of a row finalized with it).
+  _chat.dropMessageMenu(_row);
   _signals.clear();
   clearFiles();
   if (_highlightTimeout) {
@@ -660,6 +662,9 @@ void MessageWidget::refresh() {
   }
   _highlighted = nullptr;
   _replyPending = false;
+  _taps.clear();
+  // A menu open on the old widgets goes with them.
+  _chat.dropMessageMenu(_row);
   _name = _avatar = _footer = _footerTime = _footerStatus = _reactions = nullptr;
   build();
 }
@@ -707,6 +712,12 @@ void MessageWidget::build() {
     return;
   }
   auto &store = _chat.store();
+  if (first->sponsored) {
+    auto *line = buildSponsored(first);
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(_row), line);
+    _content = line;
+    return;
+  }
   if (isService()) {
     const auto text = Td::ServiceText(*first->data, store);
     // Some have no text (a group became a supergroup), and no line then.
@@ -984,6 +995,10 @@ GtkWidget *MessageWidget::buildMedia(Cell &cell, int maxWidth) {
       const auto &contact = static_cast<const api::messageContact *>(content)->contact_;
       return contact ? buildContact(*contact) : nullptr;
     }
+    case api::messagePoll::ID: {
+      const auto &poll = static_cast<const api::messagePoll *>(content)->poll_;
+      return poll ? buildPoll(*poll) : nullptr;
+    }
     default: return nullptr;
   }
 }
@@ -1005,6 +1020,40 @@ GtkWidget *MessageWidget::buildContact(const api::contact &contact) {
   gtk_label_set_ellipsize(GTK_LABEL(phone), PANGO_ELLIPSIZE_END);
   gtk_box_append(GTK_BOX(column), phone);
   gtk_box_append(GTK_BOX(box), column);
+  return box;
+}
+
+// The question and the answers; how they were voted once the user has voted or the poll is closed, as in 0.3.1.
+// Voting isn't here.
+GtkWidget *MessageWidget::buildPoll(const api::poll &poll) {
+  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(box, "poll");
+  if (poll.question_) {
+    auto *question = MakeTextLabel(*poll.question_);
+    gtk_widget_add_css_class(question, "heading");
+    gtk_box_append(GTK_BOX(box), question);
+  }
+  const auto voted = std::ranges::any_of(poll.options_, [](const auto &option) { return option && option->is_chosen_; });
+  const auto results = voted || poll.is_closed_;
+  for (const auto &option : poll.options_) {
+    if (!option) continue;
+    auto *line = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_box_append(GTK_BOX(line), option->text_ ? MakeTextLabel(*option->text_) : MakeTextLabel(std::string()));
+    if (results) {
+      auto *bar = gtk_progress_bar_new();
+      gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar), std::clamp(option->vote_percentage_, 0, 100) / 100.);
+      gtk_progress_bar_set_text(GTK_PROGRESS_BAR(bar), (std::to_string(option->vote_percentage_) + "%").c_str());
+      gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), TRUE);
+      if (option->is_chosen_) gtk_widget_add_css_class(bar, "poll-chosen");
+      gtk_box_append(GTK_BOX(line), bar);
+    }
+    gtk_box_append(GTK_BOX(box), line);
+  }
+  auto *votes = gtk_label_new(TrCount("lng_polls_votes_count", poll.total_voter_count_).c_str());
+  gtk_widget_add_css_class(votes, "dim-label");
+  gtk_widget_add_css_class(votes, "caption");
+  gtk_label_set_xalign(GTK_LABEL(votes), 0);
+  gtk_box_append(GTK_BOX(box), votes);
   return box;
 }
 
@@ -1135,6 +1184,11 @@ GtkWidget *MessageWidget::buildSticker(Cell &cell, const api::sticker &sticker) 
   }
   auto *frame = MakeMediaFrame(cell.picture, width, height);
   gtk_widget_set_halign(frame, GTK_ALIGN_START);
+  // A tap hands the sticker itself over, as a file: an animated one plays there.
+  if (sticker.sticker_) {
+    cell.documentFile = sticker.sticker_->id_;
+    openOnTap(frame, cell.item, sticker.sticker_->id_);
+  }
   return frame;
 }
 
@@ -1308,6 +1362,80 @@ GtkWidget *MessageWidget::buildWebPage(MessageItem *item) {
       });
   gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   return box;
+}
+
+// A sponsored message of a channel, as 0.3.1 drew it: its text, then a block like a link preview with "Ad" (or
+// "Recommended"), the title, the media, the button and what the advertiser has to say. No reactions, time or
+// menu. Every way of opening it is reported to TDLib (ChatView::sponsoredClicked) before the link opens.
+GtkWidget *MessageWidget::buildSponsored(MessageItem *item) {
+  const auto &sponsored = *item->sponsored;
+  auto *line = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_halign(line, GTK_ALIGN_START);
+  gtk_widget_set_margin_start(line, 8);
+  gtk_widget_set_margin_end(line, 8);
+  gtk_widget_set_margin_top(line, 6);
+  gtk_widget_set_margin_bottom(line, 2);
+  auto *bubble = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(bubble, "bubble");
+  gtk_widget_add_css_class(bubble, "incoming");
+  gtk_widget_add_css_class(bubble, "sponsored");
+  gtk_box_append(GTK_BOX(line), MakeHeightForWidthBin(bubble));
+  if (const auto text = TextOf(item)) {
+    gtk_box_append(GTK_BOX(bubble), MakeTextLabel(*text));
+  }
+  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+  gtk_widget_add_css_class(box, "webpage");
+  auto *site = gtk_label_new(
+      Tr(sponsored.is_recommended_ ? "lng_recommended_message_title" : "lng_sponsored_message_title").c_str());
+  gtk_widget_add_css_class(site, "webpage-site");
+  gtk_label_set_xalign(GTK_LABEL(site), 0);
+  gtk_box_append(GTK_BOX(box), site);
+  if (!sponsored.title_.empty()) {
+    auto *title = gtk_label_new(sponsored.title_.c_str());
+    gtk_widget_add_css_class(title, "heading");
+    gtk_label_set_xalign(GTK_LABEL(title), 0);
+    gtk_label_set_wrap(GTK_LABEL(title), TRUE);
+    gtk_label_set_wrap_mode(GTK_LABEL(title), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(title), 44);
+    gtk_box_append(GTK_BOX(box), title);
+  }
+  if (auto *media = buildMedia(addCell(item), kMaxPhotoWidth - 20)) {
+    gtk_box_append(GTK_BOX(box), media);
+  }
+  const auto url = sponsored.sponsor_ ? sponsored.sponsor_->url_ : std::string();
+  // HandleLink() may open another chat, and this row goes: the report comes first.
+  const auto open = [this, item, url] {
+    _chat.sponsoredClicked(*item, false);
+    HandleLink(url);
+  };
+  if (!url.empty()) {
+    auto *button = gtk_button_new_with_label(
+        (sponsored.button_text_.empty() ? Tr("lng_open_link") : sponsored.button_text_).c_str());
+    gtk_widget_add_css_class(button, "sponsored-button");
+    gtk_widget_set_margin_top(button, 4);
+    _signals.clicked(button, [open] {
+      if (TapAllowed()) open();
+    });
+    _taps.push_back(open);
+    gtk_box_append(GTK_BOX(box), button);
+  }
+  for (const auto *info : {&sponsored.additional_info_, sponsored.sponsor_ ? &sponsored.sponsor_->info_ : nullptr}) {
+    if (!info || info->empty()) continue;
+    auto *label = MakeTextLabel(*info);
+    gtk_widget_add_css_class(label, "dim-label");
+    gtk_widget_add_css_class(label, "caption");
+    gtk_box_append(GTK_BOX(box), label);
+  }
+  auto *click = gtk_gesture_click_new();
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      click, "released", [=](GtkGestureClick *, int, double x, double y) {
+        // The button and the media have their own taps.
+        auto *target = gtk_widget_pick(box, x, y, GTK_PICK_DEFAULT);
+        if (TapAllowed() && !url.empty() && !InteractiveTarget(target, box)) open();
+      });
+  gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
+  gtk_box_append(GTK_BOX(bubble), box);
+  return line;
 }
 
 // The reactions belong to the message of the bubble as a whole, as in Telegram's apps.
@@ -1571,6 +1699,7 @@ void MessageWidget::highlight(const MessageItem *item) {
 void MessageWidget::openOnTap(GtkWidget *widget, MessageItem *item, Td::FileId file) {
   const auto open = [=, this] {
     if (!TapAllowed()) return;
+    if (item->sponsored) _chat.sponsoredClicked(*item, true);
     const auto document = std::any_of(_cells.begin(), _cells.end(),
                                       [&](const auto &cell) { return cell->documentFile == file; });
     if (document) {
@@ -1579,6 +1708,7 @@ void MessageWidget::openOnTap(GtkWidget *widget, MessageItem *item, Td::FileId f
       _chat.openPhoto(*item, file);
     }
   };
+  _taps.push_back(open);
   if (GTK_IS_BUTTON(widget)) {
     _signals.clicked(widget, open);
     return;
@@ -1621,6 +1751,88 @@ void MessageWidget::setupGestures(GtkWidget *widget, MessageItem *item, bool swi
         }
       });
   gtk_widget_add_controller(widget, GTK_EVENT_CONTROLLER(pan));
+}
+
+namespace {
+
+// The widths of the bubbles and their texts under `widget`: a text wider than its bubble overflows it.
+void DescribeSizes(GtkWidget *widget, std::string &out) {
+  if (!gtk_widget_get_visible(widget)) return;
+  if (gtk_widget_has_css_class(widget, "bubble")) {
+    out += " bubble=" + std::to_string(gtk_widget_get_width(widget));
+  } else if (gtk_widget_has_css_class(widget, "message-text")) {
+    out += " text=" + std::to_string(gtk_widget_get_width(widget));
+  }
+  for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    DescribeSizes(child, out);
+  }
+}
+
+bool TapTextIn(GtkWidget *widget, const std::string &part) {
+  if (GTK_IS_LABEL(widget) && DebugTapLabel(widget, part)) return true;
+  for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    if (TapTextIn(child, part)) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+std::string MessageWidget::debugDescribe() const {
+  auto &store = _chat.store();
+  auto out = std::string("row=") + std::to_string(gtk_widget_get_width(_row)) + "x"
+             + std::to_string(gtk_widget_get_height(_row)) + " taps=" + std::to_string(_taps.size());
+  if (item()->sponsored) out += " sponsored";
+  if (_footerStatus && gtk_widget_get_visible(_footerStatus)) {
+    const auto icon = gtk_image_get_icon_name(GTK_IMAGE(_footerStatus));
+    out += std::string(" status=") + (icon ? icon : "");
+  }
+  DescribeSizes(_row, out);
+  for (const auto &cell : _cells) {
+    out += " [";
+    out += cell->kind == PictureKind::Photo       ? "photo"
+           : cell->kind == PictureKind::Sticker   ? "sticker"
+           : cell->kind == PictureKind::Thumbnail ? "thumbnail"
+                                                  : "none";
+    if (const auto id = cell->documentFile) {
+      const auto known = store.file(id);
+      out += " file=" + std::to_string(id);
+      out += known ? (known->complete ? " complete" : known->downloading ? " downloading" : " stopped") : " unknown";
+      if (known) out += " " + std::to_string(known->downloaded) + "/" + std::to_string(known->size);
+      if (_chat.opensWhenLoaded(id)) out += " opens";
+    }
+    if (cell->status && gtk_widget_get_visible(cell->status)) {
+      out += std::string(" status=\"") + gtk_label_get_text(GTK_LABEL(cell->status)) + "\"";
+    }
+    if (cell->ring && gtk_widget_get_visible(cell->ring)) {
+      out += " ring=" + std::to_string(GPOINTER_TO_INT(g_object_get_data(G_OBJECT(cell->ring), "contrail-fraction")));
+    }
+    if (cell->documentStatus) {
+      out += std::string(" document=\"") + gtk_label_get_text(GTK_LABEL(cell->documentStatus)) + "\"";
+    }
+    if (cell->loadProgress && gtk_widget_get_visible(cell->loadProgress)) {
+      out += " progress=" + std::to_string(int(gtk_progress_bar_get_fraction(GTK_PROGRESS_BAR(cell->loadProgress)) * 100));
+    }
+    if (cell->documentButton) {
+      const auto icon = gtk_button_get_icon_name(GTK_BUTTON(cell->documentButton));
+      out += std::string(" icon=") + (icon ? icon : "");
+    }
+    out += "]";
+  }
+  return out;
+}
+
+void MessageWidget::debugTap(int index) {
+  if (index < 0 || index >= int(_taps.size())) {
+    g_message("chat tap: the message has %zu taps", _taps.size());
+    return;
+  }
+  const auto tap = _taps[std::size_t(index)];  // The tap may build the row again.
+  tap();
+}
+
+bool MessageWidget::debugTapText(const std::string &part) {
+  return TapTextIn(_row, part);
 }
 
 }  // namespace Contrail

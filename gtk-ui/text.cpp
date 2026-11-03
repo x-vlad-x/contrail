@@ -4,6 +4,7 @@
 #include "layout.hpp"
 #include "main_window.hpp"
 #include "scroll_helpers.hpp"
+#include "td/strings.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -152,6 +153,22 @@ void ApplyLabelText(GtkWidget *label, LabelText *data) {
   DisableLabelGestures(label);
 }
 
+// A tap on a spoiler reveals the label's spoilers, on a link opens it.
+void TapTag(GtkWidget *label, LabelText *data, const Tag &tag) {
+  if (tag.spoiler && !data->revealed) {
+    data->revealed = true;
+    ApplyLabelText(label, data);
+    return;
+  }
+  const auto href = tag.href;  // HandleLink() may destroy the label (another chat opens).
+  if (!href.empty() && !tag.spoiler) HandleLink(href);
+}
+
+[[nodiscard]] std::string Lowercase(std::string text) {
+  for (auto &c : text) c = char(g_ascii_tolower(c));
+  return text;
+}
+
 GtkWidget *MakeLabel(std::string text, std::vector<Tag> tags) {
   auto *label = gtk_label_new(nullptr);
   ConfigureMessageWrapping(GTK_LABEL(label));
@@ -174,15 +191,7 @@ GtkWidget *MakeLabel(std::string text, std::vector<Tag> tags) {
   ApplyLabelText(label, raw);
   Connect<void(GtkGestureClick *, int, double, double)>(click, "released",
       [label, raw](GtkGestureClick *, int, double x, double y) {
-        const auto *link = TapAllowed() ? LinkAt(label, *raw, x, y) : nullptr;
-        if (!link) return;
-        if (link->spoiler) {
-          raw->revealed = true;
-          ApplyLabelText(label, raw);
-          return;
-        }
-        const auto href = link->href;  // HandleLink() may destroy the label (another chat opens).
-        HandleLink(href);
+        if (const auto *link = TapAllowed() ? LinkAt(label, *raw, x, y) : nullptr) TapTag(label, raw, *link);
       });
   return label;
 }
@@ -233,13 +242,121 @@ void HandleLink(const std::string &href) {
     lifetime.reset();
     store->client().request<api::chat>(api::make_object<api::createPrivateChat>(id, false), lifetime, open, failed);
   } else if (href.starts_with("tg-hashtag:")) {
-    // Search in the chat list isn't there yet.
+    // As in 0.3.1: the chat list searches for it.
+    window->searchChats(href.substr(std::string_view("tg-hashtag:").size()));
   } else if (href.starts_with("tg-command:")) {
     if (auto *chat = window->chatView()) chat->sendText(href.substr(std::string_view("tg-command:").size()));
+  } else if (IsTelegramLink(href)) {
+    OpenTelegramLink(href);
   } else {
-    // t.me links wait for getInternalLinkType: the browser hands them back to the app.
     OpenUri(href);
   }
+}
+
+bool IsTelegramLink(const std::string &href) {
+  auto link = Lowercase(href);
+  if (link.starts_with("tg://") || link.starts_with("tg:")) return true;
+  for (const auto *scheme : {"https://", "http://"}) {
+    if (link.starts_with(scheme)) link.erase(0, std::string_view(scheme).size());
+  }
+  if (link.starts_with("www.")) link.erase(0, 4);
+  for (const std::string_view host : {"t.me", "telegram.me", "telegram.dog"}) {
+    if (link.starts_with(host) && (link.size() == host.size() || link[host.size()] == '/')) return true;
+  }
+  return false;
+}
+
+void OpenTelegramLink(const std::string &href) {
+  // Only until the next link, as in HandleLink().
+  static auto lifetime = Td::Lifetime();
+  auto *window = GetApp().window;
+  auto *store = window ? window->store() : nullptr;
+  if (!store) return;
+  lifetime.reset();
+  auto &client = store->client();
+  // What isn't routed here yet: a web link goes to the browser (which may hand it back), a tg:// one can't.
+  const auto elsewhere = [href] {
+    if (Lowercase(href).starts_with("tg:")) {
+      ShowToast(Translated("This link can't be opened yet", "Эта ссылка пока не открывается",
+                           "Це посилання поки не відкривається"));
+    } else {
+      OpenUri(href);
+    }
+  };
+  const auto openChat = [window](api::chat &chat) { window->openChat(chat.id_); };
+  const auto failed = [](api::error &error) { ShowToast(error.message_); };
+  client.send(
+      api::make_object<api::getInternalLinkType>(href),
+      [window, &client, elsewhere, openChat, failed](Td::ObjectPtr object) {
+        if (!object) return;
+        switch (object->get_id()) {
+          case api::internalLinkTypePublicChat::ID: {
+            const auto &type = static_cast<api::internalLinkTypePublicChat &>(*object);
+            client.request<api::chat>(api::make_object<api::searchPublicChat>(type.chat_username_), lifetime,
+                                      openChat, failed);
+            break;
+          }
+          case api::internalLinkTypeBotStart::ID: {
+            // The bot's chat opens; its start button is the user's to press.
+            const auto &type = static_cast<api::internalLinkTypeBotStart &>(*object);
+            client.request<api::chat>(api::make_object<api::searchPublicChat>(type.bot_username_), lifetime,
+                                      openChat, failed);
+            break;
+          }
+          case api::internalLinkTypeMessage::ID: {
+            const auto &type = static_cast<api::internalLinkTypeMessage &>(*object);
+            client.request<api::messageLinkInfo>(
+                api::make_object<api::getMessageLinkInfo>(type.url_), lifetime,
+                [window](api::messageLinkInfo &info) {
+                  const auto message = info.message_ ? info.message_->id_ : 0;
+                  const auto forum = info.topic_id_ && info.topic_id_->get_id() == api::messageTopicForum::ID
+                                         ? static_cast<const api::messageTopicForum *>(info.topic_id_.get())
+                                         : nullptr;
+                  if (forum && forum->forum_topic_id_) {
+                    window->openTopic(info.chat_id_, forum->forum_topic_id_, message);
+                  } else if (info.chat_id_) {
+                    window->openChat(info.chat_id_, message);
+                  }
+                },
+                failed);
+            break;
+          }
+          case api::internalLinkTypeUserPhoneNumber::ID: {
+            const auto &type = static_cast<api::internalLinkTypeUserPhoneNumber &>(*object);
+            client.request<api::user>(
+                api::make_object<api::searchUserByPhoneNumber>(type.phone_number_, false), lifetime,
+                [&client, openChat, failed](api::user &user) {
+                  client.request<api::chat>(api::make_object<api::createPrivateChat>(user.id_, false), lifetime,
+                                            openChat, failed);
+                },
+                failed);
+            break;
+          }
+          default: elsewhere(); break;
+        }
+      },
+      lifetime);
+}
+
+bool DebugTapLabel(GtkWidget *label, const std::string &part) {
+  auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"));
+  if (!data || part.empty()) return false;
+  const Tag *found = nullptr;
+  for (const auto &tag : data->tags) {
+    const auto hidden = tag.spoiler && !data->revealed;
+    if ((!hidden && (tag.href.empty() || tag.spoiler))
+        || data->text.substr(tag.start, tag.end - tag.start).find(part) == std::string::npos) {
+      continue;
+    }
+    // A hidden spoiler over a link is a spoiler first, as for a finger.
+    if (!found || hidden) found = &tag;
+    if (hidden) break;
+  }
+  if (!found) return false;
+  g_message("chat tap: %s \"%s\"", (found->spoiler && !data->revealed) ? "spoiler" : found->href.c_str(),
+            data->text.substr(found->start, found->end - found->start).c_str());
+  TapTag(label, data, *found);
+  return true;
 }
 
 std::string ShortCount(std::int64_t count) {

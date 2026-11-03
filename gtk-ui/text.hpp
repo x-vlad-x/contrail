@@ -27,6 +27,16 @@ GtkWidget *MakeTextLabel(const std::string &text);
 // Opens a link from a message: web links in the browser, mentions in the app.
 void HandleLink(const std::string &href);
 
+// Telegram's own links (t.me, tg://) that a message has: the chats and messages they lead to open here, the rest in
+// the browser. The whole set of Telegram's links (invites, stickers, proxies, settings...) comes with their routing
+// later: this is where it goes.
+[[nodiscard]] bool IsTelegramLink(const std::string &href);
+void OpenTelegramLink(const std::string &href);
+
+// For the debug commands: a tap on the link or the spoiler of a message's label whose text has `part`, as a finger
+// does it. False when this label has none.
+bool DebugTapLabel(GtkWidget *label, const std::string &part);
+
 // A count as Telegram shortens it: 999, 1.2K, 3M.
 [[nodiscard]] std::string ShortCount(std::int64_t count);
 

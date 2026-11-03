@@ -17,6 +17,11 @@
 //   custom:ID) | unreact [N] (the user's own taken back) | reacted [N] (who reacted) | react-quick [N] (a double tap)
 //   reactions-more [N] (in its menu open, the button with all of them) | reactions-state [N] (its reactions and
 //   chips, the dialogs and the menu strip open, rows built so far)
+//   menu-state (the items of the message menu open) | menu-do ACTION (as a tap on one: copy, save, delete, retry,
+//   reply, forward, edit, pin...) | media [N] (what message N shows: its media and downloads, the sizes of its bubble
+//   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
+//   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
+//   edit-last (the up arrow in the empty field)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -230,6 +235,20 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugReactionsMore(std::atoll(rest.c_str()));
   } else if (name == "reactions-state" && window.chatView()) {
     window.chatView()->debugReactionsState(std::atoll(rest.c_str()));
+  } else if (name == "menu-state" && window.chatView()) {
+    window.chatView()->debugMenuState();
+  } else if (name == "menu-do" && window.chatView()) {
+    window.chatView()->debugMenuDo(rest);
+  } else if (name == "media" && window.chatView()) {
+    window.chatView()->debugMedia(std::atoll(rest.c_str()));
+  } else if (name == "tap" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    window.chatView()->debugTap(std::atoll(rest.c_str()), gap == std::string::npos ? 0 : std::atoi(rest.c_str() + gap + 1));
+  } else if (name == "tap-text" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    if (gap != std::string::npos) window.chatView()->debugTapText(std::atoll(rest.c_str()), rest.substr(gap + 1));
+  } else if (name == "sponsored" && window.chatView()) {
+    window.chatView()->debugSponsored();
   } else if (name == "dialog" || name == "dialog-check" || name == "dialog-answer") {
     DialogCommand(window, name, rest);
   } else if (name == "state" && window.chatView()) {
@@ -244,6 +263,8 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugReply();
   } else if (name == "edit" && window.chatView()) {
     window.chatView()->debugEdit(rest);
+  } else if (name == "edit-last" && window.chatView()) {
+    window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
   } else if (name == "login") {

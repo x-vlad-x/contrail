@@ -4,6 +4,7 @@
 #include "td/store.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -16,6 +17,10 @@ class ChatView;
 // the row of a message being sent survives the new id.
 struct MessageItem {
   Td::api::object_ptr<Td::api::message> data;
+  // A sponsored message of a channel (ChatView::showSponsored): `data` is made from it and holds its content; this
+  // keeps the rest. It goes right after the message `sponsoredAfter`.
+  Td::api::object_ptr<Td::api::sponsoredMessage> sponsored;
+  std::int64_t sponsoredAfter = 0;
   [[nodiscard]] std::int64_t id() const { return data->id_; }
   [[nodiscard]] bool local() const { return data->sending_state_ != nullptr; }  // Sending, or failed to.
 };
@@ -74,6 +79,11 @@ class MessageWidget final {
   // texture and its memory go. The downloads and the sizes stay. A new row of a chat has its pictures decoded
   // once the chat finds it near.
   void setPicturesNear(bool near);
+  // For the debug commands: what the cells show (their files, downloads, statuses), the sizes of the bubble and its
+  // texts; a tap on the media (or the button) `index`, as a finger does it; a tap on a link or spoiler with `part`.
+  [[nodiscard]] std::string debugDescribe() const;
+  void debugTap(int index);
+  [[nodiscard]] bool debugTapText(const std::string &part);
 
  private:
   enum class PictureKind { None, Photo, Sticker, Thumbnail };
@@ -119,7 +129,9 @@ class MessageWidget final {
                              const Td::api::thumbnail *thumbnail, const Td::api::file &file, int duration, bool gif,
                              bool round, int maxWidth);
   GtkWidget *buildContact(const Td::api::contact &contact);
+  GtkWidget *buildPoll(const Td::api::poll &poll);
   GtkWidget *buildWebPage(MessageItem *item);
+  GtkWidget *buildSponsored(MessageItem *item);
   GtkWidget *buildFooter();
   void setupDoubleTap(GtkWidget *bubble);
   GtkWidget *makeStatus();
@@ -148,6 +160,8 @@ class MessageWidget final {
   bool _replyPending = false;
   bool _picturesNear = false;
   std::vector<std::unique_ptr<Cell>> _cells;
+  // What a tap on each of the row's media does, in the order they were made (debugTap()).
+  std::vector<std::function<void()>> _taps;
   GtkWidget *_highlighted = nullptr;
   guint _highlightTimeout = 0;
   SignalConnections _signals;

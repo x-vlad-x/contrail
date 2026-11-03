@@ -45,6 +45,8 @@ class MainWindow final {
   void closeForum(Td::ChatId chat);
   void closeChat();
   void openArchive();
+  // A hashtag tapped in a message: the chat list searches for it (on a phone it comes over the chat).
+  void searchChats(const std::string &query);
   [[nodiscard]] Td::ChatId currentChat() const;
   [[nodiscard]] std::int32_t currentTopic() const;  // 0 unless a topic is open.
   [[nodiscard]] TopicList *topicList() const { return _topics.get(); }

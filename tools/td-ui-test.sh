@@ -13,7 +13,11 @@
 #   7. reactions: the chips under messages, a tap setting and taking back, one reaction at a time, the double tap's
 #      quick one, custom emoji as pictures, the menu's strip and all of them, who reacted in a group, the heart in
 #      the list going once the message is seen, and a channel scrolled while reactions keep coming without building
-#      a row again.
+#      a row again;
+#   8. reading and writing: a channel's sponsored message (seen, its button counted), a video's progress and its
+#      opening by itself, a file stopped and opened with a second tap, a GIF and a sticker opened, links, mentions,
+#      a spoiler and a bot command among emoji, Save and Copy in the menu, a menu closed with its chat, a failed
+#      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -38,8 +42,11 @@ trap '[[ -n $P ]] && kill "$P" 2>/dev/null; rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*"; echo "log: $WORK/log.txt (kept)"; trap - EXIT; [[ -n $P ]] && kill "$P" 2>/dev/null; exit 1; }
 
 start() {
-  mkdir -p "$WORK/data"
+  mkdir -p "$WORK/data" "$WORK/config"
+  # Saved files go here, not to the user's folders.
+  printf 'XDG_DOWNLOAD_DIR="%s/downloads"\nXDG_PICTURES_DIR="%s/pictures"\n' "$WORK" "$WORK" > "$WORK/config/user-dirs.dirs"
   CONTRAIL_SCENARIO=$1 CONTRAIL_SCENARIO_PHOTOS=1 CONTRAIL_DEBUG=1 G_MESSAGES_DEBUG=all GSETTINGS_BACKEND=memory \
+    XDG_CONFIG_HOME=$WORK/config \
     GTK_A11Y=none XDG_DATA_HOME=$WORK/data LANG=C.UTF-8 ADW_DISABLE_PORTAL=1 GDK_BACKEND=x11 \
     "$BIN" > "$WORK/log.txt" 2>&1 &
   P=$!
@@ -333,5 +340,128 @@ updates=$(sed -n 's/.* updates=\([0-9]*\) .*/\1/p' <<< "$line")
 [[ $line == *' rebuilds=0 '* ]] || fail "rows built again: $line"
 (( updates > 50 && bars == builds && rows > 100 )) || fail "the chips made again: $line"
 echo "   ok: $updates reactions came to $rows rows, none built again"
+stop
+echo "8. Reading and writing: a sponsored message, media, links, the menu, failed and slow sends"
+start 120
+c 'chat 42' 3
+line=$(asked 'chat sponsored:' sponsored)
+[[ $line == *'received=1 waiting=0 placed=1 after=20 shown=1 viewed=1 clicks=0' ]] || fail "the sponsored message: $line"
+grep -q 'Scenario: sponsored message 5 viewed' "$WORK/log.txt" || fail "the sponsored message wasn't counted as seen"
+c 'menu -1' 1.5
+line=$(asked 'chat menu:' menu-state)
+[[ $line == *'open=0 '* ]] || fail "the sponsored message has a menu: $line"
+# Its button: the click is counted, then its t.me link opens the chat it leads to.
+c 'tap -1' 2
+grep -q 'Scenario: sponsored message 5 clicked, media=0' "$WORK/log.txt" || fail "the click wasn't counted"
+[[ $(asked 'chat topic=' state) == *' id=1' ]] || fail "the sponsored link didn't open Friend 1"
+c back 1
+c 'chat 42' 3
+# A video: how much of it came, then it opens by itself.
+c 'tap 4' 0.6
+line=$(asked 'chat media:' 'media 4')
+[[ $line == *' downloading '*' opens status="'*' MB · '* ]] || fail "the video's progress: $line"
+sleep 5
+grep -q 'open: file://.*showcase-3000001.bin' "$WORK/log.txt" || fail "the video didn't open by itself"
+# A file: a tap downloads it, another while it comes stops it; once here a second tap opens it.
+c 'tap 14' 0.6
+line=$(asked 'chat media:' 'media 14')
+[[ $line == *' downloading '*'document="'*' MB · '*'progress='*'icon=process-stop-symbolic'* ]] || fail "the file's progress: $line"
+c 'tap 14' 0.5
+line=$(asked 'chat media:' 'media 14')
+[[ $line == *' stopped '* && $line != *progress=* ]] || fail "the download didn't stop: $line"
+c 'tap 14' 3.5
+grep -q 'showcase-3000004' "$WORK/log.txt" && fail "the file opened without a second tap"
+c 'tap 14' 0.5
+grep -q 'open: file://.*showcase-3000004.bin' "$WORK/log.txt" || fail "the file didn't open"
+# A GIF and a sticker go to the system's player and viewer.
+c 'tap 5' 3.5
+grep -q 'open: file://.*showcase-3000002.bin' "$WORK/log.txt" || fail "the GIF didn't open"
+c 'tap 6' 0.5
+grep -q 'open: file://.*sticker.png' "$WORK/log.txt" || fail "the sticker didn't open"
+# Entities among emoji are where they belong; a spoiler opens with a tap; links lead to their chats.
+line=$(asked 'chat tap:' 'tap-text 2 a tg link')
+[[ $line == *'tg://resolve?domain=friend2 "a tg link"' ]] || fail "the tg link: $line"
+sleep 1.5
+[[ $(asked 'chat topic=' state) == *' id=2' ]] || fail "the tg link didn't open Friend 2"
+c back 1
+c 'chat 42' 3
+line=$(asked 'chat tap:' 'tap-text 2 t.me/friend1/5')
+[[ $line == *'https://t.me/friend1/5 "t.me/friend1/5"' ]] || fail "the message link: $line"
+sleep 1.5
+[[ $(asked 'chat topic=' state) == *' id=1' && $(state oldest) == 1 ]] || fail "the message link didn't open message 5"
+c back 1
+c 'chat 42' 3
+for part in 'a link' '/help' '@friend1'; do
+  line=$(asked 'chat tap:' "tap-text 2 $part")
+  [[ $line == *"\"$part\"" ]] || fail "$part isn't where it belongs: $line"
+done
+grep -q 'open: https://example.org/page' "$WORK/log.txt" || fail "the web link didn't open"
+sleep 1.5
+[[ $(asked 'chat topic=' state) == *' id=1' ]] || fail "the mention didn't open Friend 1"
+c back 1
+c 'chat 42' 3
+line=$(asked 'chat tap:' 'tap-text 18 hidden')
+[[ $line == *'spoiler "hidden words"' ]] || fail "the spoiler: $line"
+line=$(asked 'chat tap:' 'tap-text 18 hidden')
+[[ $line == *'no link with "hidden"'* ]] || fail "the spoiler stays hidden: $line"
+c 'tap-text 18 Friend 2' 1.5
+[[ $(asked 'chat topic=' state) == *' id=2' ]] || fail "the mention didn't open Friend 2"
+c back 1
+c 'chat 42' 3
+# The menu: a photo saved to Pictures, a file to Downloads, a text copied; a sticker isn't saved.
+c 'menu 20' 1.5
+[[ $(asked 'chat menu:' menu-state) == *'[Save As...=msg.save]'* ]] || fail "no Save for a photo"
+c 'menu-do save' 1
+grep -q 'toast: photo_.*\.jpg' "$WORK/log.txt" || fail "the photo wasn't saved"
+ls "$WORK"/pictures/photo_*.jpg > /dev/null 2>&1 || fail "no photo in Pictures"
+c 'menu 14' 1.5
+c 'menu-do save' 1
+grep -q 'toast: Image was saved to your Downloads folder' "$WORK/log.txt" || fail "the file wasn't saved"
+[[ -f $WORK/downloads/report.pdf ]] || fail "no report.pdf in Downloads"
+c 'menu 6' 1.5
+[[ $(asked 'chat menu:' menu-state) != *'msg.save'* ]] || fail "a sticker can be saved"
+c 'menu 15' 1.5
+c 'menu-do copy' 0.5
+grep -q 'toast: Text copied to clipboard.' "$WORK/log.txt" || fail "no toast for a copied text"
+# A menu open when the chat closes goes with it.
+c 'menu 18' 1.5
+c back 1
+grep -q 'Finalizing GtkListBoxRow' "$WORK/log.txt" && fail "a row was finalized with its menu"
+# Writing: a send that fails is shown and sent again; one the server confirms later stays where it is.
+c 'chat 0' 3
+c 'send /fail broken message' 1
+line=$(asked 'chat media:' 'media 0')
+[[ $line == *'local=1 failed=1 '*'status=dialog-error-symbolic'* ]] || fail "the failed send: $line"
+c 'menu 0' 1.5
+[[ $(asked 'chat menu:' menu-state) == *'[Retry=msg.retry]'* ]] || fail "no Retry"
+c 'menu-do retry' 1
+[[ $(asked 'chat media:' 'media 0') == *'local=0 failed=0 '*'status=contrail-check-symbolic'* ]] || fail "not sent again"
+c 'send /slow slow message' 0.2
+before=$(asked 'chat media:' 'media 0')
+[[ $before == *'local=1 '*'status=contrail-clock-symbolic'* ]] || fail "the slow send: $before"
+sleep 2
+after=$(asked 'chat media:' 'media 0')
+[[ $after == *'local=0 '* ]] || fail "not confirmed: $after"
+[[ $(sed -n 's/.* y=\([-0-9]*\) .*/\1/p' <<< "$before") == $(sed -n 's/.* y=\([-0-9]*\) .*/\1/p' <<< "$after") ]] \
+  || fail "the message moved when confirmed: $before / $after"
+c 'edit-last' 1
+[[ $(state editing) == 122 ]] || fail "the up arrow doesn't edit the last message"
+c 'send edited' 1
+c 'menu 120' 1.5
+c 'menu-do delete' 1
+[[ $(asked 'dialog:' dialog) == *'check="Delete for everyone" checked=1' ]] || fail "no choice for whom to delete"
+c 'dialog-check 0' 0.2
+c 'dialog-answer delete' 1
+(( $(state messages) == 101 )) || fail "not deleted"
+# A bot command in a message is sent with a tap.
+c 'chat 2' 3
+c 'tap-text 120 /help' 1.5
+[[ $(asked 'chat topic=' state) == *'newestText="/help"'* ]] || fail "the bot command wasn't sent"
+# A hashtag: the chat list searches for it.
+c back 1
+c 'chat 42' 3
+c 'tap-text 2 #contrail' 1
+c tree 0.5
+grep -q 'GtkSearchEntry "#contrail"' "$WORK/log.txt" || fail "the hashtag isn't searched for"
 stop
 echo "PASS"

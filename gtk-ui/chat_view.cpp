@@ -294,6 +294,169 @@ struct PinnedPicture {
                                        gtk_list_box_row_get_index(row) + 1);
 }
 
+[[nodiscard]] const api::file *LargestPhotoFile(const api::photo *photo) {
+  const api::file *result = nullptr;
+  auto best = std::int64_t(-1);
+  if (!photo) return nullptr;
+  for (const auto &size : photo->sizes_) {
+    if (!size || !size->photo_) continue;
+    if (const auto area = std::int64_t(size->width_) * size->height_; area > best) {
+      best = area;
+      result = size->photo_.get();
+    }
+  }
+  return result;
+}
+
+// Videos, GIFs, stickers and pictures open by themselves once a tap has downloaded them (in 0.3.1 videos and
+// pictures did). Other files open with a second tap.
+[[nodiscard]] bool OpensByItself(const api::MessageContent *content) {
+  if (!content) return false;
+  switch (content->get_id()) {
+    case api::messageVideo::ID:
+    case api::messageAnimation::ID:
+    case api::messageVideoNote::ID:
+    case api::messageSticker::ID:
+    case api::messagePhoto::ID: return true;
+    case api::messageDocument::ID: {
+      const auto &document = static_cast<const api::messageDocument &>(*content).document_;
+      return document && document->mime_type_.starts_with("image/");
+    }
+    default: return false;
+  }
+}
+
+// What the menu's Save saves of a message: its file and the name it had, or its photo. Stickers are not saved, as
+// in 0.3.1.
+struct Saved {
+  const api::file *file = nullptr;
+  std::string name;
+  bool photo = false;
+};
+
+[[nodiscard]] Saved SavedOf(const api::message &message) {
+  const auto content = message.content_.get();
+  if (const auto photo = Cast<api::messagePhoto>(content)) return {LargestPhotoFile(photo->photo_.get()), {}, true};
+  if (const auto document = Cast<api::messageDocument>(content); document && document->document_) {
+    return {document->document_->document_.get(), document->document_->file_name_};
+  }
+  if (const auto video = Cast<api::messageVideo>(content); video && video->video_) {
+    return {video->video_->video_.get(), video->video_->file_name_};
+  }
+  if (const auto animation = Cast<api::messageAnimation>(content); animation && animation->animation_) {
+    return {animation->animation_->animation_.get(), animation->animation_->file_name_};
+  }
+  if (const auto audio = Cast<api::messageAudio>(content); audio && audio->audio_) {
+    return {audio->audio_->audio_.get(), audio->audio_->file_name_};
+  }
+  if (const auto voice = Cast<api::messageVoiceNote>(content); voice && voice->voice_note_) {
+    return {voice->voice_note_->voice_.get(), {}};
+  }
+  if (const auto note = Cast<api::messageVideoNote>(content); note && note->video_note_) {
+    return {note->video_note_->video_.get(), {}};
+  }
+  return {};
+}
+
+// The files the sponsored message shows: TDLib wants them downloaded before it is shown.
+[[nodiscard]] std::vector<const api::file *> SponsoredFiles(const api::MessageContent *content) {
+  auto result = std::vector<const api::file *>();
+  const auto add = [&](const api::file *file) {
+    if (file) result.push_back(file);
+  };
+  if (const auto photo = Cast<api::messagePhoto>(content)) add(LargestPhotoFile(photo->photo_.get()));
+  if (const auto video = Cast<api::messageVideo>(content); video && video->video_) {
+    add(video->video_->video_.get());
+    if (video->video_->thumbnail_) add(video->video_->thumbnail_->file_.get());
+  }
+  if (const auto animation = Cast<api::messageAnimation>(content); animation && animation->animation_) {
+    add(animation->animation_->animation_.get());
+    if (animation->animation_->thumbnail_) add(animation->animation_->thumbnail_->file_.get());
+  }
+  return result;
+}
+
+[[nodiscard]] std::string UserDirectory(GUserDirectory kind, const char *fallback) {
+  const auto special = g_get_user_special_dir(kind);
+  auto *path = special ? g_strdup(special) : g_build_filename(g_get_home_dir(), fallback, nullptr);
+  auto result = std::string(path);
+  g_free(path);
+  g_mkdir_with_parents(result.c_str(), 0700);
+  return result;
+}
+
+// "name.ext", or "name (1).ext" and on when that is taken, as 0.3.1 named them.
+[[nodiscard]] std::string UniquePath(const std::string &directory, const std::string &name) {
+  const auto dot = name.rfind('.');
+  const auto stem = (dot == std::string::npos || dot == 0) ? name : name.substr(0, dot);
+  const auto extension = (dot == std::string::npos || dot == 0) ? std::string() : name.substr(dot);
+  for (auto index = 0;; ++index) {
+    const auto candidate = index ? stem + " (" + std::to_string(index) + ")" + extension : name;
+    auto *path = g_build_filename(directory.c_str(), candidate.c_str(), nullptr);
+    auto result = std::string(path);
+    g_free(path);
+    if (!g_file_test(result.c_str(), G_FILE_TEST_EXISTS)) return result;
+  }
+}
+
+// The downloaded file is copied (without blocking the chat: it may be a large video), then the toast says where.
+void CopySaved(const std::string &path, const std::string &name, bool photo) {
+  auto target = std::string();
+  if (photo) {
+    auto *now = g_date_time_new_now_local();
+    auto *stamp = g_date_time_format(now, "photo_%Y-%m-%d_%H-%M-%S.jpg");
+    target = UniquePath(UserDirectory(G_USER_DIRECTORY_PICTURES, "Pictures"), stamp);
+    g_free(stamp);
+    g_date_time_unref(now);
+  } else {
+    auto *base = g_path_get_basename(path.c_str());
+    target = UniquePath(UserDirectory(G_USER_DIRECTORY_DOWNLOAD, "Downloads"), name.empty() ? base : name);
+    g_free(base);
+  }
+  auto *source = g_file_new_for_path(path.c_str());
+  auto *destination = g_file_new_for_path(target.c_str());
+  auto *toast = new std::string();
+  if (photo) {
+    auto *base = g_path_get_basename(target.c_str());
+    *toast = base;
+    g_free(base);
+  } else {
+    *toast = Tr("lng_mediaview_saved_to", {{"downloads", Tr("lng_downloads_section")}});
+  }
+  g_file_copy_async(source, destination, G_FILE_COPY_NONE, G_PRIORITY_DEFAULT, nullptr, nullptr, nullptr,
+                    +[](GObject *object, GAsyncResult *result, gpointer data) {
+                      auto *toast = static_cast<std::string *>(data);
+                      GError *error = nullptr;
+                      if (g_file_copy_finish(G_FILE(object), result, &error)) {
+                        ShowToast(*toast);
+                      } else {
+                        ShowToast(error ? error->message : "?");
+                        g_clear_error(&error);
+                      }
+                      delete toast;
+                    },
+                    toast);
+  g_object_unref(source);
+  g_object_unref(destination);
+}
+
+// The items of a menu model, sections included, for the debug state.
+void DescribeMenu(GMenuModel *model, std::string &out) {
+  for (auto i = 0; i < g_menu_model_get_n_items(model); ++i) {
+    char *label = nullptr, *action = nullptr;
+    if (g_menu_model_get_item_attribute(model, i, G_MENU_ATTRIBUTE_LABEL, "s", &label)) {
+      g_menu_model_get_item_attribute(model, i, G_MENU_ATTRIBUTE_ACTION, "s", &action);
+      out += std::string(" [") + label + "=" + (action ? action : "") + "]";
+    }
+    g_free(label);
+    g_free(action);
+    if (auto *section = g_menu_model_get_item_link(model, i, G_MENU_LINK_SECTION)) {
+      DescribeMenu(section, out);
+      g_object_unref(section);
+    }
+  }
+}
+
 }  // namespace
 
 void ChatView::Timer::callOnce(guint ms) {
@@ -388,6 +551,8 @@ void ChatView::start() {
 }
 
 ChatView::~ChatView() {
+  // A menu open on a message goes before the rows do (GTK warns of a row finalized with it).
+  dropMessageMenu(nullptr);
   if (_pinnedDialog) adw_dialog_force_close(ADW_DIALOG(_pinnedDialog));
   for (auto *dialog : std::exchange(_dialogs, {})) adw_dialog_force_close(ADW_DIALOG(dialog));
   _signals.clear();
@@ -421,6 +586,23 @@ void ChatView::subscribe() {
     if (_pinnedFile && file.id == _pinnedFile && file.complete) {
       _pinnedFile = 0;
       showPinnedPicture(file.path);
+    }
+    if (const auto i = _openWhenLoaded.find(file.id); i != _openWhenLoaded.end()) {
+      if (file.complete && !file.path.empty()) {
+        _openWhenLoaded.erase(i);
+        OpenPath(file.path);
+      } else if (!i->second) {
+        // It wasn't here: a second tap opens it.
+        _openWhenLoaded.erase(i);
+      }
+    }
+    if (const auto i = _saveWhenLoaded.find(file.id); i != _saveWhenLoaded.end() && file.complete) {
+      CopySaved(file.path, i->second.name, i->second.photo);
+      _saveWhenLoaded.erase(i);
+    }
+    if (_sponsoredWaiting.contains(file.id) && file.complete) {
+      _sponsoredWaiting.erase(file.id);
+      if (_sponsoredWaiting.empty()) placeSponsored();
     }
     for (const auto &[raw, row] : _rows) row->fileChanged(file);
   }, _lifetime);
@@ -701,7 +883,7 @@ void ChatView::updatePinnedViewer() {
     const auto page = gtk_adjustment_get_page_size(_adjustment);
     for (const auto row : visibleRows()) {
       for (const auto item : row->items()) {
-        if (item->local() || item->id() <= bottom) continue;
+        if (item->local() || item->sponsored || item->id() <= bottom) continue;
         auto *widget = row->widgetFor(item);
         double y = 0;
         const auto height = widget ? gtk_widget_get_height(widget) : 0;
@@ -1072,10 +1254,13 @@ void ChatView::showPinnedList() {
 int ChatView::compareRows(GtkListBoxRow *a, GtkListBoxRow *b, gpointer) {
   const auto first = RowMessage(a), second = RowMessage(b);
   if (!first || !second) return 0;
-  const auto left = first->item(), right = second->item();
-  // Messages being sent have local ids: they go after the others.
-  if (IsLocal(left) != IsLocal(right)) return IsLocal(left) ? 1 : -1;
-  return (left->id() < right->id()) ? -1 : (left->id() > right->id()) ? 1 : 0;
+  // Messages being sent have local ids: they go after the others. A sponsored message goes right after the one it
+  // follows.
+  const auto key = [](const MessageItem *item) {
+    return item->sponsored ? std::tuple(false, item->sponsoredAfter, 1) : std::tuple(IsLocal(item), item->id(), 0);
+  };
+  const auto left = key(first->item()), right = key(second->item());
+  return (left < right) ? -1 : (right < left) ? 1 : 0;
 }
 
 // Date separators and grouping of consecutive messages from the same sender.
@@ -1491,6 +1676,8 @@ void ChatView::sync() {
     }
     units.push_back({item.get()});
   }
+  // Only while the message it follows is held: far up the chat it waits to be shown again.
+  if (_sponsoredPlaced && find(_sponsored->sponsoredAfter)) units.push_back({_sponsored.get()});
   auto used = std::set<MessageWidget *>();
   for (auto &unit : units) {
     MessageWidget *row = nullptr;
@@ -1852,6 +2039,7 @@ void ChatView::updateViewport() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   gtk_widget_set_visible(_toBottom, !atBottom() && upper > page);
+  if (atBottom()) showSponsored();
   preloadVisibleEdges();
   updateNearPictures();
   // The rows are where the new position puts them only after the next allocation: the bar looks at them then.
@@ -1955,7 +2143,7 @@ void ChatView::markAsRead() {
   auto ids = std::vector<std::int64_t>();
   for (const auto row : visibleRows()) {
     for (const auto item : row->items()) {
-      if (item->local() || _viewed.contains(item->id())) continue;
+      if (item->local() || item->sponsored || _viewed.contains(item->id())) continue;
       double y = 0;
       auto *widget = row->widgetFor(item);
       const auto height = gtk_widget_get_height(widget);
@@ -1972,6 +2160,7 @@ void ChatView::markAsRead() {
   if ((_stickToBottom || atBottom()) && known->markedUnread) {
     _store.client().send(api::make_object<api::toggleChatIsMarkedAsUnread>(_chat, false));
   }
+  reportSponsoredView();
   if (ids.empty()) return;
   auto source = _topic ? api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceForumTopicHistory>())
                       : api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceChatHistory>());
@@ -2205,7 +2394,7 @@ void ChatView::showReplyBar(const std::string &title, const std::string &text, c
 }
 
 void ChatView::replyTo(const MessageItem &item) {
-  if (item.local()) return;
+  if (item.local() || item.sponsored) return;
   if (_editing) cancelReplyOrEdit();
   if (forwarding()) cancelForward();
   _replyToId = item.id();
@@ -2360,6 +2549,8 @@ void ChatView::sendText(const std::string &text) {
 // --- the menu of a message -----------------------------------------------------
 
 void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y) {
+  // A sponsored message has no menu, as in 0.3.1.
+  if (item.sponsored) return;
   const auto id = item.id();
   // What may be done with a message is TDLib's to say. A message being sent has nothing to ask about.
   // The reactions possible for it come with them, asked at the same time.
@@ -2402,6 +2593,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
                     found->data->is_pinned_ ? "msg.unpin" : "msg.pin");
     }
     if (canEdit) g_menu_append(menu, Tr("lng_context_edit_msg").c_str(), "msg.edit");
+    if (!found->local() && SavedOf(*found->data).file) {
+      g_menu_append(menu, Tr("lng_context_save_file").c_str(), "msg.save");
+    }
     if (CanShowWhoReacted(*this, *found->data)) {
       g_menu_append(menu, TrCount("lng_context_seen_reacted", ReactionsCount(*found->data)).c_str(), "msg.reacted");
     }
@@ -2423,7 +2617,11 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
         }
       }
     }
+    // One menu at a time; it goes with the row it is on (dropMessageMenu()).
+    dropMessageMenu(nullptr);
     gtk_widget_set_parent(popover, widget);
+    _messageMenu = popover;
+    g_object_add_weak_pointer(G_OBJECT(popover), reinterpret_cast<gpointer *>(&_messageMenu));
     const GdkRectangle rect = {int(x), int(y), 1, 1};
     gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
     gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
@@ -2443,7 +2641,11 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     add("reply", [this, id] {
       if (const auto item = find(id)) replyTo(*item);
     });
-    add("copy", [text] { CopyToClipboard(text); });
+    add("copy", [text] {
+      CopyToClipboard(text);
+      ShowToast(Tr("lng_text_copied"));
+    });
+    add("save", [this, id] { saveFile(id); });
     add("forward", [this, id] {
       if (const auto item = find(id)) forward(*item);
     });
@@ -2638,24 +2840,131 @@ void ChatView::openChat(Td::ChatId chat) {
   _window.openChat(chat);
 }
 
-// There is no photo viewer yet: the photo opens outside, once the row has it.
+// The row downloads its photo by itself: a tap only puts it first and opens it when it is here.
 void ChatView::openPhoto(const MessageItem &, Td::FileId file) {
-  if (const auto known = _store.file(file); known && known->complete) OpenPath(known->path);
+  if (const auto known = _store.file(file); known && known->complete) {
+    OpenPath(known->path);
+    return;
+  }
+  _openWhenLoaded[file] = true;
+  _store.download(file, 32);
 }
 
-void ChatView::openDocument(const MessageItem &, Td::FileId file) {
+void ChatView::openDocument(const MessageItem &item, Td::FileId file) {
   const auto known = _store.file(file);
   if (known && known->complete) {
     OpenPath(known->path);
   } else if (known && known->downloading) {
     _store.cancelDownload(file);
+    _openWhenLoaded.erase(file);
   } else {
+    // Unknown to the store, it may be on disk already: the answer tells (subscribe()).
+    _openWhenLoaded[file] = OpensByItself(item.data ? item.data->content_.get() : nullptr);
     _store.download(file, 32);
   }
 }
 
-bool ChatView::opensWhenLoaded(Td::FileId) const {
-  return false;
+bool ChatView::opensWhenLoaded(Td::FileId file) const {
+  const auto i = _openWhenLoaded.find(file);
+  return i != _openWhenLoaded.end() && i->second;
+}
+
+void ChatView::dropMessageMenu(GtkWidget *row) {
+  auto *menu = _messageMenu;
+  if (!menu) return;
+  auto *parent = gtk_widget_get_parent(menu);
+  if (row && parent && parent != row && !gtk_widget_is_ancestor(parent, row)) return;
+  // The pointer goes first: the menu may be finalized right here.
+  g_object_remove_weak_pointer(G_OBJECT(menu), reinterpret_cast<gpointer *>(&_messageMenu));
+  _messageMenu = nullptr;
+  gtk_popover_popdown(GTK_POPOVER(menu));
+  if (gtk_widget_get_parent(menu)) gtk_widget_unparent(menu);
+}
+
+void ChatView::saveFile(std::int64_t id) {
+  const auto item = find(id);
+  const auto saved = item ? SavedOf(*item->data) : Saved();
+  if (!saved.file) return;
+  const auto known = _store.file(saved.file->id_);
+  auto path = (known && known->complete) ? known->path : std::string();
+  if (!known && saved.file->local_ && saved.file->local_->is_downloading_completed_) path = saved.file->local_->path_;
+  if (!path.empty()) {
+    CopySaved(path, saved.name, saved.photo);
+    return;
+  }
+  // As in 0.3.1: the download starts, and the file is saved when it ends.
+  _saveWhenLoaded[saved.file->id_] = {saved.name, saved.photo};
+  _store.download(saved.file->id_, 32);
+  ShowToast(Tr("lng_downloads_section"));
+}
+
+// --- sponsored messages --------------------------------------------------------
+
+void ChatView::showSponsored() {
+  if (_sponsoredAsked || _topic || !_initialLoaded || !_reachedBottom) return;
+  const auto known = _store.chat(_chat);
+  if (!known) return;
+  auto canHave = known->kind == Td::ChatKind::Channel;
+  if (known->kind == Td::ChatKind::Private) {
+    const auto user = _store.user(known->peerId);
+    canHave = user && user->bot;
+  }
+  if (!canHave) return;
+  // Once a chat opening: TDLib keeps the answer for a few minutes itself.
+  _sponsoredAsked = true;
+  _store.client().request<api::sponsoredMessages>(
+      api::make_object<api::getChatSponsoredMessages>(_chat), _lifetime,
+      [this](api::sponsoredMessages &found) {
+        // One, after the newest message, as 0.3.1 showed them.
+        if (found.messages_.empty() || !found.messages_.front() || !found.messages_.front()->content_) return;
+        auto sponsored = std::move(found.messages_.front());
+        auto item = std::make_unique<MessageItem>();
+        item->data = api::make_object<api::message>();
+        item->data->id_ = sponsored->message_id_;
+        item->data->chat_id_ = _chat;
+        item->data->content_ = std::move(sponsored->content_);
+        item->sponsored = std::move(sponsored);
+        for (const auto file : SponsoredFiles(item->data->content_.get())) {
+          const auto known = _store.file(file->id_);
+          const auto complete = known ? known->complete
+                                      : (file->local_ && file->local_->is_downloading_completed_);
+          if (complete) continue;
+          _sponsoredWaiting.insert(file->id_);
+          _store.download(file->id_, 1);
+        }
+        _sponsored = std::move(item);
+        if (_sponsoredWaiting.empty()) placeSponsored();
+      },
+      [](api::error &) {});
+}
+
+void ChatView::placeSponsored() {
+  const auto newest = find(newestId());
+  if (!_sponsored || _sponsoredPlaced || !newest) return;
+  _sponsored->sponsoredAfter = newest->id();
+  _sponsored->data->date_ = newest->data->date_;  // No date line of its own.
+  _sponsoredPlaced = true;
+  sync();
+}
+
+// Seen once the whole message is on the screen (or fills it, if it is taller), as 0.3.1 counted it.
+void ChatView::reportSponsoredView() {
+  if (!_sponsoredPlaced || _sponsoredViewed) return;
+  const auto row = rowFor(_sponsored.get());
+  const auto page = gtk_adjustment_get_page_size(_adjustment);
+  double y = 0;
+  const auto height = row ? gtk_widget_get_height(row->row()) : 0;
+  if (height <= 0 || !WidgetViewportY(row->row(), _scroll, y)) return;
+  if (!((y >= 0 && y + height <= page) || (y <= 0 && y + height >= page))) return;
+  _sponsoredViewed = true;
+  _store.client().send(api::make_object<api::viewMessages>(_chat, std::vector<std::int64_t>{_sponsored->id()},
+                                                           api::make_object<api::messageSourceChatHistory>(), false));
+}
+
+void ChatView::sponsoredClicked(const MessageItem &item, bool media) {
+  if (!item.sponsored) return;
+  ++_sponsoredClicks;
+  _store.client().send(api::make_object<api::clickChatSponsoredMessage>(_chat, item.id(), media, false));
 }
 
 // --- debug ---------------------------------------------------------------------
@@ -2672,7 +2981,8 @@ void ChatView::debugState() const {
   for (const auto topic : topics) topicList += (topicList.empty() ? "" : ",") + std::to_string(topic);
   auto newestText = std::string();
   if (!_items.empty()) newestText = Td::OneLine(PlainText(*_items.back()->data), 60);
-  g_message("chat topic=%d topics=%s newestText=\"%s\"", int(_topic), topicList.c_str(), newestText.c_str());
+  g_message("chat topic=%d topics=%s newestText=\"%s\" id=%lld", int(_topic), topicList.c_str(), newestText.c_str(),
+            (long long)_chat);
   // The last messages, and whose they were when forwarded.
   auto last = std::string();
   for (auto i = _items.size() > 4 ? _items.size() - 4 : 0; i < _items.size(); ++i) {
@@ -2768,6 +3078,10 @@ void ChatView::debugForwardMenu() {
   showForwardMenu();
 }
 
+void ChatView::debugEditLast() {
+  editLast();
+}
+
 void ChatView::debugDelete() {
   if (const auto newest = newestId()) {
     _store.client().send(api::make_object<api::deleteMessages>(_chat, std::vector<std::int64_t>{newest}, true));
@@ -2776,13 +3090,33 @@ void ChatView::debugDelete() {
 
 // The message of this server number among the loaded ones, the newest without one.
 void ChatView::debugMessageMenu(std::int64_t number) {
-  const auto item = number ? find(number << 20) : find(newestId());
+  const auto item = number ? debugItem(number) : debugItem(0);
   const auto row = item ? rowFor(item) : nullptr;
   if (!row) {
     g_message("chat menu: message %lld isn't loaded", (long long)number);
     return;
   }
-  showMessageMenu(*item, row->widgetFor(item), 10, 10);
+  // As a finger does it: on the screen. GTK closes a menu whose message is off it.
+  double y = 0;
+  const auto height = gtk_widget_get_height(row->row());
+  if (WidgetViewportY(row->row(), _scroll, y) && y + height > 0 && y < gtk_adjustment_get_page_size(_adjustment)) {
+    showMessageMenu(*item, row->widgetFor(item), 10, 10);
+    return;
+  }
+  scrollToItem(item, false);
+  struct Later {
+    ChatView *self;
+    std::weak_ptr<void> token;
+    std::int64_t id;
+  };
+  g_timeout_add_once(400, +[](gpointer data) {
+    const auto later = std::unique_ptr<Later>(static_cast<Later *>(data));
+    if (later->token.expired()) return;
+    const auto item = later->self->find(later->id);
+    if (const auto row = item ? later->self->rowFor(item) : nullptr) {
+      later->self->showMessageMenu(*item, row->widgetFor(item), 10, 10);
+    }
+  }, new Later{this, _lifetime.token(), item->id()});
 }
 
 void ChatView::debugPin(std::int64_t number, bool pin) {
@@ -3022,6 +3356,70 @@ void ChatView::debugReactionsState(std::int64_t number) {
       g_message("chat reactions menu: %zu %s", buttons.size(), strip.c_str());
     }
   }
+}
+
+void ChatView::debugMenuState() const {
+  auto *model = _messageMenu ? gtk_popover_menu_get_menu_model(GTK_POPOVER_MENU(_messageMenu)) : nullptr;
+  auto items = std::string();
+  if (model) DescribeMenu(model, items);
+  g_message("chat menu: open=%d items:%s", int(_messageMenu && gtk_widget_get_visible(_messageMenu)), items.c_str());
+}
+
+void ChatView::debugMenuDo(const std::string &action) {
+  if (!_messageMenu) {
+    g_message("chat menu: none open");
+    return;
+  }
+  // As a tap on the item: the action, then the menu closes.
+  auto *menu = _messageMenu;
+  g_object_ref(menu);
+  gtk_widget_activate_action(menu, ("msg." + action).c_str(), nullptr);
+  gtk_popover_popdown(GTK_POPOVER(menu));
+  g_object_unref(menu);
+}
+
+// Of this server number, 0: the newest (being sent too), -1: the sponsored message.
+MessageItem *ChatView::debugItem(std::int64_t number) const {
+  if (number < 0) return _sponsoredPlaced ? _sponsored.get() : nullptr;
+  if (number == 0) return _items.empty() ? nullptr : _items.back().get();
+  for (const auto &item : _items) {
+    if ((item->id() >> 20) == number) return item.get();
+  }
+  return nullptr;
+}
+
+void ChatView::debugMedia(std::int64_t number) {
+  const auto item = debugItem(number);
+  const auto row = item ? rowFor(item) : nullptr;
+  if (!row) {
+    g_message("chat media: message %lld isn't shown", (long long)number);
+    return;
+  }
+  double y = 0;
+  const auto shown = WidgetViewportY(row->row(), _scroll, y);
+  g_message("chat media: message=%lld local=%d failed=%d y=%.0f %s", (long long)(item->id() >> 20), int(item->local()),
+            int(item->data->sending_state_ && item->data->sending_state_->get_id() == api::messageSendingStateFailed::ID),
+            shown ? y : -1., row->debugDescribe().c_str());
+}
+
+void ChatView::debugTap(std::int64_t number, int index) {
+  const auto item = debugItem(number);
+  if (const auto row = item ? rowFor(item) : nullptr) row->debugTap(index);
+  else g_message("chat tap: message %lld isn't shown", (long long)number);
+}
+
+void ChatView::debugTapText(std::int64_t number, const std::string &part) {
+  const auto item = debugItem(number);
+  const auto row = item ? rowFor(item) : nullptr;
+  if (!row || !row->debugTapText(part)) g_message("chat tap: no link with \"%s\" in message %lld", part.c_str(), (long long)number);
+}
+
+void ChatView::debugSponsored() const {
+  const auto row = _sponsoredPlaced ? rowFor(_sponsored.get()) : nullptr;
+  g_message("chat sponsored: asked=%d received=%d waiting=%zu placed=%d after=%lld shown=%d viewed=%d clicks=%d",
+            int(_sponsoredAsked), int(_sponsored != nullptr), _sponsoredWaiting.size(), int(_sponsoredPlaced),
+            (long long)(_sponsored ? _sponsored->sponsoredAfter >> 20 : 0), int(row != nullptr), int(_sponsoredViewed),
+            _sponsoredClicks);
 }
 
 }  // namespace Contrail

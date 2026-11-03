@@ -49,14 +49,20 @@ class ChatView final {
 
   // What the messages ask for.
   void openChat(Td::ChatId chat);
+  // There is no photo viewer yet: the photo opens outside, once it is downloaded.
   void openPhoto(const MessageItem &item, Td::FileId file);
-  // A tap on a file: opens it if it is here, stops its download if it runs, starts one otherwise.
+  // A tap on a file: opens it if it is here, stops its download if it runs, starts one otherwise. Videos, GIFs,
+  // stickers and pictures open by themselves once downloaded, as in 0.3.1; other files with a second tap.
   void openDocument(const MessageItem &item, Td::FileId file);
   [[nodiscard]] bool opensWhenLoaded(Td::FileId file) const;
   void showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y);
+  // The menu open on a message inside `row` goes now: the row is being destroyed or built again.
+  void dropMessageMenu(GtkWidget *row);
   void replyTo(const MessageItem &item);
   [[nodiscard]] ReplyPreview replyPreview(const MessageItem &item) const;
   void sendText(const std::string &text);  // Bot commands from links.
+  // The sponsored message's button, text or media was tapped (`media`): Telegram counts it.
+  void sponsoredClicked(const MessageItem &item, bool media);
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -66,6 +72,7 @@ class ChatView final {
   void debugReply();
   void debugEdit(const std::string &text);
   void debugDelete();
+  void debugEditLast();  // The up arrow in an empty field.
   void debugForward();  // The newest message, to the chats to choose from.
   void debugForwardMode(bool names);
   void debugForwardCancel();
@@ -81,6 +88,14 @@ class ChatView final {
   void debugReactQuick(std::int64_t number);  // A double tap.
   void debugReactionsMore(std::int64_t number);  // The button with all of them in the open menu.
   void debugReactionsState(std::int64_t number);
+  void debugMenuState() const;  // The items of the message menu open.
+  void debugMenuDo(const std::string &action);  // As a tap on an item of it: copy, save, delete, retry...
+  // Message N (its server number, 0: the newest, -1: the sponsored one): what its media show, a tap on its media
+  // (or the sponsored button) `index`, a tap on a link or a spoiler of its text with `part` in it.
+  void debugMedia(std::int64_t number);
+  void debugTap(std::int64_t number, int index);
+  void debugTapText(std::int64_t number, const std::string &part);
+  void debugSponsored() const;
 
  private:
   // One call of a function some time later. Started again, it waits from the start.
@@ -176,6 +191,16 @@ class ChatView final {
   void saveDraft();
   void draftChanged();
   void confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf);
+  // The menu's Save: the file (or the photo) copied to Downloads (Pictures), once it is downloaded.
+  void saveFile(std::int64_t id);
+  [[nodiscard]] MessageItem *debugItem(std::int64_t number) const;
+
+  // Telegram's sponsored messages in channels and bots (required by the Telegram API Terms of Service, 3.3): asked
+  // for once the end of the chat is shown, put after the newest message once their media is downloaded (TDLib asks
+  // for that), and told to TDLib once seen whole.
+  void showSponsored();
+  void placeSponsored();
+  void reportSponsoredView();
 
   [[nodiscard]] const ForwardDraft *forwardDraft() const;
   [[nodiscard]] bool forwarding() const { return forwardDraft() != nullptr; }
@@ -299,6 +324,22 @@ class ChatView final {
   Td::FileId _pinnedFile = 0;  // Its picture, being downloaded.
   double _lastScrollValue = 0.;
   std::uint64_t _interactionUpdates = 0;  // Of held messages, for the debug state.
+  GtkWidget *_messageMenu = nullptr;  // Open on a message (a weak pointer).
+
+  // True: opens by itself once downloaded (a video); false: only if the answer finds it here already.
+  std::unordered_map<Td::FileId, bool> _openWhenLoaded;
+  struct SaveTarget {
+    std::string name;  // Empty: the downloaded file's.
+    bool photo = false;
+  };
+  std::unordered_map<Td::FileId, SaveTarget> _saveWhenLoaded;
+
+  std::unique_ptr<MessageItem> _sponsored;
+  std::set<Td::FileId> _sponsoredWaiting;  // Its media, being downloaded before it is shown.
+  bool _sponsoredAsked = false;
+  bool _sponsoredPlaced = false;
+  bool _sponsoredViewed = false;
+  int _sponsoredClicks = 0;
 
   Timer _readTimer;
   Timer _statusTimer;
