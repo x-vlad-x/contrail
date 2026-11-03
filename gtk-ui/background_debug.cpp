@@ -1,6 +1,7 @@
 #include "background_debug.hpp"
 
 #include "local_state.hpp"
+#include "chat_view.hpp"
 #include "main_window.hpp"
 #include "memory_guard.hpp"
 #include "notifications.hpp"
@@ -15,9 +16,11 @@ namespace Contrail {
 bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std::string &rest) {
   if (name == "bg-state") {
     const auto *tray = window.tray();
-    g_message("bg: window=%d visible=%d background=%d tray=%s unread=%d chat=%lld", int(window.widget() != nullptr),
-              window.widget() ? int(gtk_widget_get_visible(window.widget())) : 0, int(Settings().background),
-              tray ? (tray->shown() ? "registered" : "waiting") : "none", tray ? tray->unread() : -1,
+    const auto place = window.chatView() ? window.chatView()->place() : ChatView::Place();
+    g_message("bg: window=%d visible=%d background=%d tray=%s unread=%d place=%lld/%.0f chat=%lld",
+              int(window.widget() != nullptr), window.widget() ? int(gtk_widget_get_visible(window.widget())) : 0,
+              int(Settings().background), tray ? (tray->shown() ? "registered" : "waiting") : "none",
+              tray ? tray->unread() : -1, static_cast<long long>(place.message), place.y,
               static_cast<long long>(window.currentChat()));
   } else if (name == "bg-close") {
     // As the close button does.

@@ -666,6 +666,11 @@ void MainWindow::closeToBackground() {
 
 void MainWindow::releaseWindow() {
   _saved = SavedChat{currentChat(), currentTopic()};
+  if (_chat) {
+    const auto place = _chat->place();
+    _saved->message = place.message;
+    _saved->y = place.y;
+  }
   clearViews();
   if (_sidebarNav) g_object_remove_weak_pointer(G_OBJECT(_sidebarNav), reinterpret_cast<gpointer *>(&_sidebarNav));
   _sidebarNav = nullptr;
@@ -691,6 +696,7 @@ void MainWindow::restoreChat() {
   if (!saved || !saved->chat || !_store || !_store->chat(saved->chat)) return;
   if (saved->topic) openTopic(saved->chat, saved->topic);
   else openChat(saved->chat);
+  if (_chat && _chat->chat() == saved->chat) _chat->restorePlace({saved->message, saved->y});
 }
 
 void MainWindow::releaseMemory(MemoryLevel level) {

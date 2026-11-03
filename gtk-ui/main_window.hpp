@@ -137,6 +137,8 @@ class MainWindow final {
   struct SavedChat {
     Td::ChatId chat = 0;
     std::int32_t topic = 0;
+    std::int64_t message = 0;  // The place on the screen (ChatView::Place).
+    double y = 0.;
   };
   GtkApplication *_application = nullptr;
   std::unique_ptr<SettingsView> _settings;

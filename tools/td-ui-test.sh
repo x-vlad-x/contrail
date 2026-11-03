@@ -505,9 +505,14 @@ section_background() {
     || fail "the tray icon's title has no unread chats"
   c back 0.5
   c 'chat 3' 2
-  local chat
+  local chat place
   chat=$(bg | sed -n 's/.* chat=\([-0-9]*\).*/\1/p')
   [[ -n $chat && $chat != 0 ]] || fail "no chat opened: $(bg)"
+  # Up from the end: the window built again comes back to the same place, not to the end.
+  for _ in 1 2 3; do c 'scroll -900' 0.5; done
+  sleep 1
+  place=$(bg | sed -n 's/.* place=\([0-9]*\/[0-9]*\) .*/\1/p')
+  [[ -n $place && $place != 0/* ]] || fail "no place up in the chat: $(bg)"
   c bg-close 2
   line=$(bg)
   [[ $line == *'window=0 '*'chat=0'* ]] || fail "the window stayed: $line"
@@ -517,10 +522,10 @@ section_background() {
     --method org.kde.StatusNotifierItem.Activate 0 0 > /dev/null
   sleep 2
   line=$(bg)
-  [[ $line == *"window=1 visible=1 "*"chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
+  [[ $line == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
   c bg-close 2
   c bg-open 2
-  [[ $(bg) == *"window=1 visible=1 "*"chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
   clean
   # The settings stay for the next start.
   kill "$P"; wait "$P" 2>/dev/null || true; P=
