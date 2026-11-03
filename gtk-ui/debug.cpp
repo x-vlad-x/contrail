@@ -24,12 +24,14 @@
 //   edit-last (the up arrow in the empty field)
 //   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
 //   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
+//   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop
 #include "debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "forward.hpp"
 #include "main_window.hpp"
+#include "media/audio_player.hpp"
 #include "photo_viewer.hpp"
 #include "topic_list.hpp"
 #include "userpics.hpp"
@@ -270,6 +272,10 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugEditLast();
   } else if (name == "delete" && window.chatView()) {
     window.chatView()->debugDelete();
+  } else if (name == "player-state") {
+    if (const auto player = window.player()) g_message("player: %s", player->debugState().c_str());
+  } else if (name.starts_with("player-") && window.chatView()) {
+    window.chatView()->debugPlayer(name.substr(7) + (rest.empty() ? "" : " " + rest));
   } else if (name.starts_with("viewer-")) {
     PhotoViewerDebug(window, name.substr(7) + (rest.empty() ? "" : " " + rest));
   } else if (name == "login") {

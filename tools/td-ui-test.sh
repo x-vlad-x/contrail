@@ -20,6 +20,9 @@
 #      send sent again, a slow one that doesn't move when confirmed, the up arrow, deleting only here.
 #   M1. the photo viewer: the full size shown, a pinch up to 6x and no further, a drag within the edges, a double
 #      tap and Ctrl+wheel, Save to Pictures, its textures gone once it is closed, by itself or with its chat.
+#   M2. the player: a voice message downloading plays, pauses, plays on, the next voice message follows by itself; a
+#      song downloaded slower than it plays waits for its data, a seek far ahead moves the download there, the next
+#      song follows; a drag along the bar; it plays on with the chat closed; stopped, its thread is gone.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -28,11 +31,16 @@ missing=$(ldd "$BIN" | awk '/not found/{print $1}')
 if [[ -n $missing ]]; then
   LIBS=~/.cache/contrail-scenario/libs
   mkdir -p "$LIBS"
-  for lib in $missing; do
-    [[ -e $LIBS/$lib ]] || podman run --rm -v "$LIBS":/out:z localhost/contrail-desktop \
-      sh -c "cp -L /usr/lib/x86_64-linux-gnu/$lib /out/" || { echo "no $lib in localhost/contrail-desktop" >&2; exit 1; }
-  done
   export LD_LIBRARY_PATH=$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  # A library copied may need others missing here (FFmpeg's do): ldd sees them once it is there.
+  for _ in 1 2 3 4 5; do
+    [[ -n $missing ]] || break
+    for lib in $missing; do
+      [[ -e $LIBS/$lib ]] || podman run --rm -v "$LIBS":/out:z localhost/contrail-desktop \
+        sh -c "cp -L /usr/lib/x86_64-linux-gnu/$lib /out/" || { echo "no $lib in localhost/contrail-desktop" >&2; exit 1; }
+    done
+    missing=$(ldd "$BIN" | awk '/not found/{print $1}')
+  done
 fi
 if [[ -z ${CONTRAIL_UI_INNER:-} ]]; then
   exec env CONTRAIL_UI_INNER=1 dbus-run-session -- xvfb-run -a -s '-screen 0 420x900x24' "$0" "$BIN"
@@ -169,7 +177,7 @@ start 120
 c 'chat 1' 3
 c forward 1
 line=$(asked 'forward picker:' forward-picker)
-[[ $line == *'page=chats forum=0 shown=42 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
+[[ $line == *'page=chats forum=0 shown=43 messages=1 rows: "Saved Messages" "Friend 1" "Friend 2" '* ]] \
   || fail "the chats to forward to: $line"
 c 'forward-search club' 0.5
 line=$(asked 'forward picker:' forward-picker)
@@ -519,4 +527,75 @@ section_media_view_viewer() {
   echo "   ok"
 }
 section_media_view_viewer
+
+# Section media-view: the player. The sound goes nowhere (OpenAL's null output).
+player() { asked 'player:' player-state; }
+# Waits up to $2 seconds for the player's state to match $1.
+player_until() {
+  local line
+  for _ in $(seq $(( ${2:-5} * 5 ))); do
+    line=$(player)
+    [[ $line == $1 ]] && return 0
+    sleep 0.2
+  done
+  fail "the player never got to $1: $line"
+}
+position() { player | sed -n 's/.* position=\([0-9.]*\).*/\1/p'; }
+section_media_view_player() {
+  echo "M2. The player"
+  export ALSOFT_DRIVERS=null
+  start 150
+  local threads line before after
+  threads=$(ls /proc/"$P"/task | wc -l)
+  c 'chat 43' 3
+  line=$(asked 'chat media:' 'media 2')
+  [[ $line == *'document="0:03"'*'icon=media-playback-start-symbolic'* ]] || fail "a voice message before it plays: $line"
+  # A voice message not downloaded yet: "Loading…", then it plays.
+  c 'player-play 2' 0.3
+  player_until '*status=loading message=2 *' 2
+  player_until '*status=playing message=2 *thread=1*' 6
+  line=$(asked 'chat media:' 'media 2')
+  [[ $line == *'document="0:0'?' / 0:03"'*'icon=media-playback-pause-symbolic'* ]] || fail "a voice message playing: $line"
+  # A pause keeps the place, a tap plays on from it.
+  c player-pause 0.5
+  before=$(position)
+  sleep 0.6
+  after=$(position)
+  [[ $(player) == *'status=paused '* && $before == "$after" ]] || fail "the pause: $before then $after, $(player)"
+  [[ $(asked 'chat media:' 'media 2') == *'icon=media-playback-start-symbolic'* ]] || fail "the icon of a paused one"
+  c 'player-play 2' 0.8
+  player_until '*status=playing message=2 *' 2
+  # It ends, the next voice message plays, and nothing after it: the song isn't a voice message.
+  player_until '*status=playing message=3 *' 6
+  player_until '*status=stopped *thread=0*' 5
+  [[ $(asked 'chat media:' 'media 2') == *'document="0:03"'*'bar=0 '* ]] || fail "the bar after the end"
+  # A song downloaded slower than it plays waits for its data.
+  c 'player-play 4' 0.3
+  player_until '*status=playing message=4 *' 8
+  player_until '*waiting=1*' 10
+  line=$(asked 'chat media:' 'media 4')
+  [[ $line == *'fill='*'Loading…'* || $line == *'Loading…'*'fill='* ]] || fail "waiting doesn't show: $line"
+  # A seek far ahead asks for the download from there.
+  c 'player-seek 0.9' 0.3
+  player_until '*status=playing message=4 position=11.*' 8
+  grep -q 'media file 4000003 asked from [1-9]' "$WORK/log.txt" || fail "the download wasn't moved for the seek"
+  # The next song follows; a drag along its bar plays it from there.
+  player_until '*status=playing message=5 *' 8
+  c 'player-drag 0.5' 0.5
+  line=$(player)
+  [[ $line == *'status=playing message=5 position=2.'* || $line == *'status=playing message=5 position=3.'* ]] \
+    || fail "the drag: $line"
+  # The chat closed, the song plays on.
+  c back 1
+  [[ $(player) == *'status=playing message=5 '* ]] || fail "closing the chat stopped the song: $(player)"
+  c 'chat 43' 2
+  c player-stop 0.5
+  [[ $(player) == *'status=stopped '*'thread=0'* ]] || fail "stopped: $(player)"
+  (( $(ls /proc/"$P"/task | wc -l) <= threads + 1 )) || fail "threads stayed: $threads before, $(ls /proc/"$P"/task | wc -l) now"
+  grep -q 'CRITICAL' "$WORK/log.txt" && fail "criticals in the log"
+  stop
+  unset ALSOFT_DRIVERS
+  echo "   ok"
+}
+section_media_view_player
 echo "PASS"

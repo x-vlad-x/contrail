@@ -16,6 +16,7 @@
 
 namespace Contrail {
 
+class AudioPlayer;
 class MainWindow;
 class MessageWidget;
 struct ForwardDraft;
@@ -65,6 +66,9 @@ class ChatView final {
   void sendText(const std::string &text);  // Bot commands from links.
   // The sponsored message's button, text or media was tapped (`media`): Telegram counts it.
   void sponsoredClicked(const MessageItem &item, bool media);
+  // The window's player, told what follows in this chat: after a voice message the next one, after a song the next
+  // song, as far as they are loaded. Null without an account.
+  [[nodiscard]] AudioPlayer *player();
 
   // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
   void debugState() const;
@@ -98,6 +102,9 @@ class ChatView final {
   void debugTap(std::int64_t number, int index);
   void debugTapText(std::int64_t number, const std::string &part);
   void debugSponsored() const;
+  // play N (message N's voice or song, as its button) | pause | seek FRACTION | drag FRACTION (along the bar,
+  // let go there) | stop.
+  void debugPlayer(const std::string &what);
 
  private:
   // One call of a function some time later. Started again, it waits from the start.

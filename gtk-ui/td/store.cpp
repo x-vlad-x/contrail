@@ -251,6 +251,15 @@ void Store::download(FileId id, int priority) {
                _lifetime);
 }
 
+void Store::downloadFrom(FileId id, int priority, std::int64_t offset) {
+  if (const auto known = file(id); known && known->complete) return;
+  _client.send(api::make_object<api::downloadFile>(id, priority, offset, 0, false),
+               [this](ObjectPtr object) {
+                 if (const auto file = As<api::file>(object.get())) addFile(*file);
+               },
+               _lifetime);
+}
+
 void Store::cancelDownload(FileId id) {
   _client.send(api::make_object<api::cancelDownloadFile>(id, false), nullptr);
 }
@@ -487,6 +496,9 @@ void Store::addFile(const api::file &source) {
     file.downloading = source.local_->is_downloading_active_;
     file.complete = source.local_->is_downloading_completed_;
     file.path = file.complete ? source.local_->path_ : std::string();
+    file.partialPath = source.local_->path_;
+    file.prefixOffset = source.local_->download_offset_;
+    file.prefix = source.local_->downloaded_prefix_size_;
   }
   notify(_fileHandlers, file);
 }

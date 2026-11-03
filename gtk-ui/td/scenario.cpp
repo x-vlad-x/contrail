@@ -5,6 +5,7 @@
 #include <glib/gstdio.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -78,6 +79,19 @@ constexpr auto kDownloadStepMs = 200u;
 constexpr auto kDownloadStep = std::int64_t(128 * 1024);
 constexpr auto kSlowSendMs = 1500u;
 constexpr auto kCommandChat = std::int64_t(3);
+// Section media-view: a chat with voice messages and songs that play. Two voice messages one after the other (the
+// first downloaded in steps, the second here from the start), a song downloaded slower than it plays, another song
+// after it. Their sound is a tone in WAV: FFmpeg goes by what a file holds. A download asked for from an offset goes
+// on from there, as TDLib's does.
+constexpr auto kMediaId = std::int64_t(3001);
+constexpr auto kMediaOrder = std::int64_t(1) << 28;
+constexpr auto kMediaMessages = 6;
+constexpr auto kMediaVoiceFile = 4000001;
+constexpr auto kMediaVoice2File = 4000002;
+constexpr auto kMediaSongFile = 4000003;
+constexpr auto kMediaSong2File = 4000004;
+constexpr auto kMediaStep = std::int64_t(8 * 1024);
+constexpr auto kMediaStepMs = 200u;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -89,6 +103,7 @@ int MessagesInChat() {
 }
 
 int Count(std::int64_t chat) {
+  if (chat == kMediaId) return kMediaMessages;
   return chat == kShowcaseId ? kShowcaseMessages : MessagesInChat();
 }
 
@@ -325,6 +340,73 @@ std::string ShowcasePath(std::int32_t file) {
   return result;
 }
 
+// The tones of the media chat: seconds, samples a second, the pitch.
+struct MediaTone {
+  int seconds = 0;
+  int rate = 0;
+  int pitch = 0;
+};
+
+MediaTone MediaToneOf(std::int32_t file) {
+  switch (file) {
+    case kMediaVoiceFile: return {3, 16000, 440};
+    case kMediaVoice2File: return {2, 16000, 660};
+    case kMediaSongFile: return {12, 22050, 330};
+    default: return {4, 8000, 550};
+  }
+}
+
+std::int64_t MediaSize(std::int32_t file) {
+  const auto tone = MediaToneOf(file);
+  return 44 + std::int64_t(tone.seconds) * tone.rate * 2;
+}
+
+// Parts of a file, start to end, joined where they touch.
+void AddPart(std::map<std::int64_t, std::int64_t> &parts, std::int64_t start, std::int64_t end) {
+  auto it = parts.upper_bound(start);
+  if (it != parts.begin() && std::prev(it)->second >= start) {
+    --it;
+    start = it->first;
+    end = std::max(end, it->second);
+    it = parts.erase(it);
+  }
+  while (it != parts.end() && it->first <= end) {
+    end = std::max(end, it->second);
+    it = parts.erase(it);
+  }
+  parts[start] = end;
+}
+
+std::string MediaPath(std::int32_t file) {
+  auto *name = g_strdup_printf("media-%d.wav", file);
+  auto *path = g_build_filename(g_get_user_cache_dir(), "contrail-scenario", name, nullptr);
+  auto result = std::string(path);
+  g_free(path);
+  g_free(name);
+  if (g_file_test(result.c_str(), G_FILE_TEST_EXISTS)) return result;
+  auto *directory = g_path_get_dirname(result.c_str());
+  g_mkdir_with_parents(directory, 0700);
+  g_free(directory);
+  const auto tone = MediaToneOf(file);
+  const auto samples = std::uint32_t(tone.seconds * tone.rate);
+  auto data = std::string();
+  const auto put = [&](std::uint32_t value, int bytes) {
+    for (auto i = 0; i < bytes; ++i) data.push_back(char((value >> (8 * i)) & 0xff));
+  };
+  // 16-bit mono PCM.
+  data += "RIFF";
+  put(36 + samples * 2, 4);
+  data += "WAVEfmt ";
+  put(16, 4), put(1, 2), put(1, 2), put(tone.rate, 4), put(tone.rate * 2, 4), put(2, 2), put(16, 2);
+  data += "data";
+  put(samples * 2, 4);
+  for (auto i = std::uint32_t(0); i < samples; ++i) {
+    put(std::uint16_t(std::int16_t(8000 * std::sin(2 * G_PI * tone.pitch * i / tone.rate))), 2);
+  }
+  g_file_set_contents(result.c_str(), data.data(), gssize(data.size()), nullptr);
+  return result;
+}
+
 api::object_ptr<api::poll> MakePoll(bool voted) {
   auto poll = api::make_object<api::poll>();
   poll->id_ = voted ? 2 : 1;
@@ -370,6 +452,7 @@ class ScenarioTransport final : public Transport {
     if (_ticker) g_source_remove(_ticker);
     if (_burst) g_source_remove(_burst);
     if (_downloadTicker) g_source_remove(_downloadTicker);
+    if (_mediaTicker) g_source_remove(_mediaTicker);
     for (auto *later : std::set<Later *>(_later)) g_source_remove(later->source);
   }
 
@@ -383,6 +466,7 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
+    if (mediaRequest(id, *function)) return;
     if (showcaseRequest(id, *function) || forumRequest(id, *function) || pinnedRequest(id, *function)
         || reactionRequest(id, *function)) {
       return;
@@ -574,6 +658,7 @@ class ScenarioTransport final : public Transport {
     addForum();
     addReactionsChannel();
     addShowcase();
+    addMedia();
     update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("\xE2\x9D\xA4")));
     if (!_fullList) return;
     addOtherChats();
@@ -741,6 +826,7 @@ class ScenarioTransport final : public Transport {
 
   api::object_ptr<api::message> messageAt(std::int64_t chatId, int index) {
     if (chatId == kShowcaseId) return showcaseMessage(index);
+    if (chatId == kMediaId) return mediaMessage(index);
     const auto sender = index % 3 == 0 ? kSelfId : chatId;
     auto message = MakeMessage(chatId, index * kIdStep, sender, kNow - (MessagesInChat() - index) * 600, MessageText(index));
     if (chatId == kReactionsChannelId) {
@@ -1378,6 +1464,149 @@ class ScenarioTransport final : public Transport {
           _burst = 0;
         }
         return false;
+      default:
+        return false;
+    }
+  }
+
+  // --- section media-view: voice messages and songs ---------------------------
+
+  void addMedia() {
+    update(api::make_object<api::updateUser>(MakeUser(kMediaId, "Mira", "Sound")));
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kMediaId;
+    chat->type_ = api::make_object<api::chatTypePrivate>(kMediaId);
+    chat->title_ = "Mira Sound";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->last_message_ = messageAt(kMediaId, kMediaMessages);
+    chat->last_read_inbox_message_id_ = kMediaMessages * kIdStep;
+    chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kMediaOrder, false, nullptr));
+    _orders[kMediaId] = {kMediaOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+  }
+
+  // As TDLib has it: where the parts are kept once a download started, the part without a gap from its offset.
+  api::object_ptr<api::file> mediaFile(std::int32_t id) {
+    const auto size = MediaSize(id);
+    auto &download = _mediaDownloads[id];
+    if (id == kMediaVoice2File) download.have = {{0, size}};
+    auto downloaded = std::int64_t(0);
+    for (const auto &[start, end] : download.have) downloaded += end - start;
+    auto prefix = std::int64_t(0);
+    for (const auto &[start, end] : download.have) {
+      if (start <= download.offset && end > download.offset) prefix = end - download.offset;
+    }
+    const auto complete = downloaded >= size;
+    auto local = api::make_object<api::localFile>();
+    local->path_ = (complete || download.active || downloaded > 0) ? MediaPath(id) : std::string();
+    local->can_be_downloaded_ = true;
+    local->is_downloading_active_ = download.active && !complete;
+    local->is_downloading_completed_ = complete;
+    local->download_offset_ = complete ? 0 : download.offset;
+    local->downloaded_prefix_size_ = complete ? size : prefix;
+    local->downloaded_size_ = downloaded;
+    auto file = api::make_object<api::file>();
+    file->id_ = id;
+    file->size_ = size;
+    file->local_ = std::move(local);
+    file->remote_ = api::make_object<api::remoteFile>();
+    return file;
+  }
+
+  api::object_ptr<api::message> mediaMessage(int index) {
+    const auto outgoing = index == 3;
+    auto message = MakeMessage(kMediaId, index * kIdStep, outgoing ? kSelfId : kMediaId,
+                               kNow - (kMediaMessages - index) * 600, "");
+    const auto audio = [&](std::int32_t file, const char *title) {
+      auto song = api::make_object<api::audio>();
+      song->duration_ = MediaToneOf(file).seconds;
+      song->title_ = title;
+      song->performer_ = "Contrail";
+      song->file_name_ = std::string(title) + ".wav";
+      song->mime_type_ = "audio/x-wav";
+      song->audio_ = mediaFile(file);
+      return api::make_object<api::messageAudio>(std::move(song), Formatted(""));
+    };
+    const auto voice = [&](std::int32_t file) {
+      auto note = api::make_object<api::voiceNote>();
+      note->duration_ = MediaToneOf(file).seconds;
+      note->mime_type_ = "audio/ogg";
+      note->voice_ = mediaFile(file);
+      return api::make_object<api::messageVoiceNote>(std::move(note), Formatted(""), false);
+    };
+    switch (index) {
+      case 1: message->content_ = TextContent(Formatted("Voice messages and songs")); break;
+      case 2: message->content_ = voice(kMediaVoiceFile); break;
+      case 3: message->content_ = voice(kMediaVoice2File); break;
+      case 4: message->content_ = audio(kMediaSongFile, "Slow Tone"); break;
+      case 5: message->content_ = audio(kMediaSong2File, "Next Tone"); break;
+      default: message->content_ = TextContent(Formatted("That's all")); break;
+    }
+    return message;
+  }
+
+  void mediaTick() {
+    auto any = false;
+    for (auto &[file, download] : _mediaDownloads) {
+      if (!download.active) continue;
+      const auto size = MediaSize(file);
+      // On from the end of the part at the offset; past the end of the file, from the first gap.
+      auto from = download.offset;
+      for (const auto &[start, end] : download.have) {
+        if (start <= from && end > from) from = end;
+      }
+      if (from >= size) {
+        from = 0;
+        for (const auto &[start, end] : download.have) {
+          if (start > from) break;
+          from = std::max(from, end);
+        }
+        download.offset = from;
+      }
+      // The song comes at half the speed it plays.
+      const auto step = file == kMediaSongFile ? kMediaStep / 2 : kMediaStep;
+      if (from < size) AddPart(download.have, from, std::min(from + step, size));
+      auto downloaded = std::int64_t(0);
+      for (const auto &[start, end] : download.have) downloaded += end - start;
+      download.active = downloaded < size;
+      any = any || download.active;
+      update(api::make_object<api::updateFile>(mediaFile(file)));
+    }
+    if (!any && _mediaTicker) {
+      g_source_remove(_mediaTicker);
+      _mediaTicker = 0;
+    }
+  }
+
+  bool mediaRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::downloadFile::ID: {
+        const auto &request = static_cast<api::downloadFile &>(function);
+        const auto file = request.file_id_;
+        if (file < kMediaVoiceFile || file > kMediaSong2File) return false;
+        auto &download = _mediaDownloads[file];
+        download.offset = request.offset_;
+        if (file != kMediaVoice2File) {
+          download.active = true;
+          if (!_mediaTicker) {
+            _mediaTicker = g_timeout_add(kMediaStepMs, +[](gpointer data) -> gboolean {
+              static_cast<ScenarioTransport *>(data)->mediaTick();
+              return G_SOURCE_CONTINUE;
+            }, this);
+          }
+        }
+        g_message("Scenario: media file %d asked from %lld", file, (long long)request.offset_);
+        answer(id, mediaFile(file));
+        return true;
+      }
+      case api::cancelDownloadFile::ID: {
+        const auto file = static_cast<api::cancelDownloadFile &>(function).file_id_;
+        if (file < kMediaVoiceFile || file > kMediaSong2File) return false;
+        _mediaDownloads[file].active = false;
+        update(api::make_object<api::updateFile>(mediaFile(file)));
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
       default:
         return false;
     }
@@ -2100,6 +2329,14 @@ class ScenarioTransport final : public Transport {
   guint _burst = 0;
   unsigned _burstSeed = 1;
   int _burstUpdates = 0;
+  // Section media-view.
+  struct MediaDownload {
+    std::map<std::int64_t, std::int64_t> have;  // Downloaded parts, start to end.
+    std::int64_t offset = 0;
+    bool active = false;
+  };
+  std::map<std::int32_t, MediaDownload> _mediaDownloads;
+  guint _mediaTicker = 0;
 };
 
 }  // namespace

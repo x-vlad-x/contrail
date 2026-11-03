@@ -12,6 +12,7 @@
 
 namespace Contrail {
 
+class AudioPlayer;
 class ChatList;
 class ChatView;
 class LoginView;
@@ -51,6 +52,8 @@ class MainWindow final {
   [[nodiscard]] std::int32_t currentTopic() const;  // 0 unless a topic is open.
   [[nodiscard]] TopicList *topicList() const { return _topics.get(); }
   [[nodiscard]] Td::Store *store() const { return _store.get(); }
+  // Voice messages and music: one player for the account, made with the first bar of one. Null without a store.
+  [[nodiscard]] AudioPlayer *player();
   [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
   [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
@@ -88,6 +91,7 @@ class MainWindow final {
   GtkWidget *_placeholder = nullptr;
   Td::Session *_session = nullptr;
   std::unique_ptr<Td::Store> _store;
+  std::unique_ptr<AudioPlayer> _player;  // Goes before the store it downloads with.
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
   std::unique_ptr<TopicList> _topics;

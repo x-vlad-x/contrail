@@ -3,6 +3,7 @@
 #include "forward.hpp"
 #include "local_state.hpp"
 #include "main_window.hpp"
+#include "media/audio_player.hpp"
 #include "memory_trim.hpp"
 #include "message.hpp"
 #include "photo_viewer.hpp"
@@ -3425,6 +3426,48 @@ void ChatView::debugSponsored() const {
             int(_sponsoredAsked), int(_sponsored != nullptr), _sponsoredWaiting.size(), int(_sponsoredPlaced),
             (long long)(_sponsored ? _sponsored->sponsoredAfter >> 20 : 0), int(row != nullptr), int(_sponsoredViewed),
             _sponsoredClicks);
+}
+
+// --- the player ---
+
+AudioPlayer *ChatView::player() {
+  auto *player = _window.player();
+  if (!player) return nullptr;
+  player->setNext([this](const AudioPlayer::Track &finished) -> std::optional<AudioPlayer::Track> {
+    auto result = std::optional<AudioPlayer::Track>();
+    for (const auto &item : _items) {
+      if (!item->data || item->local() || item->id() <= finished.message) continue;
+      if (result && item->id() >= result->message) continue;
+      const auto track = PlayerTrack(*item->data);
+      if (track && track->chat == finished.chat && track->voice == finished.voice) result = track;
+    }
+    return result;
+  }, _lifetime);
+  return player;
+}
+
+void ChatView::debugPlayer(const std::string &what) {
+  auto *player = this->player();
+  if (!player) return;
+  const auto gap = what.find(' ');
+  const auto name = what.substr(0, gap);
+  const auto rest = gap == std::string::npos ? std::string() : what.substr(gap + 1);
+  const auto &state = player->state();
+  if (name == "play") {
+    const auto item = debugItem(std::atoll(rest.c_str()));
+    const auto track = (item && item->data) ? PlayerTrack(*item->data) : std::nullopt;
+    if (track) player->playPause(*track);
+    else g_message("player: message %s has nothing to play", rest.c_str());
+  } else if (name == "pause") {
+    if (state.status != AudioPlayer::Status::Stopped) player->playPause(state.track);
+  } else if (name == "seek" || name == "drag") {
+    if (state.status == AudioPlayer::Status::Stopped) return;
+    const auto track = state.track;
+    if (name == "drag") player->startSeeking(track);
+    player->seek(track, g_ascii_strtod(rest.c_str(), nullptr));
+  } else if (name == "stop") {
+    player->stop();
+  }
 }
 
 }  // namespace Contrail

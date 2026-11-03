@@ -5,6 +5,7 @@
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "login.hpp"
+#include "media/audio_player.hpp"
 #include "memory_trim.hpp"
 #include "td/message_text.hpp"
 #include "td/session.hpp"
@@ -132,7 +133,13 @@ void MainWindow::clearChats() {
   _archive = nullptr;
   if (_chatList && _sidebarNav) adw_navigation_view_remove(_sidebarNav, _chatList->page());
   _chatList = nullptr;
+  _player = nullptr;
   _store = nullptr;
+}
+
+AudioPlayer *MainWindow::player() {
+  if (!_player && _store) _player = std::make_unique<AudioPlayer>(*_store);
+  return _player.get();
 }
 
 void MainWindow::present() {

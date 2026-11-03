@@ -126,3 +126,8 @@ if (CONTRAIL_TESTS)
   target_compile_definitions(td-message-text-test PRIVATE
     TD_API_TL="${ROOT}/deps-td/src/td/generate/scheme/td_api.tl")
 endif()
+
+# Section media-view: voice messages and music play through FFmpeg and OpenAL.
+pkg_check_modules(CONTRAIL_PLAYER_DEPS REQUIRED IMPORTED_TARGET libavformat libavcodec libswresample libavutil openal)
+target_sources(contrail_core PRIVATE media/audio_player.cpp)
+target_link_libraries(contrail_core PUBLIC PkgConfig::CONTRAIL_PLAYER_DEPS)
