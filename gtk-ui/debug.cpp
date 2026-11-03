@@ -1,15 +1,17 @@
 // Remote control for testing on the phone without touching it (only with CONTRAIL_DEBUG=1):
 //   tools/phone.sh td-cmd 'tree'
 // Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
-//   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | reply | edit TEXT | delete
+//   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | type TEXT (a draft) | reply | edit TEXT | delete
 //   mem | trim | close | search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
 //   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
 //   question, saved)
+//   topic N (opens topic N of the group's topics shown) | topic-state | topic-menu N | topic-do N mute|read
 #include "debug.hpp"
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
 #include "main_window.hpp"
+#include "topic_list.hpp"
 #include "userpics.hpp"
 
 #include <malloc.h>
@@ -125,12 +127,25 @@ void Run(MainWindow &window, const std::string &command) {
     ListAction(window.chatList(), rest);
   } else if (name == "archive-do") {
     ListAction(window.chatList(true), rest);
+  } else if (name == "topic") {
+    window.debugOpenTopic(std::atoi(rest.c_str()));
+  } else if (name == "topic-state") {
+    if (auto *topics = window.topicList()) topics->debugState();
+  } else if (name == "topic-menu") {
+    if (auto *topics = window.topicList()) topics->debugMenu(std::atoi(rest.c_str()));
+  } else if (name == "topic-do") {
+    const auto gap = rest.find(' ');
+    if (auto *topics = window.topicList(); topics && gap != std::string::npos) {
+      topics->debugAction(std::atoi(rest.c_str()), rest.substr(gap + 1));
+    }
   } else if (name == "state" && window.chatView()) {
     window.chatView()->debugState();
   } else if (name == "scroll" && window.chatView()) {
     window.chatView()->debugScroll(rest);
   } else if (name == "send" && window.chatView()) {
     window.chatView()->debugSend(rest);
+  } else if (name == "type" && window.chatView()) {
+    window.chatView()->debugType(rest);
   } else if (name == "reply" && window.chatView()) {
     window.chatView()->debugReply();
   } else if (name == "edit" && window.chatView()) {

@@ -323,6 +323,7 @@
 {"lng_edited", "edited", nullptr},
 {"lng_file_size_limit1", "The document can't be sent, because it is larger than {size}.", nullptr},
 {"lng_flood_error", "Too many tries. Please try again later.", nullptr},
+{"lng_forum_topic_closed", "This topic is closed.", nullptr},
 {"lng_forward_choose", "Forward to…", nullptr},
 {"lng_forwarded", "Forwarded from {user}", nullptr},
 {"lng_from_draft", "Draft", nullptr},

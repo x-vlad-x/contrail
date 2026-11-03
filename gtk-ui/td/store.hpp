@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -56,7 +57,7 @@ struct Chat {
   std::string draft;
   std::int64_t draftReplyTo = 0;
   bool canSendBasic = true;  // The chat's permissions for everybody; a group's own status can narrow this.
-  bool forum = false;
+  bool forum = false;        // A supergroup with topics: its messages are read and written in them.
   bool supergroup = false;
 };
 
@@ -65,6 +66,19 @@ struct Group {
   int members = 0;
   bool member = true;
   bool canPost = true;   // In a channel: only some admins. In a group: unless restricted.
+  bool forum = false;
+  bool manageTopics = false;  // May write in closed topics.
+};
+
+// A topic of a group with topics. What its row shows is kept as a chat's is (the name in `row.title`; `row.muted`
+// follows the group's when `row.defaultMute`), so the list draws it with the same functions.
+struct Topic {
+  std::int32_t id = 0;
+  Chat row;
+  std::int64_t order = 0;
+  bool pinned = false;
+  bool general = false;
+  bool closed = false;
 };
 
 // Somebody is typing or sending something in a chat. `kind` is the ID of the api::ChatAction.
@@ -103,6 +117,8 @@ class Store final {
   using ListHandler = std::function<void(ListKind list)>;
   using UserHandler = std::function<void(UserId id)>;
   using FileHandler = std::function<void(const File &file)>;
+  // `topic` 0: the order of the topics changed, or more of them came.
+  using TopicHandler = std::function<void(ChatId chat, std::int32_t topic)>;
   // The text of a last message, from message_text.cpp; a test can replace it.
   using Preview = std::function<std::string(const api::message &message)>;
 
@@ -145,6 +161,22 @@ class Store final {
   void onFile(FileHandler handler, const Lifetime &lifetime);
   void onConnection(std::function<void()> handler, const Lifetime &lifetime);
 
+  // Topics are kept only for the groups somebody holds (the list of topics, an open topic): a group can have
+  // thousands of them. They are forgotten when the last holder lets go.
+  [[nodiscard]] std::shared_ptr<void> holdTopics(ChatId chat);
+  [[nodiscard]] const Topic *topic(ChatId chat, std::int32_t id) const;
+  // Pinned first, then by Telegram's order. Empty for a group not held.
+  [[nodiscard]] const std::vector<std::int32_t> &topics(ChatId chat);
+  [[nodiscard]] bool topicsLoaded(ChatId chat) const;  // The first page came.
+  [[nodiscard]] bool topicsComplete(ChatId chat) const;
+  void loadTopics(ChatId chat);
+  // Asks TDLib for the topic again: its updates don't tell the unread count or the order. `done` comes after the
+  // answer or the error, unless the group was let go.
+  void refreshTopic(ChatId chat, std::int32_t id, std::function<void()> done = nullptr);
+  void setTopicMuted(ChatId chat, std::int32_t id, bool muted, Failed failed = nullptr);
+  void markTopicRead(ChatId chat, std::int32_t id, Failed failed = nullptr);
+  void onTopic(TopicHandler handler, const Lifetime &lifetime);
+
  private:
   struct ListState {
     std::vector<ChatId> ids;
@@ -152,6 +184,21 @@ class Store final {
     bool loading = false;
     bool complete = false;
     int unreadChats = 0;
+  };
+  struct Forum {
+    std::weak_ptr<void> holder;
+    std::unordered_map<std::int32_t, Topic> topics;
+    std::vector<std::int32_t> order;
+    // Topics asked for again, with what waits for the answer. Asked once more when changed in the meantime.
+    std::unordered_map<std::int32_t, std::vector<std::function<void()>>> asked;
+    std::set<std::int32_t> askAgain;
+    std::int32_t nextDate = 0;
+    std::int64_t nextMessage = 0;
+    std::int32_t nextTopic = 0;
+    bool dirty = false;
+    bool loading = false;
+    bool loaded = false;
+    bool complete = false;
   };
   template <typename Handler>
   struct Subscriber {
@@ -165,13 +212,21 @@ class Store final {
   void setPositions(Chat &chat, std::vector<api::object_ptr<api::chatPosition>> &positions);
   void setPosition(Chat &chat, api::chatPosition &position);
   void groupChanged(std::int64_t peerId, bool supergroup);
-  void setLastMessage(Chat &chat, api::message *message);
+  void setLastMessage(Chat &chat, const api::message *message);
   void setNotificationSettings(Chat &chat, const api::chatNotificationSettings &settings);
   void setScopeMuted(int scope, bool muted);
   void setAction(api::updateChatAction &update);
   void addFile(const api::file &file);
   void chatChanged(ChatId id);
   void listChanged(ListKind kind);
+  void topicsUpdated(api::Update &update);
+  void setTopic(Forum &forum, api::forumTopic &source);
+  void setTopicInfo(Topic &topic, const api::forumTopicInfo &info);
+  void setTopicSettings(Topic &topic, const Chat &chat, const api::chatNotificationSettings &settings);
+  void topicMessage(ChatId chat, const api::message &message);
+  void topicChanged(ChatId chat, std::int32_t id);
+  void dropForum(ChatId chat);
+  [[nodiscard]] Forum *forum(ChatId chat);
   template <typename Handler, typename... Arguments>
   void notify(std::vector<Subscriber<Handler>> &subscribers, const Arguments &...arguments);
 
@@ -195,7 +250,12 @@ class Store final {
   std::vector<Subscriber<UserHandler>> _userHandlers;
   std::vector<Subscriber<FileHandler>> _fileHandlers;
   std::vector<Subscriber<std::function<void()>>> _connectionHandlers;
+  std::vector<Subscriber<TopicHandler>> _topicHandlers;
+  std::unordered_map<ChatId, Forum> _forums;
 };
+
+// The topic of a message in a group with topics, 0 for any other.
+[[nodiscard]] std::int32_t MessageTopic(const api::message &message);
 
 // "Name Surname" of a user, the title of a deleted account's stand-in when there is none.
 [[nodiscard]] std::string DisplayName(const User &user);

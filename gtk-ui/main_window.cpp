@@ -9,6 +9,7 @@
 #include "td/message_text.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
+#include "topic_list.hpp"
 
 namespace Contrail {
 namespace {
@@ -124,7 +125,8 @@ MainWindow::~MainWindow() {
 void MainWindow::clearChats() {
   if (_chat) adw_navigation_page_set_child(_contentPage, _placeholder);
   _chat = nullptr;
-  if (_archive && _sidebarNav) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
+  if ((_archive || _topics) && _sidebarNav && _chatList) adw_navigation_view_pop_to_page(_sidebarNav, _chatList->page());
+  _topics = nullptr;
   _archive = nullptr;
   if (_chatList && _sidebarNav) adw_navigation_view_remove(_sidebarNav, _chatList->page());
   _chatList = nullptr;
@@ -246,31 +248,122 @@ void MainWindow::showChats() {
   }
 }
 
-void MainWindow::setCurrent(Td::ChatId chat) {
+void MainWindow::setCurrent(Td::ChatId chat, std::int32_t topic) {
+  // The chat list marks the group of an open topic.
   if (_chatList) _chatList->setCurrent(chat);
   if (_archive) _archive->setCurrent(chat);
+  if (_topics) _topics->setCurrent(_topics->chat() == chat ? topic : 0);
 }
 
 Td::ChatId MainWindow::currentChat() const {
   return _chat ? _chat->chat() : 0;
 }
 
+std::int32_t MainWindow::currentTopic() const {
+  return _chat ? _chat->topic() : 0;
+}
+
 void MainWindow::openChat(Td::ChatId chat, std::int64_t showAt) {
-  if (!_store || !_store->chat(chat)) return;
-  if (_chat && _chat->chat() == chat) {
+  if (!_store) return;
+  const auto known = _store->chat(chat);
+  if (!known) return;
+  if (known->forum) {
+    // Messages of a group with topics are written and read in their topics.
+    if (!showAt) {
+      openForum(chat);
+      return;
+    }
+    _store->client().request<api::message>(
+        api::make_object<api::getMessage>(chat, showAt), _sessionLifetime,
+        [this, chat, showAt](api::message &message) {
+          if (const auto topic = Td::MessageTopic(message)) openTopic(chat, topic, showAt);
+          else openForum(chat);
+        },
+        [this, chat](api::error &) { openForum(chat); });
+    return;
+  }
+  if (_chat && _chat->chat() == chat && !_chat->topic()) {
     if (showAt) _chat->showAt(showAt);
   } else {
     auto old = std::move(_chat);
     _chat = std::make_unique<ChatView>(*_store, chat, *this, showAt);
     adw_navigation_page_set_child(_contentPage, _chat->widget());
-    adw_navigation_page_set_title(_contentPage, _store->chat(chat)->title.c_str());
+    adw_navigation_page_set_title(_contentPage, known->title.c_str());
     if (old) {
       old = nullptr;
       TrimMemorySoon();
     }
   }
-  setCurrent(chat);
+  setCurrent(chat, 0);
   adw_navigation_split_view_set_show_content(_split, TRUE);
+}
+
+void MainWindow::openTopic(Td::ChatId chat, std::int32_t topic, std::int64_t showAt) {
+  if (!_store || !_store->chat(chat) || !topic) return;
+  // A topic opened from a link or a message elsewhere: Back on a phone leads to the other topics.
+  if (!_topics || _topics->chat() != chat) openForum(chat);
+  if (_chat && _chat->chat() == chat && _chat->topic() == topic) {
+    if (showAt) _chat->showAt(showAt);
+  } else {
+    auto old = std::move(_chat);
+    _chat = std::make_unique<ChatView>(*_store, chat, *this, showAt, topic);
+    adw_navigation_page_set_child(_contentPage, _chat->widget());
+    const auto known = _store->topic(chat, topic);
+    adw_navigation_page_set_title(_contentPage, known ? known->row.title.c_str() : _store->chat(chat)->title.c_str());
+    if (old) {
+      old = nullptr;
+      TrimMemorySoon();
+    }
+  }
+  setCurrent(chat, topic);
+  adw_navigation_split_view_set_show_content(_split, TRUE);
+}
+
+void MainWindow::openForum(Td::ChatId chat) {
+  if (!_store || !_chatList) return;
+  adw_navigation_split_view_set_show_content(_split, FALSE);
+  if (_topics && _topics->chat() == chat) {
+    if (adw_navigation_view_find_page(_sidebarNav, "forum")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _topics->page());
+    } else {
+      adw_navigation_view_push(_sidebarNav, _topics->page());
+    }
+    return;
+  }
+  if (_topics) {
+    // Another group's topics: these take their place.
+    if (adw_navigation_view_find_page(_sidebarNav, "forum")) {
+      adw_navigation_view_pop_to_page(_sidebarNav, _topics->page());
+      adw_navigation_view_pop(_sidebarNav);
+    }
+    _topics = nullptr;
+  }
+  _topics = std::make_unique<TopicList>(*_store, chat, *this);
+  _topics->setCurrent(currentChat() == chat ? currentTopic() : 0);
+  adw_navigation_view_push(_sidebarNav, _topics->page());
+  // Back from the topics: they go, unless they come back at once (a topic of the same group opened).
+  Connect<void(AdwNavigationPage *)>(_topics->page(), "hidden", [this](AdwNavigationPage *) {
+    g_idle_add_once(+[](gpointer data) {
+      auto *self = static_cast<MainWindow *>(data);
+      if (self->_topics && self->_sidebarNav
+          && adw_navigation_view_find_page(self->_sidebarNav, "forum") != self->_topics->page()) {
+        self->_topics = nullptr;
+      }
+    }, this);
+  });
+}
+
+void MainWindow::closeForum(Td::ChatId chat) {
+  if (currentChat() == chat && currentTopic()) {
+    closeChat();
+    adw_navigation_split_view_set_show_content(_split, FALSE);
+  }
+  if (!_topics || _topics->chat() != chat) return;
+  if (_sidebarNav && adw_navigation_view_find_page(_sidebarNav, "forum") == _topics->page()) {
+    adw_navigation_view_pop_to_page(_sidebarNav, _topics->page());
+    adw_navigation_view_pop(_sidebarNav);
+  }
+  _topics = nullptr;
 }
 
 void MainWindow::closeChat() {
@@ -278,7 +371,7 @@ void MainWindow::closeChat() {
   adw_navigation_page_set_child(_contentPage, _placeholder);
   adw_navigation_page_set_title(_contentPage, "Contrail");
   _chat = nullptr;
-  setCurrent(0);
+  setCurrent(0, 0);
   TrimMemorySoon();
 }
 
@@ -318,6 +411,10 @@ void MainWindow::showSessionLost() {
 
 void MainWindow::debugOpenChat(int index) {
   if (_chatList) _chatList->openRow(index);
+}
+
+void MainWindow::debugOpenTopic(int index) {
+  if (_topics) _topics->openRow(index);
 }
 
 void MainWindow::debugBack() {

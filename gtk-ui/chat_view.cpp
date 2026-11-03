@@ -185,8 +185,9 @@ void ChatView::Timer::cancel() {
   if (_source) g_source_remove(std::exchange(_source, 0));
 }
 
-ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::int64_t showAt)
-    : _store(store), _chat(chat), _window(window), _pendingShowAt(showAt), _readTimer([this] { markAsRead(); }),
+ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::int64_t showAt, std::int32_t topic)
+    : _store(store), _chat(chat), _topic(topic), _window(window), _pendingShowAt(showAt),
+      _readTimer([this] { markAsRead(); }),
       _statusTimer([this] {
         refreshHeader();
         _statusTimer.callOnce(kStatusPeriod);
@@ -209,7 +210,29 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
 
   // TDLib keeps a chat's messages up to date while it is open, and needs that to count views.
   _store.client().send(api::make_object<api::openChat>(_chat));
-  if (const auto known = _store.chat(_chat)) {
+  if (!_topic) {
+    start();
+    return;
+  }
+  _topicHold = _store.holdTopics(_chat);
+  _topicKnown = _store.topic(_chat, _topic) != nullptr;
+  if (_topicKnown) {
+    start();
+    return;
+  }
+  // Opened from a link or a message: where it was read up to comes first, the messages from there.
+  const auto token = _lifetime.token();
+  _store.refreshTopic(_chat, _topic, [this, token] {
+    if (token.expired()) return;
+    _topicKnown = _store.topic(_chat, _topic) != nullptr;
+    refreshHeader();
+    refreshComposerState();
+    start();
+  });
+}
+
+void ChatView::start() {
+  if (const auto known = readState()) {
     if (known->unread > 0 && known->readInbox) _unreadAfter = known->readInbox;
     _savedDraft = known->draft;
     _savedDraftReply = known->draftReplyTo;
@@ -236,6 +259,7 @@ ChatView::ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::i
 ChatView::~ChatView() {
   _signals.clear();
   if (_viewportSource) g_source_remove(_viewportSource);
+  if (_closeSource) g_source_remove(_closeSource);
   saveDraft();
   _store.client().send(api::make_object<api::closeChat>(_chat));
   _rows.clear();
@@ -253,6 +277,9 @@ void ChatView::subscribe() {
     refreshFooters();
     draftChanged();
   }, _lifetime);
+  _store.onTopic([this](Td::ChatId chat, std::int32_t id) {
+    if (_topic && chat == _chat && id == _topic) topicChanged();
+  }, _lifetime);
   _store.onUser([this](Td::UserId id) {
     const auto known = _store.chat(_chat);
     if (known && known->kind == Td::ChatKind::Private && known->peerId == id) refreshHeader();
@@ -260,6 +287,44 @@ void ChatView::subscribe() {
   _store.onFile([this](const Td::File &file) {
     for (const auto &[raw, row] : _rows) row->fileChanged(file);
   }, _lifetime);
+}
+
+const Td::Chat *ChatView::readState() const {
+  if (!_topic) return _store.chat(_chat);
+  const auto known = _store.topic(_chat, _topic);
+  return known ? &known->row : nullptr;
+}
+
+bool ChatView::belongs(const api::message &message) const {
+  if (message.chat_id_ != _chat) return false;
+  if (!_topic) return true;
+  const auto topic = Td::MessageTopic(message);
+  if (topic == _topic) return true;
+  // A message without a topic in a group with topics is one of General's.
+  const auto known = topic ? nullptr : _store.topic(_chat, _topic);
+  return known && known->general;
+}
+
+api::object_ptr<api::MessageTopic> ChatView::topicObject() const {
+  if (!_topic) return nullptr;
+  return api::make_object<api::messageTopicForum>(_topic);
+}
+
+void ChatView::topicChanged() {
+  if (_store.topic(_chat, _topic)) {
+    _topicKnown = true;
+    refreshHeader();
+    refreshComposerState();
+    draftChanged();
+    return;
+  }
+  // The topic was deleted: nothing left to show. Not now: this runs inside the store's notification.
+  if (!_topicKnown || _closeSource) return;
+  _closeSource = g_idle_add_once(+[](gpointer data) {
+    auto *self = static_cast<ChatView *>(data);
+    self->_closeSource = 0;
+    if (self->_window.chatView() == self) self->_window.closeChat();
+  }, this);
 }
 
 void ChatView::updated(api::Update &update) {
@@ -273,7 +338,7 @@ void ChatView::updated(api::Update &update) {
   switch (update.get_id()) {
     case api::updateNewMessage::ID: {
       auto &data = static_cast<api::updateNewMessage &>(update);
-      if (data.message_->chat_id_ != _chat || data.message_->scheduling_state_) break;
+      if (!belongs(*data.message_) || data.message_->scheduling_state_) break;
       // Further back in the chat the newest messages aren't held: they come when the list gets there.
       if (!_reachedBottom && !data.message_->sending_state_) break;
       if (insert(std::move(data.message_))) {
@@ -333,7 +398,7 @@ void ChatView::updated(api::Update &update) {
 
 // The message being sent has its server id now, or failed: its object changes, its row stays.
 void ChatView::messageSent(api::object_ptr<api::message> message, std::int64_t oldId) {
-  if (!message || message->chat_id_ != _chat) return;
+  if (!message || !belongs(*message)) return;
   if (const auto item = find(oldId)) {
     item->data = std::move(message);
     resort();
@@ -361,7 +426,11 @@ void ChatView::refreshHeader() {
   if (!known) return;
   auto name = known->title;
   auto status = std::string();
-  if (known->kind == Td::ChatKind::Private || known->kind == Td::ChatKind::Secret) {
+  if (_topic) {
+    // The topic, and the group it is in.
+    if (const auto topic = _store.topic(_chat, _topic)) name = topic->row.title;
+    status = known->title;
+  } else if (known->kind == Td::ChatKind::Private || known->kind == Td::ChatKind::Secret) {
     if (known->peerId == _store.selfId()) {
       name = Tr("lng_saved_messages");
     } else if (const auto user = _store.user(known->peerId)) {
@@ -578,8 +647,10 @@ void ChatView::requestHistory(std::int64_t from, int offset, int limit, Page pag
   gtk_widget_set_visible(_loading, TRUE);
   gtk_widget_set_visible(_retry, FALSE);
   (page == Page::Newer ? _loadingNewer : _loadingOlder) = true;
+  auto function = _topic ? Td::FunctionPtr(api::make_object<api::getForumTopicHistory>(_chat, _topic, from, offset, limit))
+                         : Td::FunctionPtr(api::make_object<api::getChatHistory>(_chat, from, offset, limit, false));
   _store.client().request<api::messages>(
-      api::make_object<api::getChatHistory>(_chat, from, offset, limit, false), _pageLifetime,
+      std::move(function), _pageLifetime,
       [this, page](api::messages &messages) { applyPage(messages, page); },
       [this, page](api::error &error) {
         (page == Page::Newer ? _loadingNewer : _loadingOlder) = false;
@@ -609,7 +680,7 @@ void ChatView::applyPage(api::messages &messages, Page page) {
   if (page == Page::Newer && !added) _reachedBottom = true;
   if (page == Page::Initial && !_pendingShowAt) _reachedBottom = true;
   if (first && _items.empty()) _reachedTop = _reachedBottom = true;
-  const auto known = _store.chat(_chat);
+  const auto known = readState();
   if (known && newestId() >= known->lastMessageId) _reachedBottom = true;
   _initialLoaded = true;
   sync();
@@ -1192,8 +1263,8 @@ void ChatView::preloadVisibleEdges() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   if (value - _topReserve < kPreloadHeight && !_reachedTop) {
-    if (value + page < _topReserve - kJumpGap) {
-      // Far above the rows: the messages there are loaded when the list stops, not every page on the way.
+    if (!_topic && value + page < _topReserve - kJumpGap) {
+      // Far above the rows (by date, which a topic doesn't go by): the messages there are loaded when the list stops, not every page on the way.
       if (scrollIdle()) {
         jumpUp(_topReserve - value - page);
       } else {
@@ -1228,12 +1299,13 @@ std::vector<MessageWidget *> ChatView::visibleRows() const {
 // What was seen whole goes to TDLib, which counts the views and moves the read mark. At the end of the chat
 // everything is read, whatever was not on the screen.
 void ChatView::markAsRead() {
-  if (!gtk_window_is_active(GTK_WINDOW(_window.widget())) || _window.currentChat() != _chat || !_initialLoaded
+  if (!gtk_window_is_active(GTK_WINDOW(_window.widget())) || _window.currentChat() != _chat
+      || _window.currentTopic() != _topic || !_initialLoaded
       || _scrollTarget || !gtk_widget_get_mapped(_root)) {
     return;
   }
   const auto page = gtk_adjustment_get_page_size(_adjustment);
-  const auto known = _store.chat(_chat);
+  const auto known = readState();
   if (page <= 0 || !known) return;
   auto ids = std::vector<std::int64_t>();
   for (const auto row : visibleRows()) {
@@ -1256,8 +1328,9 @@ void ChatView::markAsRead() {
     _store.client().send(api::make_object<api::toggleChatIsMarkedAsUnread>(_chat, false));
   }
   if (ids.empty()) return;
-  _store.client().send(api::make_object<api::viewMessages>(_chat, std::move(ids),
-                                                           api::make_object<api::messageSourceChatHistory>(), false));
+  auto source = _topic ? api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceForumTopicHistory>())
+                      : api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceChatHistory>());
+  _store.client().send(api::make_object<api::viewMessages>(_chat, std::move(ids), std::move(source), false));
 }
 
 // --- the message field ---------------------------------------------------------
@@ -1383,6 +1456,7 @@ void ChatView::refreshComposerState() {
   if (!known) return;
   const auto group = _store.group(*known);
   const auto broadcast = known->kind == Td::ChatKind::Channel;
+  auto closed = false;
   if (group && !group->member) {
     gtk_button_set_label(GTK_BUTTON(_joinButton),
                          Tr(broadcast ? "lng_profile_join_channel" : "lng_profile_join_group").c_str());
@@ -1390,9 +1464,16 @@ void ChatView::refreshComposerState() {
   } else if (!_store.canWrite(*known)) {
     gtk_button_set_label(GTK_BUTTON(_joinButton), Tr(known->muted ? "lng_channel_unmute" : "lng_channel_mute").c_str());
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "join");
+  } else if (const auto topic = _topic ? _store.topic(_chat, _topic) : nullptr;
+             topic && topic->closed && !(group && group->manageTopics)) {
+    // Only those who manage topics write in a closed one.
+    closed = true;
+    gtk_button_set_label(GTK_BUTTON(_joinButton), Tr("lng_forum_topic_closed").c_str());
+    gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "join");
   } else {
     gtk_stack_set_visible_child_name(GTK_STACK(_composerStack), "field");
   }
+  gtk_widget_set_sensitive(_joinButton, !closed);
 }
 
 std::string ChatView::composerText() const {
@@ -1425,7 +1506,7 @@ void ChatView::composerChanged() {
   const auto now = g_get_monotonic_time();
   if (composerText().empty() || now - _lastTyping < kTypingPeriod) return;
   _lastTyping = now;
-  _store.client().send(api::make_object<api::sendChatAction>(_chat, nullptr, std::string(),
+  _store.client().send(api::make_object<api::sendChatAction>(_chat, topicObject(), std::string(),
                                                              api::make_object<api::chatActionTyping>()));
 }
 
@@ -1442,12 +1523,12 @@ void ChatView::saveDraft() {
     draft = api::make_object<api::draftMessage>(
         ReplyTo(_replyToId), 0, api::make_object<api::draftMessageContentText>(Formatted(text), nullptr), 0, nullptr);
   }
-  _store.client().send(api::make_object<api::setChatDraftMessage>(_chat, nullptr, std::move(draft)));
+  _store.client().send(api::make_object<api::setChatDraftMessage>(_chat, topicObject(), std::move(draft)));
 }
 
 // Written on another device, while this field has nothing of its own.
 void ChatView::draftChanged() {
-  const auto known = _store.chat(_chat);
+  const auto known = readState();
   if (!known || known->draft == _savedDraft || _editing || _draftTimer.active()) return;
   if (composerText() != _savedDraft) return;
   _savedDraft = known->draft;
@@ -1575,7 +1656,7 @@ void ChatView::send() {
     applyEdit(text);
     return;
   }
-  _store.client().send(api::make_object<api::sendMessage>(_chat, nullptr, ReplyTo(_replyToId), nullptr, nullptr,
+  _store.client().send(api::make_object<api::sendMessage>(_chat, topicObject(), ReplyTo(_replyToId), nullptr, nullptr,
                                                           InputText(text)));
   setComposerText(std::string());
   _draftTimer.cancel();
@@ -1591,7 +1672,7 @@ void ChatView::send() {
 void ChatView::sendText(const std::string &text) {
   const auto known = _store.chat(_chat);
   if (!known || !_store.canWrite(*known) || text.empty()) return;
-  _store.client().send(api::make_object<api::sendMessage>(_chat, nullptr, nullptr, nullptr, nullptr, InputText(text)));
+  _store.client().send(api::make_object<api::sendMessage>(_chat, topicObject(), nullptr, nullptr, nullptr, InputText(text)));
   if (_reachedBottom) scrollToBottom();
   else reload(0);
 }
@@ -1720,6 +1801,14 @@ void ChatView::debugState() const {
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto oldest = oldestId(), newest = newestId();
+  // Which topics the held messages are in: in a topic, only that one.
+  auto topics = std::set<std::int32_t>();
+  for (const auto &item : _items) topics.insert(Td::MessageTopic(*item->data));
+  auto topicList = std::string();
+  for (const auto topic : topics) topicList += (topicList.empty() ? "" : ",") + std::to_string(topic);
+  auto newestText = std::string();
+  if (!_items.empty()) newestText = Td::OneLine(PlainText(*_items.back()->data), 60);
+  g_message("chat topic=%d topics=%s newestText=\"%s\"", int(_topic), topicList.c_str(), newestText.c_str());
   g_message("chat state: messages=%zu rows=%zu nearRows=%zu oldest=%lld newest=%lld top=%d bottom=%d stick=%d reserve=%d value=%.0f "
             "page=%.0f upper=%.0f toBottom=%d replyTo=%lld editing=%lld draft=\"%s\"",
             _items.size(), _rows.size(), _nearRows.size(), (long long)(oldest >> 20), (long long)(newest >> 20), int(_reachedTop),
@@ -1744,6 +1833,11 @@ void ChatView::debugScroll(const std::string &where) {
 void ChatView::debugSend(const std::string &text) {
   setComposerText(text);
   send();
+}
+
+void ChatView::debugType(const std::string &text) {
+  setComposerText(text);
+  refreshSendButton();
 }
 
 void ChatView::debugReply() {

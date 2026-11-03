@@ -2,7 +2,9 @@
 # Chat behaviour of the TDLib version on the scenario transport (xvfb, no account), checked from its debug state:
 #   1. reaching the start of a chat leaves the screen where it was (the reserve above goes without a jump to the end);
 #   2. only the rows near the screen keep their photos decoded, and photos far off come back the same;
-#   3. the decodes of a chat that closed don't go on.
+#   3. the decodes of a chat that closed don't go on;
+#   4. a group with topics: its list of topics, a topic with only its messages, a message sent and one received
+#      landing only in their topics, the list closed when the group stops having topics.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -103,5 +105,44 @@ later=$(grep -c 'Picture: [0-9]' "$WORK/log.txt" || true)
 # Only the ones already running finish: two decode threads.
 (( later - decodes <= 2 )) || fail "pictures still decoded after the chat closed: $((later - decodes))"
 echo "   ok: $((later - decodes)) decodes finished after closing"
+stop
+
+# The newest log line with $1, after asking for it with the debug command $2.
+asked() {
+  local before
+  before=$(grep -c "$1" "$WORK/log.txt" || true)
+  c "$2" 0
+  for _ in $(seq 50); do (( $(grep -c "$1" "$WORK/log.txt" || true) > before )) && break; sleep 0.1; done
+  grep "$1" "$WORK/log.txt" | tail -1
+}
+
+echo "4. Topics of a group"
+start 120
+# The scenario's group with topics is below the 40 friends.
+c 'chat 40' 2
+line=$(asked 'topics chat=' topic-state)
+[[ $line == *": [2 pinned unread=0] [4 muted unread=0] [3 unread=2] [1 unread=0]" ]] || fail "topics: $line"
+c 'topic 2' 2
+line=$(asked 'chat topic=' state)
+[[ $line == *"topic=3 topics=3 "* ]] || fail "topic 3 holds other messages: $line"
+c 'send hello topic' 1
+line=$(asked 'chat topic=' state)
+[[ $line == *'topics=3 newestText="hello topic"'* ]] || fail "sent in topic 3: $line"
+# Somebody writes in General while topic 3 is open.
+c 'send /in 1 ping general' 1
+line=$(asked 'chat topic=' state)
+[[ $line == *'topics=3 newestText="hello topic"'* ]] || fail "a message of General in topic 3: $line"
+line=$(asked 'topics chat=' topic-state)
+[[ $line == *"[3 unread=0 current]"*"[1 unread=1]"* ]] || fail "topics after the messages: $line"
+c 'topic 2' 2
+line=$(asked 'chat topic=' state)
+[[ $line == *'topic=1 topics=1 newestText="ping general"'* ]] || fail "General: $line"
+c 'send /unforum' 1.5
+line=$(asked 'list shown=' list-state)
+[[ $line == *"selected=-1"* ]] || fail "the topic is still open: $line"
+before=$(grep -c 'topics chat=' "$WORK/log.txt" || true)
+c topic-state 1
+(( $(grep -c 'topics chat=' "$WORK/log.txt" || true) == before )) || fail "the topics stay without a forum"
+echo "   ok"
 stop
 echo "PASS"

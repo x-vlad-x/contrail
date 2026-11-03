@@ -21,14 +21,16 @@ struct MessageItem;
 struct ReplyPreview;
 
 // An open chat: its messages and the message field. Only the messages near the screen are held, each with its row:
-// the ones that go are in TDLib's database and come back from there.
+// the ones that go are in TDLib's database and come back from there. A topic of a group with topics is a chat of
+// its own: only its messages, sent into it, with its own draft and read mark.
 class ChatView final {
  public:
-  ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::int64_t showAt = 0);
+  ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::int64_t showAt = 0, std::int32_t topic = 0);
   ~ChatView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
   [[nodiscard]] Td::ChatId chat() const { return _chat; }
+  [[nodiscard]] std::int32_t topic() const { return _topic; }  // 0: the whole chat.
   [[nodiscard]] Td::Store &store() const { return _store; }
   void showAt(std::int64_t message);
   // Cancels a reply or an edit; false if there was nothing to cancel.
@@ -49,6 +51,7 @@ class ChatView final {
   void debugState() const;
   void debugScroll(const std::string &where);
   void debugSend(const std::string &text);
+  void debugType(const std::string &text);  // Into the field, not sent: a draft.
   void debugReply();
   void debugEdit(const std::string &text);
   void debugDelete();
@@ -70,6 +73,12 @@ class ChatView final {
   enum class Page { Initial, Start, Older, Newer };
   using Items = std::vector<MessageItem *>;
 
+  void start();
+  // The chat, or the topic: what is read, unread and drafted here.
+  [[nodiscard]] const Td::Chat *readState() const;
+  [[nodiscard]] bool belongs(const Td::api::message &message) const;
+  [[nodiscard]] Td::api::object_ptr<Td::api::MessageTopic> topicObject() const;
+  void topicChanged();
   void buildHeader();
   void buildList();
   void buildComposer();
@@ -144,6 +153,9 @@ class ChatView final {
 
   Td::Store &_store;
   const Td::ChatId _chat;
+  const std::int32_t _topic;
+  std::shared_ptr<void> _topicHold;  // The store keeps the group's topics while this is open.
+  bool _topicKnown = false;
   MainWindow &_window;
   Td::Lifetime _lifetime;
   Td::Lifetime _pageLifetime;  // Ends with what the running requests for pages were for.
@@ -196,6 +208,7 @@ class ChatView final {
   double _pendingShift = 0.;
   double _shiftBase = 0.;
   guint _viewportSource = 0;
+  guint _closeSource = 0;
 
   std::int64_t _replyToId = 0;
   std::int64_t _editing = 0;

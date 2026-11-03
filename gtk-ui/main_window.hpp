@@ -12,6 +12,7 @@ namespace Contrail {
 class ChatList;
 class ChatView;
 class LoginView;
+class TopicList;
 
 // The application's window: a spinner while TDLib starts, the login, then the chats.
 class MainWindow final {
@@ -30,17 +31,27 @@ class MainWindow final {
   // Telegram ended the session: says why instead of just showing the login again.
   void showSessionLost();
 
-  // On a phone the chat goes over the list. `showAt`: a message to show instead of the last place.
+  // On a phone the chat goes over the list. `showAt`: a message to show instead of the last place. A group with
+  // topics opens its list of topics instead, or the topic of `showAt`.
   void openChat(Td::ChatId chat, std::int64_t showAt = 0);
+  // A topic is a chat of its own; its group's topics go in the sidebar, so that Back on a phone leads to them.
+  void openTopic(Td::ChatId chat, std::int32_t topic, std::int64_t showAt = 0);
+  // The list of topics over the chat list.
+  void openForum(Td::ChatId chat);
+  // The group stopped being a forum: its topics and an open topic of it go.
+  void closeForum(Td::ChatId chat);
   void closeChat();
   void openArchive();
   [[nodiscard]] Td::ChatId currentChat() const;
+  [[nodiscard]] std::int32_t currentTopic() const;  // 0 unless a topic is open.
+  [[nodiscard]] TopicList *topicList() const { return _topics.get(); }
   [[nodiscard]] Td::Store *store() const { return _store.get(); }
   [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
   [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
   void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
+  void debugOpenTopic(int index);
   void debugBack();
 
  private:
@@ -50,7 +61,7 @@ class MainWindow final {
   void showChats();
   void buildChats();
   void clearChats();
-  void setCurrent(Td::ChatId chat);
+  void setCurrent(Td::ChatId chat, std::int32_t topic);
   // A new login dies within minutes if nobody confirms it on another device.
   void warnAboutConfirmation();
 
@@ -65,6 +76,7 @@ class MainWindow final {
   std::unique_ptr<Td::Store> _store;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
+  std::unique_ptr<TopicList> _topics;
   std::unique_ptr<ChatView> _chat;
   Td::Lifetime _sessionLifetime;
   std::string _language;

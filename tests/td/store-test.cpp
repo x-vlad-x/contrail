@@ -4,6 +4,8 @@
 
 #include <glib.h>
 
+#include <algorithm>
+
 namespace Contrail {
 namespace {
 
@@ -231,6 +233,80 @@ void ListDates() {
   g_assert_true(Td::FormatListDate(now - 30 * 86400).find_first_of("0123456789") != std::string::npos);
 }
 
+
+api::object_ptr<api::forumTopic> MakeTopic(std::int64_t chat, std::int32_t id, std::int64_t order, bool pinned = false) {
+  auto topic = api::make_object<api::forumTopic>();
+  topic->info_ = api::make_object<api::forumTopicInfo>();
+  topic->info_->chat_id_ = chat;
+  topic->info_->forum_topic_id_ = id;
+  topic->info_->name_ = "Topic " + std::to_string(id);
+  topic->info_->is_general_ = id == 1;
+  topic->order_ = order;
+  topic->is_pinned_ = pinned;
+  topic->last_read_inbox_message_id_ = 100;
+  topic->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+  topic->notification_settings_->use_default_mute_for_ = true;
+  return topic;
+}
+
+void TopicsOfAGroupHeld() {
+  auto f = Fixture();
+  constexpr auto kChat = std::int64_t(-400);
+  auto group = api::make_object<api::supergroup>();
+  group->id_ = 400;
+  group->is_forum_ = true;
+  f.update(api::make_object<api::updateSupergroup>(std::move(group)));
+  auto chat = api::make_object<api::chat>();
+  chat->id_ = kChat;
+  chat->title_ = "Club";
+  chat->type_ = api::make_object<api::chatTypeSupergroup>(400, false);
+  f.update(api::make_object<api::updateNewChat>(std::move(chat)));
+  g_assert_true(f.store.chat(kChat)->forum);
+
+  auto hold = f.store.holdTopics(kChat);
+  f.store.loadTopics(kChat);
+  g_assert_cmpint(f.sent.back(), ==, api::getForumTopics::ID);
+  auto page = api::make_object<api::forumTopics>();
+  page->topics_.push_back(MakeTopic(kChat, 1, 100));
+  page->topics_.push_back(MakeTopic(kChat, 2, 300));
+  page->topics_.push_back(MakeTopic(kChat, 3, 200, true));
+  page->total_count_ = 3;
+  f.sink(f.transport->last, std::move(page));
+  g_assert_true(f.store.topicsComplete(kChat));
+  // Pinned first, then by order.
+  g_assert_true((f.store.topics(kChat) == std::vector<std::int32_t>{3, 2, 1}));
+
+  // A new message in General: shown at once, the order comes with the topic asked for again.
+  auto told = std::vector<std::int32_t>();
+  auto lifetime = Td::Lifetime();
+  f.store.onTopic([&](Td::ChatId, std::int32_t id) { told.push_back(id); }, lifetime);
+  auto message = api::make_object<api::message>();
+  message->id_ = 500;
+  message->chat_id_ = kChat;
+  message->topic_id_ = api::make_object<api::messageTopicForum>(1);
+  f.update(api::make_object<api::updateNewMessage>(std::move(message)));
+  g_assert_cmpstr(f.store.topic(kChat, 1)->row.preview.c_str(), ==, "message 500");
+  g_assert_cmpint(f.store.topic(kChat, 1)->row.unread, ==, 1);
+  g_assert_cmpint(f.store.topic(kChat, 2)->row.unread, ==, 0);
+  g_assert_cmpint(f.sent.back(), ==, api::getForumTopic::ID);
+  f.sink(f.transport->last, MakeTopic(kChat, 1, 400));
+  g_assert_true((f.store.topics(kChat) == std::vector<std::int32_t>{3, 1, 2}));
+  g_assert_true(std::ranges::count(told, 0) > 0);
+
+  // Read in the topic: nothing left unread after the last message.
+  f.update(api::make_object<api::updateForumTopic>(kChat, 2, false, 600, 0, 0, 0, 0, nullptr, nullptr));
+  g_assert_cmpint(f.store.topic(kChat, 2)->row.readInbox, ==, 600);
+
+  // No longer a forum; and topics nobody holds are forgotten.
+  group = api::make_object<api::supergroup>();
+  group->id_ = 400;
+  f.update(api::make_object<api::updateSupergroup>(std::move(group)));
+  g_assert_false(f.store.chat(kChat)->forum);
+  hold = nullptr;
+  g_assert_null(f.store.topic(kChat, 1));
+  g_assert_true(f.store.topics(kChat).empty());
+}
+
 }  // namespace
 }  // namespace Contrail
 
@@ -251,5 +327,6 @@ int main(int argc, char **argv) {
   g_test_add_func("/store/mark-read", MarkReadClearsEverythingThatShows);
   g_test_add_func("/store/unread-chats", UnreadChatsReachTheList);
   g_test_add_func("/store/list-dates", ListDates);
+  g_test_add_func("/store/topics", TopicsOfAGroupHeld);
   return g_test_run();
 }

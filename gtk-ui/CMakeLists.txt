@@ -77,6 +77,7 @@ add_library(contrail_core STATIC
   td/store.cpp
   td/strings.cpp
   text.cpp
+  topic_list.cpp
   userpics.cpp)
 target_include_directories(contrail_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${GENERATED})
 target_link_libraries(contrail_core PUBLIC tdlib PkgConfig::CONTRAIL_GTK_DEPS PkgConfig::CONTRAIL_IMAGE_DEPS)

@@ -87,15 +87,18 @@ std::int32_t LastSeen(api::UserStatus *status) {
 void SetGroupStatus(Group &group, const api::ChatMemberStatus *status, bool channel) {
   group.member = true;
   group.canPost = !channel;
+  group.manageTopics = false;
   if (!status) return;
   switch (status->get_id()) {
     case api::chatMemberStatusCreator::ID:
       group.member = static_cast<const api::chatMemberStatusCreator &>(*status).is_member_;
       group.canPost = true;
+      group.manageTopics = true;
       break;
     case api::chatMemberStatusAdministrator::ID: {
       const auto &rights = static_cast<const api::chatMemberStatusAdministrator &>(*status).rights_;
       group.canPost = !channel || (rights && rights->can_post_messages_);
+      group.manageTopics = rights && rights->can_manage_topics_;
       break;
     }
     case api::chatMemberStatusRestricted::ID: {
@@ -298,15 +301,27 @@ void Store::notify(std::vector<Subscriber<Handler>> &subscribers, const Argument
 
 // The chat of a group doesn't know of its status: the header and the field ask the store again.
 void Store::groupChanged(std::int64_t peerId, bool supergroup) {
-  for (const auto &[id, chat] : _chats) {
+  for (auto &[id, chat] : _chats) {
     if (chat.peerId != peerId || chat.supergroup != supergroup) continue;
     if (chat.kind != ChatKind::Group && chat.kind != ChatKind::Channel) continue;
+    chat.forum = supergroup && _supergroups[peerId].forum;
     chatChanged(id);
     return;
   }
 }
 
 void Store::chatChanged(ChatId id) {
+  // Topics without settings of their own are muted with the group.
+  if (const auto held = forum(id)) {
+    const auto &chat = _chats.at(id);
+    auto changed = std::vector<std::int32_t>();
+    for (auto &[topicId, topic] : held->topics) {
+      if (!topic.row.defaultMute || topic.row.muted == chat.muted) continue;
+      topic.row.muted = chat.muted;
+      changed.push_back(topicId);
+    }
+    for (const auto topicId : changed) notify(_topicHandlers, id, topicId);
+  }
   notify(_chatHandlers, id);
 }
 
@@ -332,7 +347,7 @@ void Store::setPositions(Chat &chat, std::vector<api::object_ptr<api::chatPositi
   }
 }
 
-void Store::setLastMessage(Chat &chat, api::message *message) {
+void Store::setLastMessage(Chat &chat, const api::message *message) {
   chat.preview = message && _preview ? OneLine(_preview(*message)) : std::string();
   chat.lastDate = message ? message->date_ : 0;
   chat.lastMessageId = message ? message->id_ : 0;
@@ -390,7 +405,6 @@ void Store::addChat(api::chat &source) {
   chat.draft = DraftText(source.draft_message_);
   chat.draftReplyTo = DraftReplyTo(source.draft_message_);
   chat.canSendBasic = !source.permissions_ || source.permissions_->can_send_basic_messages_;
-  chat.forum = source.view_as_topics_;
   if (const auto type = source.type_.get()) {
     switch (type->get_id()) {
       case api::chatTypePrivate::ID:
@@ -406,6 +420,9 @@ void Store::addChat(api::chat &source) {
         chat.kind = group->is_channel_ ? ChatKind::Channel : ChatKind::Group;
         chat.peerId = group->supergroup_id_;
         chat.supergroup = true;
+        if (const auto known = _supergroups.find(chat.peerId); known != _supergroups.end()) {
+          chat.forum = known->second.forum;
+        }
         break;
       }
       case api::chatTypeSecret::ID:
@@ -456,6 +473,7 @@ void Store::addFile(const api::file &source) {
 }
 
 void Store::updated(api::Update &update) {
+  if (!_forums.empty()) topicsUpdated(update);
   const auto withChat = [&](ChatId id, auto apply) {
     const auto it = _chats.find(id);
     if (it == _chats.end()) return;  // TDLib always sends updateNewChat first.
@@ -543,6 +561,7 @@ void Store::updated(api::Update &update) {
       }
       auto &known = _supergroups[group.id_];
       known.members = group.member_count_;
+      known.forum = group.is_forum_;
       SetGroupStatus(known, group.status_.get(), group.is_channel_);
       groupChanged(group.id_, true);
       break;
@@ -615,6 +634,324 @@ void Store::updated(api::Update &update) {
       break;
     default: break;
   }
+}
+
+// --- topics of groups with topics ------------------------------------------------
+
+std::int32_t MessageTopic(const api::message &message) {
+  const auto topic = As<api::messageTopicForum>(message.topic_id_.get());
+  return topic ? topic->forum_topic_id_ : 0;
+}
+
+Store::Forum *Store::forum(ChatId chat) {
+  const auto it = _forums.find(chat);
+  return it == _forums.end() ? nullptr : &it->second;
+}
+
+std::shared_ptr<void> Store::holdTopics(ChatId chat) {
+  auto &held = _forums[chat];
+  if (auto holder = held.holder.lock()) return holder;
+  // The holders are views, which go before the store does; this checks anyway.
+  const auto token = _lifetime.token();
+  auto holder = std::shared_ptr<void>(new char(0), [this, token, chat](void *pointer) {
+    delete static_cast<char *>(pointer);
+    if (!token.expired()) dropForum(chat);
+  });
+  held.holder = holder;
+  return holder;
+}
+
+void Store::dropForum(ChatId chat) {
+  _forums.erase(chat);
+}
+
+const Topic *Store::topic(ChatId chat, std::int32_t id) const {
+  const auto held = _forums.find(chat);
+  if (held == _forums.end()) return nullptr;
+  const auto it = held->second.topics.find(id);
+  return it == held->second.topics.end() ? nullptr : &it->second;
+}
+
+const std::vector<std::int32_t> &Store::topics(ChatId chat) {
+  static const auto empty = std::vector<std::int32_t>();
+  const auto held = forum(chat);
+  if (!held) return empty;
+  if (held->dirty) {
+    held->dirty = false;
+    held->order.clear();
+    for (const auto &[id, topic] : held->topics) held->order.push_back(id);
+    std::ranges::sort(held->order, [&](std::int32_t a, std::int32_t b) {
+      const auto &left = held->topics.at(a);
+      const auto &right = held->topics.at(b);
+      if (left.pinned != right.pinned) return left.pinned;
+      return left.order != right.order ? left.order > right.order : a > b;
+    });
+  }
+  return held->order;
+}
+
+bool Store::topicsLoaded(ChatId chat) const {
+  const auto held = _forums.find(chat);
+  return held != _forums.end() && held->second.loaded;
+}
+
+bool Store::topicsComplete(ChatId chat) const {
+  const auto held = _forums.find(chat);
+  return held != _forums.end() && held->second.complete;
+}
+
+void Store::loadTopics(ChatId chat) {
+  const auto held = forum(chat);
+  if (!held || held->loading || held->complete) return;
+  held->loading = true;
+  const auto finished = [this, chat](bool complete) {
+    const auto held = forum(chat);
+    if (!held) return;
+    held->loading = false;
+    held->loaded = true;
+    held->complete = held->complete || complete;
+    held->dirty = true;
+    notify(_topicHandlers, chat, std::int32_t(0));
+  };
+  _client.request<api::forumTopics>(
+      api::make_object<api::getForumTopics>(chat, std::string(), held->nextDate, held->nextMessage, held->nextTopic, 100),
+      _lifetime,
+      [this, chat, finished](api::forumTopics &answer) {
+        const auto held = forum(chat);
+        if (!held) return;
+        for (auto &topic : answer.topics_) {
+          if (topic && topic->info_) setTopic(*held, *topic);
+        }
+        held->nextDate = answer.next_offset_date_;
+        held->nextMessage = answer.next_offset_message_id_;
+        held->nextTopic = answer.next_offset_forum_topic_id_;
+        const auto end = answer.topics_.empty() || int(held->topics.size()) >= answer.total_count_
+            || (!held->nextDate && !held->nextMessage && !held->nextTopic);
+        finished(end);
+      },
+      [this, finished](api::error &error) {
+        _client.reportError(error);
+        finished(true);
+      });
+}
+
+void Store::setTopic(Forum &held, api::forumTopic &source) {
+  const auto id = source.info_->forum_topic_id_;
+  const auto added = !held.topics.contains(id);
+  auto &topic = held.topics[id];
+  const auto before = std::pair(topic.pinned, topic.order);
+  topic.id = id;
+  topic.row.id = source.info_->chat_id_;
+  topic.row.kind = ChatKind::Group;
+  setTopicInfo(topic, *source.info_);
+  topic.order = source.order_;
+  topic.pinned = source.is_pinned_;
+  topic.row.unread = source.unread_count_;
+  topic.row.readInbox = source.last_read_inbox_message_id_;
+  topic.row.readOutbox = source.last_read_outbox_message_id_;
+  topic.row.unreadMentions = source.unread_mention_count_;
+  topic.row.unreadReactions = source.unread_reaction_count_;
+  topic.row.draft = DraftText(source.draft_message_);
+  topic.row.draftReplyTo = DraftReplyTo(source.draft_message_);
+  setLastMessage(topic.row, source.last_message_.get());
+  if (const auto group = chat(topic.row.id); group && source.notification_settings_) {
+    setTopicSettings(topic, *group, *source.notification_settings_);
+  }
+  if (added || before != std::pair(topic.pinned, topic.order)) held.dirty = true;
+}
+
+void Store::setTopicInfo(Topic &topic, const api::forumTopicInfo &info) {
+  topic.row.title = info.name_;
+  topic.general = info.is_general_;
+  topic.closed = info.is_closed_;
+}
+
+void Store::setTopicSettings(Topic &topic, const Chat &group, const api::chatNotificationSettings &settings) {
+  topic.row.defaultMute = settings.use_default_mute_for_;
+  topic.row.muted = topic.row.defaultMute ? group.muted : IsMuted(settings);
+}
+
+void Store::topicChanged(ChatId chat, std::int32_t id) {
+  const auto held = forum(chat);
+  const auto reordered = held && held->dirty;
+  notify(_topicHandlers, chat, id);
+  if (reordered) notify(_topicHandlers, chat, std::int32_t(0));
+}
+
+void Store::refreshTopic(ChatId chat, std::int32_t id, std::function<void()> done) {
+  const auto held = forum(chat);
+  if (!held) {
+    if (done) done();
+    return;
+  }
+  if (const auto it = held->asked.find(id); it != held->asked.end()) {
+    if (done) it->second.push_back(std::move(done));
+    held->askAgain.insert(id);
+    return;
+  }
+  auto &waiting = held->asked[id];
+  if (done) waiting.push_back(std::move(done));
+  // What waits runs last: it may let the group go.
+  const auto answered = [this, chat, id](auto apply) {
+    const auto held = forum(chat);
+    if (!held) return;
+    auto waiting = std::move(held->asked[id]);
+    held->asked.erase(id);
+    const auto again = held->askAgain.erase(id) > 0;
+    apply(*held);
+    topicChanged(chat, id);
+    for (const auto &callback : waiting) callback();
+    if (again) refreshTopic(chat, id);
+  };
+  _client.request<api::forumTopic>(
+      api::make_object<api::getForumTopic>(chat, id), _lifetime,
+      [this, answered](api::forumTopic &topic) {
+        answered([&](Forum &held) {
+          if (topic.info_) setTopic(held, topic);
+        });
+      },
+      [answered, id](api::error &error) {
+        // The topic was deleted.
+        answered([&](Forum &held) {
+          if (error.code_ == 400 && held.topics.erase(id)) held.dirty = true;
+        });
+      });
+}
+
+void Store::topicMessage(ChatId chat, const api::message &message) {
+  const auto held = forum(chat);
+  if (!held) return;
+  auto id = MessageTopic(message);
+  if (!id) {
+    // A message without a topic in a group with topics is one of General's.
+    const auto general = std::ranges::find_if(held->topics, [](const auto &pair) { return pair.second.general; });
+    if (general == held->topics.end()) return;
+    id = general->first;
+  }
+  const auto it = held->topics.find(id);
+  if (it != held->topics.end()) {
+    // Shown at once; the order and the count come with the topic asked for again.
+    auto &row = it->second.row;
+    if (message.id_ >= row.lastMessageId) setLastMessage(row, &message);
+    if (!message.is_outgoing_ && message.id_ > row.readInbox && !message.sending_state_) ++row.unread;
+    topicChanged(chat, id);
+  }
+  refreshTopic(chat, id);
+}
+
+void Store::topicsUpdated(api::Update &update) {
+  switch (update.get_id()) {
+    case api::updateForumTopicInfo::ID: {
+      const auto &info = static_cast<api::updateForumTopicInfo &>(update).info_;
+      const auto held = info ? forum(info->chat_id_) : nullptr;
+      if (!held) break;
+      if (const auto it = held->topics.find(info->forum_topic_id_); it != held->topics.end()) {
+        setTopicInfo(it->second, *info);
+        topicChanged(info->chat_id_, info->forum_topic_id_);
+      } else if (held->loaded) {
+        refreshTopic(info->chat_id_, info->forum_topic_id_);  // A new topic.
+      }
+      break;
+    }
+    case api::updateForumTopic::ID: {
+      auto &data = static_cast<api::updateForumTopic &>(update);
+      const auto held = forum(data.chat_id_);
+      if (!held) break;
+      const auto it = held->topics.find(data.forum_topic_id_);
+      if (it == held->topics.end()) break;
+      auto &topic = it->second;
+      if (topic.pinned != data.is_pinned_) held->dirty = true;
+      topic.pinned = data.is_pinned_;
+      const auto read = topic.row.readInbox != data.last_read_inbox_message_id_;
+      topic.row.readInbox = data.last_read_inbox_message_id_;
+      topic.row.readOutbox = data.last_read_outbox_message_id_;
+      topic.row.unreadMentions = data.unread_mention_count_;
+      topic.row.unreadReactions = data.unread_reaction_count_;
+      topic.row.draft = DraftText(data.draft_message_);
+      topic.row.draftReplyTo = DraftReplyTo(data.draft_message_);
+      if (const auto group = chat(data.chat_id_); group && data.notification_settings_) {
+        setTopicSettings(topic, *group, *data.notification_settings_);
+      }
+      // Nothing tells how many are left unread.
+      if (read && topic.row.readInbox >= topic.row.lastMessageId) topic.row.unread = 0;
+      topicChanged(data.chat_id_, data.forum_topic_id_);
+      if (read && topic.row.unread) refreshTopic(data.chat_id_, data.forum_topic_id_);
+      break;
+    }
+    case api::updateNewMessage::ID: {
+      const auto &message = static_cast<api::updateNewMessage &>(update).message_;
+      if (message && !message->scheduling_state_) topicMessage(message->chat_id_, *message);
+      break;
+    }
+    case api::updateMessageSendSucceeded::ID:
+    case api::updateMessageSendFailed::ID: {
+      const auto &message = update.get_id() == api::updateMessageSendSucceeded::ID
+          ? static_cast<api::updateMessageSendSucceeded &>(update).message_
+          : static_cast<api::updateMessageSendFailed &>(update).message_;
+      const auto topic = message ? MessageTopic(*message) : 0;
+      if (topic && forum(message->chat_id_)) refreshTopic(message->chat_id_, topic);
+      break;
+    }
+    case api::updateMessageContent::ID:
+    case api::updateDeleteMessages::ID: {
+      // The last message of a topic changed or went: its row shows another one.
+      auto chat = ChatId(0);
+      auto ids = std::vector<std::int64_t>();
+      if (update.get_id() == api::updateMessageContent::ID) {
+        const auto &data = static_cast<api::updateMessageContent &>(update);
+        chat = data.chat_id_;
+        ids.push_back(data.message_id_);
+      } else {
+        const auto &data = static_cast<api::updateDeleteMessages &>(update);
+        if (!data.is_permanent_) break;
+        chat = data.chat_id_;
+        ids = data.message_ids_;
+      }
+      const auto held = forum(chat);
+      if (!held) break;
+      auto changed = std::vector<std::int32_t>();
+      for (const auto &[id, topic] : held->topics) {
+        if (topic.row.lastMessageId && std::ranges::count(ids, topic.row.lastMessageId)) changed.push_back(id);
+      }
+      for (const auto id : changed) refreshTopic(chat, id);
+      break;
+    }
+    default: break;
+  }
+}
+
+void Store::setTopicMuted(ChatId chat, std::int32_t id, bool muted, Failed failed) {
+  // As with a chat: only the mute may change of the settings.
+  _client.request<api::forumTopic>(
+      api::make_object<api::getForumTopic>(chat, id), _lifetime,
+      [this, chat, id, muted, failed](api::forumTopic &topic) {
+        if (!topic.notification_settings_) return;
+        auto settings = std::move(topic.notification_settings_);
+        settings->use_default_mute_for_ = false;
+        settings->mute_for_ = muted ? kMuteForever : 0;
+        _client.request<api::ok>(api::make_object<api::setForumTopicNotificationSettings>(chat, id, std::move(settings)),
+                                 _lifetime, [](api::ok &) {}, failed);
+      },
+      failed);
+}
+
+void Store::markTopicRead(ChatId chat, std::int32_t id, Failed failed) {
+  const auto found = topic(chat, id);
+  if (!found) return;
+  const auto send = [&](FunctionPtr function) {
+    _client.request<api::ok>(std::move(function), _lifetime, [](api::ok &) {}, failed);
+  };
+  if (found->row.lastMessageId) {
+    auto messages = std::vector<std::int64_t>{found->row.lastMessageId};
+    send(api::make_object<api::viewMessages>(chat, std::move(messages),
+                                             api::make_object<api::messageSourceForumTopicHistory>(), true));
+  }
+  if (found->row.unreadMentions > 0) send(api::make_object<api::readAllForumTopicMentions>(chat, id));
+  if (found->row.unreadReactions > 0) send(api::make_object<api::readAllForumTopicReactions>(chat, id));
+}
+
+void Store::onTopic(TopicHandler handler, const Lifetime &lifetime) {
+  _topicHandlers.push_back({std::move(handler), lifetime.token()});
 }
 
 }  // namespace Contrail::Td

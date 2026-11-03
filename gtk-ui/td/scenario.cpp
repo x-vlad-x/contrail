@@ -25,6 +25,13 @@ constexpr auto kArchivedChatIds = std::int64_t(5000);
 constexpr auto kGroupId = std::int64_t(-100);
 constexpr auto kChannelId = std::int64_t(-200);
 constexpr auto kPublicChatId = std::int64_t(-300);
+// A group with topics, below the friends: General, a pinned closed one, one with unread messages and a mention, a
+// muted one. Sending "/in N text" in it brings "text" from somebody into topic N, "/unforum" turns the topics off.
+constexpr auto kForumId = std::int64_t(-400);
+constexpr auto kForumGroupId = std::int64_t(400);
+constexpr auto kForumOrder = std::int64_t(1) << 31;
+constexpr auto kTopicMessages = 30;
+constexpr auto kForumUsers = std::int64_t(2001);
 constexpr auto kPinnedOrder = std::int64_t(1) << 62;
 constexpr auto kNewMessageEveryMs = 5000;
 // Message ids in TDLib are server ids shifted by 20 bits.
@@ -189,6 +196,7 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
+    if (forumRequest(id, *function)) return;
     switch (function->get_id()) {
       case api::setTdlibParameters::ID:
         answer(id, api::make_object<api::ok>());
@@ -355,6 +363,7 @@ class ScenarioTransport final : public Transport {
       _orders[id] = {std::int64_t(kChatCount - i + 1) << 32, false};
       update(api::make_object<api::updateNewChat>(std::move(chat)));
     }
+    addForum();
     if (!_fullList) return;
     addOtherChats();
     _ticker = g_timeout_add(kNewMessageEveryMs, +[](gpointer data) -> gboolean {
@@ -564,6 +573,330 @@ class ScenarioTransport final : public Transport {
     return pending;
   }
 
+
+  // --- the group with topics ---------------------------------------------------
+
+  struct Topic {
+    std::int32_t id = 0;
+    std::string name;
+    int last = kTopicMessages;  // Its messages are 1..last.
+    std::int64_t readInbox = 0;
+    int mentions = 0;
+    bool pinned = false;
+    bool closed = false;
+    bool muted = false;
+    std::string draft;
+  };
+
+  // A message id of the group: the topic in the lowest digit, so the topics' messages go in turn.
+  static std::int64_t TopicMessageId(std::int32_t topic, int index) { return (std::int64_t(index) * 10 + topic) * kIdStep; }
+  static std::int32_t TopicOfId(std::int64_t id) { return std::int32_t((id / kIdStep) % 10); }
+  static int IndexOfId(std::int64_t id) { return int((id / kIdStep) / 10); }
+
+  Topic *findTopic(std::int32_t id) {
+    const auto it = std::ranges::find_if(_topics, [&](const Topic &topic) { return topic.id == id; });
+    return it == _topics.end() ? nullptr : &*it;
+  }
+
+  static std::int64_t SenderOf(std::int32_t topic, int index) {
+    return index % 3 == 0 ? kSelfId : kForumUsers + (index + topic) % 3;
+  }
+
+  api::object_ptr<api::message> topicMessage(std::int32_t topic, int index, const std::string &text = std::string()) {
+    const auto id = TopicMessageId(topic, index);
+    const auto date = std::min(kNow - (kTopicMessages - index) * 600 + topic * 10, kNow);
+    auto message = MakeMessage(kForumId, id, SenderOf(topic, index), date,
+                               text.empty() ? "Topic " + std::to_string(topic) + ", message " + std::to_string(index) : text);
+    message->topic_id_ = api::make_object<api::messageTopicForum>(topic);
+    return message;
+  }
+
+  int unreadOf(const Topic &topic) {
+    auto result = 0;
+    for (auto index = topic.last; index >= 1 && TopicMessageId(topic.id, index) > topic.readInbox; --index) {
+      if (SenderOf(topic.id, index) != kSelfId) ++result;
+    }
+    return result;
+  }
+
+  api::object_ptr<api::chatNotificationSettings> topicSettings(const Topic &topic) {
+    auto settings = api::make_object<api::chatNotificationSettings>();
+    settings->use_default_mute_for_ = !topic.muted;
+    settings->mute_for_ = topic.muted ? 0x7fffffff : 0;
+    return settings;
+  }
+
+  api::object_ptr<api::draftMessage> topicDraft(const Topic &topic) {
+    if (topic.draft.empty()) return nullptr;
+    auto content = api::make_object<api::draftMessageContentText>();
+    content->text_ = Formatted(topic.draft);
+    auto draft = api::make_object<api::draftMessage>();
+    draft->content_ = std::move(content);
+    return draft;
+  }
+
+  api::object_ptr<api::forumTopic> forumTopic(const Topic &topic) {
+    auto info = api::make_object<api::forumTopicInfo>(
+        kForumId, topic.id, topic.name, api::make_object<api::forumTopicIcon>(0x6FB9F0, 0), kNow - 86400 * 30,
+        api::make_object<api::messageSenderUser>(kForumUsers), topic.id == 1, false, topic.closed, false, false);
+    auto result = api::make_object<api::forumTopic>();
+    result->info_ = std::move(info);
+    result->last_message_ = topicMessage(topic.id, topic.last, topic.last > kTopicMessages ? _sentTexts[TopicMessageId(topic.id, topic.last)] : "");
+    result->order_ = result->last_message_->id_;
+    result->is_pinned_ = topic.pinned;
+    result->unread_count_ = unreadOf(topic);
+    result->last_read_inbox_message_id_ = topic.readInbox;
+    result->last_read_outbox_message_id_ = TopicMessageId(topic.id, topic.last);
+    result->unread_mention_count_ = topic.mentions;
+    result->notification_settings_ = topicSettings(topic);
+    result->draft_message_ = topicDraft(topic);
+    return result;
+  }
+
+  void topicChanged(const Topic &topic) {
+    update(api::make_object<api::updateForumTopic>(kForumId, topic.id, topic.pinned, topic.readInbox,
+                                                   TopicMessageId(topic.id, topic.last), topic.mentions, 0, 0,
+                                                   topicSettings(topic), topicDraft(topic)));
+  }
+
+  // The group's last message, unread count and mentions follow its topics.
+  api::object_ptr<api::message> forumLastMessage() {
+    const Topic *newest = nullptr;
+    for (const auto &topic : _topics) {
+      if (!newest || TopicMessageId(topic.id, topic.last) > TopicMessageId(newest->id, newest->last)) newest = &topic;
+    }
+    const auto id = TopicMessageId(newest->id, newest->last);
+    return topicMessage(newest->id, newest->last, newest->last > kTopicMessages ? _sentTexts[id] : "");
+  }
+
+  void forumCounters() {
+    auto unread = 0, mentions = 0;
+    auto read = std::int64_t(0);
+    for (const auto &topic : _topics) {
+      unread += unreadOf(topic);
+      mentions += topic.mentions;
+      read = std::max(read, topic.readInbox);
+    }
+    update(api::make_object<api::updateChatReadInbox>(kForumId, read, unread));
+    update(api::make_object<api::updateChatUnreadMentionCount>(kForumId, mentions));
+  }
+
+  void addForum() {
+    update(api::make_object<api::updateUser>(MakeUser(kForumUsers, "Anna", "K")));
+    update(api::make_object<api::updateUser>(MakeUser(kForumUsers + 1, "Boris", "L")));
+    update(api::make_object<api::updateUser>(MakeUser(kForumUsers + 2, "Clara", "M")));
+    _topics = {
+        {.id = 1, .name = "General"},
+        {.id = 2, .name = "Announcements", .pinned = true, .closed = true},
+        {.id = 3, .name = "Random", .mentions = 1},
+        {.id = 4, .name = "Help", .muted = true},
+    };
+    for (auto &topic : _topics) topic.readInbox = TopicMessageId(topic.id, topic.last);
+    // Random: the last few messages not read yet.
+    findTopic(3)->readInbox = TopicMessageId(3, kTopicMessages - 4);
+    supergroup(true);
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kForumId;
+    chat->type_ = api::make_object<api::chatTypeSupergroup>(kForumGroupId, false);
+    chat->title_ = "Contrail Club";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->notification_settings_->use_default_mute_for_ = true;
+    chat->last_message_ = forumLastMessage();
+    chat->view_as_topics_ = true;
+    chat->positions_.push_back(api::make_object<api::chatPosition>(ListObject(false), kForumOrder, false, nullptr));
+    _orders[kForumId] = {kForumOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+    forumCounters();
+  }
+
+  void supergroup(bool forum) {
+    auto group = api::make_object<api::supergroup>();
+    group->id_ = kForumGroupId;
+    group->member_count_ = 12;
+    group->is_forum_ = forum;
+    update(api::make_object<api::updateSupergroup>(std::move(group)));
+  }
+
+  ObjectPtr forumHistory(const api::getForumTopicHistory &request) {
+    const auto topic = findTopic(request.forum_topic_id_);
+    if (!topic) return api::make_object<api::error>(400, "TOPIC_ID_INVALID");
+    // As in history(): from_message_id itself only with a negative offset. It may be of another topic.
+    const auto from = request.from_message_id_;
+    auto ids = std::vector<std::int64_t>();
+    for (auto index = 1; index <= topic->last; ++index) ids.push_back(TopicMessageId(topic->id, index));
+    auto position = from ? int(std::ranges::lower_bound(ids, from) - ids.begin()) : int(ids.size());
+    const auto exists = position < int(ids.size()) && ids[position] == from;
+    auto newest = exists ? (request.offset_ == 0 ? position - 1 : position - request.offset_) : position - 1 - request.offset_;
+    newest = std::min(newest, int(ids.size()) - 1);
+    auto result = api::make_object<api::messages>();
+    for (auto i = newest; i >= 0 && int(result->messages_.size()) < request.limit_; --i) {
+      const auto index = i + 1;
+      result->messages_.push_back(topicMessage(topic->id, index, index > kTopicMessages ? _sentTexts[ids[i]] : ""));
+    }
+    result->total_count_ = int(ids.size());
+    return result;
+  }
+
+  // "/in N text" and "/unforum" do what the other side would; anything else is sent into its topic.
+  ObjectPtr forumSent(api::sendMessage &request) {
+    const auto topicId = request.topic_id_ && request.topic_id_->get_id() == api::messageTopicForum::ID
+        ? static_cast<api::messageTopicForum &>(*request.topic_id_).forum_topic_id_ : 1;
+    auto text = std::string();
+    if (request.input_message_content_ && request.input_message_content_->get_id() == api::inputMessageText::ID) {
+      text = static_cast<api::inputMessageText &>(*request.input_message_content_).text_->text_;
+    }
+    if (text == "/unforum") {
+      supergroup(false);
+      return api::make_object<api::error>(400, "Scenario: the group has no topics now");
+    }
+    auto incoming = text.rfind("/in ", 0) == 0;
+    auto into = findTopic(topicId);
+    if (incoming) {
+      into = findTopic(std::atoi(text.c_str() + 4));
+      const auto gap = text.find(' ', 4);
+      text = gap == std::string::npos ? std::string("Hello") : text.substr(gap + 1);
+    }
+    if (!into) return api::make_object<api::error>(400, "TOPIC_ID_INVALID");
+    // Every third index is this account's (SenderOf): skip to one of the right side.
+    auto index = into->last + 1;
+    while ((SenderOf(into->id, index) == kSelfId) != !incoming) ++index;
+    into->last = index;
+    const auto final = TopicMessageId(into->id, index);
+    _sentTexts[final] = text;
+    auto message = topicMessage(into->id, index, text);
+    message->date_ = kNow;
+    if (incoming) {
+      update(api::make_object<api::updateNewMessage>(std::move(message)));
+      update(api::make_object<api::updateChatLastMessage>(kForumId, forumLastMessage(),
+                                                          std::vector<api::object_ptr<api::chatPosition>>()));
+      forumCounters();
+      return api::make_object<api::error>(400, "Scenario: a message came into topic " + std::to_string(into->id));
+    }
+    const auto temporary = final + 1;
+    auto pending = topicMessage(into->id, index, text);
+    pending->id_ = temporary;
+    pending->date_ = kNow;
+    pending->sending_state_ = api::make_object<api::messageSendingStatePending>(0);
+    auto shown = topicMessage(into->id, index, text);
+    shown->id_ = temporary;
+    shown->date_ = kNow;
+    update(api::make_object<api::updateNewMessage>(std::move(shown)));
+    update(api::make_object<api::updateMessageSendSucceeded>(std::move(message), temporary));
+    update(api::make_object<api::updateChatLastMessage>(kForumId, forumLastMessage(),
+                                                        std::vector<api::object_ptr<api::chatPosition>>()));
+    into->draft.clear();
+    topicChanged(*into);
+    return pending;
+  }
+
+  // The requests about the group with topics; false for anything else.
+  bool forumRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::getForumTopics::ID: {
+        auto result = api::make_object<api::forumTopics>();
+        if (static_cast<api::getForumTopics &>(function).chat_id_ == kForumId) {
+          for (const auto &topic : _topics) result->topics_.push_back(forumTopic(topic));
+        }
+        result->total_count_ = int(result->topics_.size());
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getForumTopic::ID: {
+        const auto &request = static_cast<api::getForumTopic &>(function);
+        const auto topic = request.chat_id_ == kForumId ? findTopic(request.forum_topic_id_) : nullptr;
+        if (topic) answer(id, forumTopic(*topic));
+        else answer(id, api::make_object<api::error>(400, "TOPIC_ID_INVALID"));
+        return true;
+      }
+      case api::getForumTopicHistory::ID:
+        answer(id, forumHistory(static_cast<api::getForumTopicHistory &>(function)));
+        return true;
+      case api::setForumTopicNotificationSettings::ID: {
+        auto &request = static_cast<api::setForumTopicNotificationSettings &>(function);
+        if (const auto topic = findTopic(request.forum_topic_id_)) {
+          const auto &settings = request.notification_settings_;
+          topic->muted = settings && !settings->use_default_mute_for_ && settings->mute_for_ > 0;
+          topicChanged(*topic);
+        }
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::readAllForumTopicMentions::ID: {
+        if (const auto topic = findTopic(static_cast<api::readAllForumTopicMentions &>(function).forum_topic_id_)) {
+          topic->mentions = 0;
+          topicChanged(*topic);
+          forumCounters();
+        }
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::readAllForumTopicReactions::ID:
+        answer(id, api::make_object<api::ok>());
+        return true;
+      case api::sendMessage::ID: {
+        auto &request = static_cast<api::sendMessage &>(function);
+        if (request.chat_id_ != kForumId) return false;
+        answer(id, forumSent(request));
+        return true;
+      }
+      case api::viewMessages::ID: {
+        auto &request = static_cast<api::viewMessages &>(function);
+        if (request.chat_id_ != kForumId) return false;
+        for (const auto message : request.message_ids_) {
+          const auto topic = findTopic(TopicOfId(message));
+          if (!topic || message <= topic->readInbox) continue;
+          topic->readInbox = message;
+          if (message >= TopicMessageId(topic->id, topic->last)) topic->mentions = 0;
+          topicChanged(*topic);
+        }
+        forumCounters();
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::setChatDraftMessage::ID: {
+        auto &request = static_cast<api::setChatDraftMessage &>(function);
+        if (request.chat_id_ != kForumId) return false;
+        const auto forum = request.topic_id_ && request.topic_id_->get_id() == api::messageTopicForum::ID
+            ? static_cast<api::messageTopicForum &>(*request.topic_id_).forum_topic_id_ : 0;
+        if (const auto topic = findTopic(forum)) {
+          topic->draft.clear();
+          const auto &draft = request.draft_message_;
+          if (draft && draft->content_ && draft->content_->get_id() == api::draftMessageContentText::ID) {
+            const auto &text = static_cast<const api::draftMessageContentText &>(*draft->content_).text_;
+            if (text) topic->draft = text->text_;
+          }
+          topicChanged(*topic);
+        }
+        answer(id, api::make_object<api::ok>());
+        return true;
+      }
+      case api::getMessage::ID:
+      case api::getRepliedMessage::ID: {
+        const auto chat = function.get_id() == api::getMessage::ID
+            ? static_cast<api::getMessage &>(function).chat_id_ : static_cast<api::getRepliedMessage &>(function).chat_id_;
+        if (chat != kForumId) return false;
+        const auto message = function.get_id() == api::getMessage::ID
+            ? static_cast<api::getMessage &>(function).message_id_
+            : static_cast<api::getRepliedMessage &>(function).message_id_;
+        const auto topic = findTopic(TopicOfId(message));
+        const auto index = IndexOfId(message);
+        if (!topic || index < 1 || index > topic->last) {
+          answer(id, api::make_object<api::error>(404, "Not Found"));
+        } else {
+          answer(id, topicMessage(topic->id, index, index > kTopicMessages ? _sentTexts[message] : ""));
+        }
+        return true;
+      }
+      case api::getChatHistory::ID:
+        // Its messages are read in the topics.
+        if (static_cast<api::getChatHistory &>(function).chat_id_ != kForumId) return false;
+        answer(id, api::make_object<api::messages>(0, std::vector<api::object_ptr<api::message>>()));
+        return true;
+      default:
+        return false;
+    }
+  }
+
   const bool _fullList;
   Sink _sink;
   guint _source = 0;
@@ -575,6 +908,8 @@ class ScenarioTransport final : public Transport {
   int _ticks = 0;
   bool _archiveLoaded = false;
   bool _publicAdded = false;
+  std::vector<Topic> _topics;
+  std::map<std::int64_t, std::string> _sentTexts;  // What was written in the topics, by message id.
 };
 
 }  // namespace
