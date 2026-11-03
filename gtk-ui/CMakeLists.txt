@@ -70,6 +70,7 @@ add_library(contrail_core STATIC
   memory_trim.cpp
   message.cpp
   picture_decode.cpp
+  reactions.cpp
   td/chat_row.cpp
   td/client.cpp
   td/dates.cpp

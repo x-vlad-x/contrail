@@ -13,6 +13,10 @@
 //   pinned-state | pinned-bar (a tap on it) | pinned-close (its cross) | pinned-list (all of them) | pinned-list-state
 //   pinned-list-pick N | pinned-list-action (unpin all, or hide)
 //   dialog (the question shown: its texts and check box) | dialog-check 0|1 | dialog-answer RESPONSE (cancel, pin...)
+//   react KEY [N] (on message N, the newest without it: a tap on its chip, or as the menu does; KEY an emoji or
+//   custom:ID) | unreact [N] (the user's own taken back) | reacted [N] (who reacted) | react-quick [N] (a double tap)
+//   reactions-more [N] (in its menu open, the button with all of them) | reactions-state [N] (its reactions and
+//   chips, the dialogs and the menu strip open, rows built so far)
 #include "debug.hpp"
 
 #include "chat_list.hpp"
@@ -212,6 +216,20 @@ void Run(MainWindow &window, const std::string &command) {
     window.chatView()->debugPinnedList("pick " + rest);
   } else if (name == "pinned-list-action" && window.chatView()) {
     window.chatView()->debugPinnedList("action");
+  } else if (name == "react" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    window.chatView()->debugReact(rest.substr(0, gap),
+                                  gap == std::string::npos ? 0 : std::atoll(rest.c_str() + gap + 1));
+  } else if (name == "unreact" && window.chatView()) {
+    window.chatView()->debugUnreact(std::atoll(rest.c_str()));
+  } else if (name == "reacted" && window.chatView()) {
+    window.chatView()->debugReacted(std::atoll(rest.c_str()));
+  } else if (name == "react-quick" && window.chatView()) {
+    window.chatView()->debugReactQuick(std::atoll(rest.c_str()));
+  } else if (name == "reactions-more" && window.chatView()) {
+    window.chatView()->debugReactionsMore(std::atoll(rest.c_str()));
+  } else if (name == "reactions-state" && window.chatView()) {
+    window.chatView()->debugReactionsState(std::atoll(rest.c_str()));
   } else if (name == "dialog" || name == "dialog-check" || name == "dialog-answer") {
     DialogCommand(window, name, rest);
   } else if (name == "state" && window.chatView()) {

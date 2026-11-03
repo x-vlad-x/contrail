@@ -558,6 +558,15 @@ void Store::updated(api::Update &update) {
       withChat(data.chat_id_, [&](Chat &chat) { chat.unreadReactions = data.unread_reaction_count_; });
       break;
     }
+    case api::updateMessageUnreadReactions::ID: {
+      // A message TDLib holds tells the chat's count only here: there is no updateChatUnreadReactionCount then.
+      auto &data = static_cast<api::updateMessageUnreadReactions &>(update);
+      withChat(data.chat_id_, [&](Chat &chat) { chat.unreadReactions = data.unread_reaction_count_; });
+      break;
+    }
+    case api::updateDefaultReactionType::ID:
+      _defaultReaction = std::move(static_cast<api::updateDefaultReactionType &>(update).reaction_type_);
+      break;
     case api::updateChatAction::ID:
       setAction(static_cast<api::updateChatAction &>(update));
       break;

@@ -9,7 +9,11 @@
 #      waiting in the chosen place, sent with a comment and the sender's name, or alone as a copy;
 #   6. pinned messages: the bar shows the newest, a tap goes back through them and round, the picture in it keeps
 #      its size, the list of them, unpinning and pinning with the questions, a bar hidden in a topic where only
-#      admins pin until a new message is pinned there.
+#      admins pin until a new message is pinned there;
+#   7. reactions: the chips under messages, a tap setting and taking back, one reaction at a time, the double tap's
+#      quick one, custom emoji as pictures, the menu's strip and all of them, who reacted in a group, the heart in
+#      the list going once the message is seen, and a channel scrolled while reactions keep coming without building
+#      a row again.
 #   tools/td-ui-test.sh [binary]        default build-td/agent-chat/contrail
 set -euo pipefail
 BIN=$(realpath "${1:-build-td/agent-chat/contrail}")
@@ -260,5 +264,74 @@ c 'send /pin 20' 1.5
 line=$(pinned)
 [[ $line == *'ids=[103,203] total=2 current=203 clicked=0 shown=1 hidden=0 '* ]] || fail "a new one pinned: $line"
 echo "   ok"
+stop
+echo "7. Reactions"
+start 120
+# The chat list's heart: Friend 2's newest message has a new reaction.
+hearts() {
+  c tree 1
+  awk '/Message: .* tree$/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; ++i) print line[i] }' "$WORK/log.txt" \
+    | grep -c 'GtkLabel "❤" ' || true
+}
+(( $(hearts) == 1 )) || fail "no heart in the list"
+react() { asked 'chat reactions:' "reactions-state $1"; }
+c 'chat 0' 3
+line=$(react 112)
+[[ $line == *'message=112 [ 👍=1 ❤=1* ] chips=[👍 avatar][❤* avatar] '* ]] || fail "the chips: $line"
+builds=$(sed -n 's/.* builds=\([0-9]*\) .*/\1/p' <<< "$line")
+c 'react 👍 112' 0.5
+line=$(react 112)
+# One reaction at a time: the heart goes.
+[[ $line == *'[ 👍=2* ] chips=[👍* avatar avatar] '*" builds=$builds rebuilds=0 "* ]] || fail "a tap on the chip: $line"
+c 'react 👍 112' 0.5
+line=$(react 112)
+[[ $line == *'[ 👍=1 ] chips=[👍 avatar] '* ]] || fail "taken back: $line"
+c 'react-quick 118' 0.5
+line=$(react 118)
+[[ $line == *'[ ❤=1* ] '*' quick=❤ '* ]] || fail "the quick reaction: $line"
+c 'react-quick 118' 0.5
+line=$(react 118)
+[[ $line == *'[ ] chips= '* ]] || fail "the quick reaction taken back: $line"
+line=$(react 117)
+[[ $line == *'chips=[👍 avatar][custom:5000000001 picture=18px@18x18 avatar] '* ]] || fail "a custom emoji: $line"
+line=$(react 116)
+[[ $line == *'chips=[custom:5000000002 picture=18px@18x18 avatar] '* ]] || fail "an animated custom emoji: $line"
+line=$(react 115)
+[[ $line == *'chips=[custom:5000000003 alt=🐟'*' avatar] '* ]] || fail "a custom emoji without a still picture: $line"
+c 'menu 117' 1
+line=$(asked 'chat reactions menu:' 'reactions-state 117')
+[[ $line == *': 6 [👍][❤][🔥][🥰][👏][😁]' ]] || fail "the menu: $line"
+c 'reactions-more 117' 1
+line=$(asked 'chat reactions all:' 'reactions-state 117')
+[[ $line == *': 10 [👍][❤][🔥][🥰][👏][😁][🤔][🤯][😱][🎉]' ]] || fail "all of them: $line"
+# Seen: the heart goes (the dialog goes with the chat).
+c 'chat 1' 3
+line=$(react 120)
+[[ $line == *'[ 🔥=1 ] '*' unread=0 chatUnread=0 '* ]] || fail "not read: $line"
+c back 1
+(( $(hearts) == 0 )) || fail "the heart stays"
+# Who reacted, in a group.
+c 'chat 40' 2
+c 'topic 0' 2
+line=$(react 292)
+[[ $line == *'[ 👍=2 ] chips=[👍 avatar avatar] who=1 '* ]] || fail "in the group: $line"
+c 'reacted 292' 1
+line=$(asked 'chat reactions who:' 'reactions-state 292')
+[[ $line == *'title="2 Reacted" rows: "Clara M" "Anna K"' ]] || fail "who reacted: $line"
+stop
+# A busy channel: reactions come to its posts all the time while it is scrolled through.
+start 400
+c 'chat 41' 3
+for _ in $(seq 12); do c 'scroll -1500' 0.4; done
+for _ in $(seq 12); do c 'scroll 1500' 0.4; done
+sleep 1
+line=$(react 400)
+rows=$(sed -n 's/.* rows=\([0-9]*\) .*/\1/p' <<< "$line")
+builds=$(sed -n 's/.* builds=\([0-9]*\) .*/\1/p' <<< "$line")
+bars=$(sed -n 's/.* bars=\([0-9]*\) .*/\1/p' <<< "$line")
+updates=$(sed -n 's/.* updates=\([0-9]*\) .*/\1/p' <<< "$line")
+[[ $line == *' rebuilds=0 '* ]] || fail "rows built again: $line"
+(( updates > 50 && bars == builds && rows > 100 )) || fail "the chips made again: $line"
+echo "   ok: $updates reactions came to $rows rows, none built again"
 stop
 echo "PASS"

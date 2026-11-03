@@ -4,6 +4,7 @@
 #include "td/client.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -25,5 +26,8 @@ GtkWidget *MakeTextLabel(const std::string &text);
 
 // Opens a link from a message: web links in the browser, mentions in the app.
 void HandleLink(const std::string &href);
+
+// A count as Telegram shortens it: 999, 1.2K, 3M.
+[[nodiscard]] std::string ShortCount(std::int64_t count);
 
 }  // namespace Contrail

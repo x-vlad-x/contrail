@@ -5,6 +5,7 @@
 #include "device_scale.hpp"
 #include "media_progress.hpp"
 #include "picture_decode.hpp"
+#include "reactions.hpp"
 #include "scroll_helpers.hpp"
 #include "td/dates.hpp"
 #include "td/message_text.hpp"
@@ -54,6 +55,19 @@ constexpr auto kCancelKey = "contrail-media-cancel";  // Cancels the picture's d
 // grows to ten threads under a page of photos, and they all take the cores the drawing needs; two keep up with a
 // fling (25–50 ms a photo on the FLX1s).
 constexpr auto kDecodeThreads = 2;
+
+// Counted for the debug state: a reaction coming in must not build its row again.
+std::uint64_t rowBuilds = 0;
+std::uint64_t rowRebuilds = 0;
+std::uint64_t reactionBarBuilds = 0;
+
+// Double taps on these are theirs (a photo opens, a button acts), not a reaction.
+[[nodiscard]] bool InteractiveTarget(GtkWidget *target, GtkWidget *bubble) {
+  for (auto *widget = target; widget && widget != bubble; widget = gtk_widget_get_parent(widget)) {
+    if (GTK_IS_BUTTON(widget) || GTK_IS_PICTURE(widget) || GTK_IS_FLOW_BOX(widget) || GTK_IS_RANGE(widget)) return true;
+  }
+  return false;
+}
 
 // What a picture shows. A slower decode of something worse must not replace something better.
 enum PictureQuality { kQualityThumbnail = 1, kQualityFull = 2 };
@@ -531,19 +545,6 @@ void DropPicture(GtkWidget *picture) {
   return buffer;
 }
 
-// 999, 1.2K, 3.4M: views under a channel post.
-[[nodiscard]] std::string ShortCount(std::int64_t count) {
-  const auto shorten = [](std::int64_t value, std::int64_t unit, const char *suffix) {
-    const auto tenths = value * 10 / unit;
-    auto result = std::to_string(tenths / 10);
-    if (tenths % 10) result += "." + std::to_string(tenths % 10);
-    return result + suffix;
-  };
-  if (count >= 1'000'000) return shorten(count, 1'000'000, "M");
-  if (count >= 1'000) return shorten(count, 1'000, "K");
-  return std::to_string(count);
-}
-
 [[nodiscard]] std::string PhoneText(const std::string &phone) {
   return (phone.empty() || phone.front() == '+') ? phone : "+" + phone;
 }
@@ -651,6 +652,7 @@ GtkWidget *MessageWidget::widgetFor(const MessageItem *item) const {
 }
 
 void MessageWidget::refresh() {
+  ++rowRebuilds;
   _signals.clear();
   clearFiles();
   if (_highlightTimeout) {
@@ -658,7 +660,7 @@ void MessageWidget::refresh() {
   }
   _highlighted = nullptr;
   _replyPending = false;
-  _name = _avatar = _footer = _footerTime = _footerStatus = nullptr;
+  _name = _avatar = _footer = _footerTime = _footerStatus = _reactions = nullptr;
   build();
 }
 
@@ -697,6 +699,7 @@ MessageItem *MessageWidget::mainItem() const {
 }
 
 void MessageWidget::build() {
+  ++rowBuilds;
   const auto first = _items.front();
   gtk_widget_set_visible(_row, TRUE);
   if (!first->data) {
@@ -823,8 +826,13 @@ void MessageWidget::build() {
       gtk_box_append(GTK_BOX(bubble), webpage);
     }
   }
+  _reactions = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  gtk_box_append(GTK_BOX(bubble), _reactions);
+  _reactionsLayout = "-";  // Never a real key: the chips are made.
+  refreshReactions();
   _footer = buildFooter();
   gtk_box_append(GTK_BOX(bubble), _footer);
+  setupDoubleTap(bubble);
 
   setupGestures(bubble, mainItem(), true);
   gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(_row), line);
@@ -1300,6 +1308,56 @@ GtkWidget *MessageWidget::buildWebPage(MessageItem *item) {
       });
   gtk_widget_add_controller(box, GTK_EVENT_CONTROLLER(click));
   return box;
+}
+
+// The reactions belong to the message of the bubble as a whole, as in Telegram's apps.
+bool MessageWidget::refreshReactions() {
+  const auto item = mainItem();
+  if (!_reactions || !item->data) return false;
+  auto layout = ReactionsLayoutKey(_chat, *item->data);
+  auto counts = ReactionsCountKey(*item->data);
+  if (layout == _reactionsLayout) {
+    if (counts != _reactionsCounts) {
+      _reactionsCounts = std::move(counts);
+      UpdateReactionsBar(gtk_widget_get_first_child(_reactions), *item->data);
+    }
+    return false;
+  }
+  _reactionsLayout = std::move(layout);
+  _reactionsCounts = std::move(counts);
+  ClearBox(_reactions);
+  auto *bar = MakeReactionsBar(_chat, *item->data);
+  if (bar) {
+    gtk_box_append(GTK_BOX(_reactions), bar);
+    ++reactionBarBuilds;
+  }
+  gtk_widget_set_visible(_reactions, bar != nullptr);
+  return true;
+}
+
+std::uint64_t MessageWidget::BuildCount() {
+  return rowBuilds;
+}
+
+std::uint64_t MessageWidget::RebuildCount() {
+  return rowRebuilds;
+}
+
+std::uint64_t MessageWidget::ReactionBarCount() {
+  return reactionBarBuilds;
+}
+
+// A double tap on a message sets the quick reaction, as in the phone apps.
+void MessageWidget::setupDoubleTap(GtkWidget *bubble) {
+  auto *click = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      click, "pressed", [=, this](GtkGestureClick *, int count, double x, double y) {
+        if (count != 2 || !TapAllowed()) return;
+        if (InteractiveTarget(gtk_widget_pick(bubble, x, y, GTK_PICK_DEFAULT), bubble)) return;
+        if (const auto item = mainItem(); item->data) ToggleQuickReaction(_chat, *item->data);
+      });
+  gtk_widget_add_controller(bubble, GTK_EVENT_CONTROLLER(click));
 }
 
 GtkWidget *MessageWidget::buildFooter() {

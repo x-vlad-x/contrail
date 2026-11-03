@@ -6,6 +6,7 @@
 #include "memory_trim.hpp"
 #include "message.hpp"
 #include "picture_decode.hpp"
+#include "reactions.hpp"
 #include "scroll_helpers.hpp"
 #include "td/chat_row.hpp"
 #include "td/dates.hpp"
@@ -388,6 +389,7 @@ void ChatView::start() {
 
 ChatView::~ChatView() {
   if (_pinnedDialog) adw_dialog_force_close(ADW_DIALOG(_pinnedDialog));
+  for (auto *dialog : std::exchange(_dialogs, {})) adw_dialog_force_close(ADW_DIALOG(dialog));
   _signals.clear();
   if (_viewportSource) g_source_remove(_viewportSource);
   if (_closeSource) g_source_remove(_closeSource);
@@ -508,11 +510,29 @@ void ChatView::updated(api::Update &update) {
       break;
     }
     case api::updateMessageInteractionInfo::ID: {
+      // Views and reactions change all the time in a busy channel: only the footer and the chips change, never the
+      // whole row (building rows again for them once froze scrolling there).
       auto &data = static_cast<api::updateMessageInteractionInfo &>(update);
       if (data.chat_id_ != _chat) break;
       if (const auto item = find(data.message_id_)) {
         item->data->interaction_info_ = std::move(data.interaction_info_);
-        if (const auto row = rowFor(item)) row->refreshFooter();
+        ++_interactionUpdates;
+        if (const auto row = rowFor(item)) {
+          row->refreshFooter();
+          row->refreshReactions();
+        }
+      }
+      break;
+    }
+    case api::updateMessageUnreadReactions::ID: {
+      // A new reaction to a message already seen: it is read once it is on the screen again (viewMessages).
+      auto &data = static_cast<api::updateMessageUnreadReactions &>(update);
+      if (data.chat_id_ != _chat) break;
+      if (const auto item = find(data.message_id_)) {
+        item->data->unread_reactions_ = std::move(data.unread_reactions_);
+        if (!item->data->unread_reactions_.empty() && _viewed.erase(item->id()) && !_readTimer.active()) {
+          _readTimer.callOnce(300);
+        }
       }
       break;
     }
@@ -1550,6 +1570,19 @@ void ChatView::refreshItem(const MessageItem *item) {
   }
 }
 
+const api::message *ChatView::heldMessage(std::int64_t id) const {
+  const auto item = find(id);
+  return item ? item->data.get() : nullptr;
+}
+
+void ChatView::holdDialog(AdwDialog *dialog) {
+  _dialogs.push_back(GTK_WIDGET(dialog));
+  const auto token = _lifetime.token();
+  Connect<void(AdwDialog *)>(dialog, "closed", [this, token](AdwDialog *dialog) {
+    if (!token.expired()) std::erase(_dialogs, GTK_WIDGET(dialog));
+  });
+}
+
 void ChatView::refreshFooters() {
   for (const auto &[raw, row] : _rows) row->refreshFooter();
 }
@@ -2329,8 +2362,15 @@ void ChatView::sendText(const std::string &text) {
 void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y) {
   const auto id = item.id();
   // What may be done with a message is TDLib's to say. A message being sent has nothing to ask about.
-  const auto show = [this, id, widget, x, y](bool canEdit, bool canForward, bool canPin, bool forAll,
-                                             bool onlyForSelf) {
+  // The reactions possible for it come with them, asked at the same time.
+  struct Asked {
+    int left = 2;
+    bool canEdit = false, canForward = false, canPin = false, forAll = false, onlyForSelf = false;
+    std::shared_ptr<api::availableReactions> reactions;
+  };
+  const auto asked = std::make_shared<Asked>();
+  const auto show = [this, id, widget, x, y, asked] {
+    const auto [left, canEdit, canForward, canPin, forAll, onlyForSelf, reactions] = *asked;
     const auto found = find(id);
     if (!found || !gtk_widget_get_mapped(widget)) return;
     const auto known = _store.chat(_chat);
@@ -2338,6 +2378,17 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     const auto service = Td::IsServiceMessage(*found->data->content_);
     const auto text = PlainText(*found->data);
     auto *menu = g_menu_new();
+    // The reactions on top, as in the phone apps.
+    auto *strip = (service || found->local()) ? nullptr : MakeReactionsStrip(*this, *found->data, reactions, nullptr);
+    if (strip) {
+      auto *section = g_menu_new();
+      auto *custom = g_menu_item_new(nullptr, nullptr);
+      g_menu_item_set_attribute(custom, "custom", "s", "reactions");
+      g_menu_append_item(section, custom);
+      g_object_unref(custom);
+      g_menu_append_section(menu, nullptr, G_MENU_MODEL(section));
+      g_object_unref(section);
+    }
     if (failed) g_menu_append(menu, Tr("lng_bot_download_retry").c_str(), "msg.retry");
     if (!found->local() && !service && known && _store.canWrite(*known)) {
       g_menu_append(menu, Tr("lng_context_reply_msg").c_str(), "msg.reply");
@@ -2351,6 +2402,9 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
                     found->data->is_pinned_ ? "msg.unpin" : "msg.pin");
     }
     if (canEdit) g_menu_append(menu, Tr("lng_context_edit_msg").c_str(), "msg.edit");
+    if (CanShowWhoReacted(*this, *found->data)) {
+      g_menu_append(menu, TrCount("lng_context_seen_reacted", ReactionsCount(*found->data)).c_str(), "msg.reacted");
+    }
     if (forAll || onlyForSelf) g_menu_append(menu, Tr("lng_context_delete_msg").c_str(), "msg.delete");
     if (!g_menu_model_get_n_items(G_MENU_MODEL(menu))) {
       g_object_unref(menu);
@@ -2358,6 +2412,17 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     }
     auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
     g_object_unref(menu);
+    if (strip) {
+      // Choosing a reaction closes the menu (the popover is destroyed after it is closed).
+      auto *frame = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+      gtk_box_append(GTK_BOX(frame), strip);
+      gtk_popover_menu_add_child(GTK_POPOVER_MENU(popover), frame, "reactions");
+      for (auto *child = gtk_widget_get_first_child(strip); child; child = gtk_widget_get_next_sibling(child)) {
+        if (GTK_IS_BUTTON(child)) {
+          Connect<void(GtkButton *)>(child, "clicked", [popover](GtkButton *) { gtk_popover_popdown(GTK_POPOVER(popover)); });
+        }
+      }
+    }
     gtk_widget_set_parent(popover, widget);
     const GdkRectangle rect = {int(x), int(y), 1, 1};
     gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
@@ -2388,21 +2453,39 @@ void ChatView::showMessageMenu(const MessageItem &item, GtkWidget *widget, doubl
     add("pin", [this, id] { confirmPin(id); });
     add("unpin", [this, id] { confirmUnpin(id); });
     add("delete", [this, id, forAll, onlyForSelf] { confirmDelete(id, forAll, onlyForSelf); });
+    add("reacted", [this, id] {
+      if (const auto item = find(id)) ShowWhoReacted(*this, *item->data);
+    });
     gtk_widget_insert_action_group(popover, "msg", G_ACTION_GROUP(group));
     g_object_unref(group);
     gtk_popover_popup(GTK_POPOVER(popover));
   };
   if (item.local()) {
-    show(false, false, false, false, true);
+    asked->onlyForSelf = true;
+    show();
     return;
   }
+  const auto answered = [asked, show] {
+    if (--asked->left == 0) show();
+  };
   _store.client().request<api::messageProperties>(
       api::make_object<api::getMessageProperties>(_chat, id), _lifetime,
-      [show](api::messageProperties &properties) {
-        show(properties.can_be_edited_, properties.can_be_forwarded_, properties.can_be_pinned_,
-             properties.can_be_deleted_for_all_users_, properties.can_be_deleted_only_for_self_);
+      [asked, answered](api::messageProperties &properties) {
+        asked->canEdit = properties.can_be_edited_;
+        asked->canForward = properties.can_be_forwarded_;
+        asked->canPin = properties.can_be_pinned_;
+        asked->forAll = properties.can_be_deleted_for_all_users_;
+        asked->onlyForSelf = properties.can_be_deleted_only_for_self_;
+        answered();
       },
-      [show](api::error &) { show(false, false, false, false, false); });
+      [answered](api::error &) { answered(); });
+  _store.client().request<api::availableReactions>(
+      api::make_object<api::getMessageAvailableReactions>(_chat, id, 8), _lifetime,
+      [asked, answered](api::availableReactions &available) {
+        asked->reactions = std::make_shared<api::availableReactions>(std::move(available));
+        answered();
+      },
+      [answered](api::error &) { answered(); });
 }
 
 void ChatView::confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf) {
@@ -2767,6 +2850,177 @@ void ChatView::debugPinnedList(const std::string &what) {
     g_message("pinned list: title=\"%s\" rows=%d action=\"%s\"%s",
               adw_window_title_get_title(ADW_WINDOW_TITLE(title)), count, gtk_button_get_label(GTK_BUTTON(action)),
               rows.c_str());
+  }
+}
+
+// --- reactions (debug) -------------------------------------------------------------
+
+namespace {
+
+// The buttons of reactions under `widget`: chips under a message, choices in a menu or a dialog.
+void CollectReactionButtons(GtkWidget *widget, const char *cssClass, std::vector<GtkWidget *> &out) {
+  if (GTK_IS_BUTTON(widget) && gtk_widget_has_css_class(widget, cssClass)
+      && g_object_get_data(G_OBJECT(widget), "contrail-reaction")) {
+    out.push_back(widget);
+  }
+  for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    CollectReactionButtons(child, cssClass, out);
+  }
+}
+
+// What a chip or a choice shows: its emoji as text, or the size of its picture, and its number or avatars.
+std::string DescribeReactionButton(GtkWidget *button) {
+  auto result = std::string(static_cast<const char *>(g_object_get_data(G_OBJECT(button), "contrail-reaction")));
+  if (gtk_widget_has_css_class(button, "chosen")) result += '*';
+  const std::function<void(GtkWidget *)> walk = [&](GtkWidget *widget) {
+    if (GTK_IS_PICTURE(widget) && gtk_widget_get_visible(widget)) {
+      auto *paintable = gtk_picture_get_paintable(GTK_PICTURE(widget));
+      result += " picture=" + (paintable ? std::to_string(gdk_paintable_get_intrinsic_width(paintable)) + "px@"
+                                               + std::to_string(gtk_widget_get_width(widget)) + "x"
+                                               + std::to_string(gtk_widget_get_height(widget))
+                                         : std::string("none"));
+    } else if (GTK_IS_LABEL(widget) && gtk_widget_has_css_class(widget, "reaction-count")) {
+      result += std::string(" count=") + gtk_label_get_text(GTK_LABEL(widget));
+    } else if (GTK_IS_LABEL(widget) && gtk_widget_has_css_class(widget, "reaction-custom-alt")) {
+      result += std::string(" alt=") + gtk_label_get_text(GTK_LABEL(widget));
+    } else if (ADW_IS_AVATAR(widget)) {
+      result += " avatar";
+      return;
+    }
+    for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+      walk(child);
+    }
+  };
+  walk(button);
+  return "[" + result + "]";
+}
+
+}  // namespace
+
+void ChatView::debugReact(const std::string &key, std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  if (!item) {
+    g_message("chat reactions: message %lld isn't loaded", (long long)number);
+    return;
+  }
+  // A tap on its chip when it has one, else as the menu does.
+  if (const auto row = rowFor(item)) {
+    auto chips = std::vector<GtkWidget *>();
+    CollectReactionButtons(row->widgetFor(item), "reaction-chip", chips);
+    for (auto *chip : chips) {
+      if (key == static_cast<const char *>(g_object_get_data(G_OBJECT(chip), "contrail-reaction"))) {
+        g_signal_emit_by_name(chip, "clicked");
+        return;
+      }
+    }
+  }
+  ToggleReaction(*this, *item->data, key);
+}
+
+void ChatView::debugUnreact(std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  const auto info = item ? item->data->interaction_info_.get() : nullptr;
+  if (!info || !info->reactions_) return;
+  auto chosen = std::vector<std::string>();
+  for (const auto &reaction : info->reactions_->reactions_) {
+    if (reaction->is_chosen_) chosen.push_back(ReactionKey(reaction->type_.get()));
+  }
+  for (const auto &key : chosen) {
+    if (const auto message = heldMessage(item->id())) ToggleReaction(*this, *message, key);
+  }
+}
+
+void ChatView::debugReacted(std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  if (!item || !CanShowWhoReacted(*this, *item->data)) {
+    g_message("chat reactions: who reacted to %lld isn't told", (long long)number);
+    return;
+  }
+  ShowWhoReacted(*this, *item->data);
+}
+
+void ChatView::debugReactionsMore(std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  const auto row = item ? rowFor(item) : nullptr;
+  if (!row) return;
+  const std::function<GtkWidget *(GtkWidget *)> more = [&](GtkWidget *widget) -> GtkWidget * {
+    if (GTK_IS_BUTTON(widget) && gtk_widget_has_css_class(widget, "reactions-more")) return widget;
+    for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+      if (auto *found = more(child)) return found;
+    }
+    return nullptr;
+  };
+  for (auto *child = gtk_widget_get_first_child(row->widgetFor(item)); child; child = gtk_widget_get_next_sibling(child)) {
+    if (!GTK_IS_POPOVER(child) || !gtk_widget_get_visible(child)) continue;
+    if (auto *button = more(child)) {
+      g_signal_emit_by_name(button, "clicked");
+      return;
+    }
+  }
+  g_message("chat reactions: no menu with all the reactions");
+}
+
+void ChatView::debugReactQuick(std::int64_t number) {
+  if (const auto item = number ? find(number << 20) : find(newestId())) ToggleQuickReaction(*this, *item->data);
+}
+
+void ChatView::debugReactionsState(std::int64_t number) {
+  const auto item = number ? find(number << 20) : find(newestId());
+  auto reactions = std::string();
+  auto chips = std::string();
+  auto unread = 0;
+  auto canList = 0;
+  if (item) {
+    unread = int(item->data->unread_reactions_.size());
+    canList = int(CanShowWhoReacted(*this, *item->data));
+    if (const auto info = item->data->interaction_info_.get(); info && info->reactions_) {
+      for (const auto &reaction : info->reactions_->reactions_) {
+        reactions += " " + ReactionKey(reaction->type_.get()) + "=" + std::to_string(reaction->total_count_)
+                     + (reaction->is_chosen_ ? "*" : "");
+      }
+    }
+    if (const auto row = rowFor(item)) {
+      auto buttons = std::vector<GtkWidget *>();
+      CollectReactionButtons(row->widgetFor(item), "reaction-chip", buttons);
+      for (auto *button : buttons) chips += DescribeReactionButton(button);
+    }
+  }
+  const auto known = _store.chat(_chat);
+  g_message("chat reactions: message=%lld [%s ] chips=%s who=%d unread=%d chatUnread=%d quick=%s rows=%zu builds=%llu "
+            "rebuilds=%llu bars=%llu updates=%llu %s",
+            (long long)(item ? item->id() >> 20 : 0), reactions.c_str(), chips.c_str(), canList, unread,
+            known ? known->unreadReactions : -1, ReactionKey(_store.defaultReaction()).c_str(), _rows.size(),
+            (unsigned long long)MessageWidget::BuildCount(), (unsigned long long)MessageWidget::RebuildCount(),
+            (unsigned long long)MessageWidget::ReactionBarCount(), (unsigned long long)_interactionUpdates,
+            CustomReactionsState().c_str());
+  // The dialogs open: who reacted, all the reactions; and the menu's strip.
+  for (auto *dialog : _dialogs) {
+    if (auto *list = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(dialog), "contrail-who-reacted"))) {
+      auto rows = std::string();
+      for (auto *row = gtk_widget_get_first_child(list); row; row = gtk_widget_get_next_sibling(row)) {
+        if (ADW_IS_ACTION_ROW(row)) rows += std::string(" \"") + adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)) + "\"";
+      }
+      g_message("chat reactions who: title=\"%s\" rows:%s", adw_dialog_get_title(ADW_DIALOG(dialog)), rows.c_str());
+    }
+    if (auto *grid = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(dialog), "contrail-reactions-grid"))) {
+      auto buttons = std::vector<GtkWidget *>();
+      CollectReactionButtons(grid, "reaction-choice", buttons);
+      auto all = std::string();
+      for (auto *button : buttons) all += DescribeReactionButton(button);
+      g_message("chat reactions all: %zu %s", buttons.size(), all.c_str());
+    }
+  }
+  if (const auto row = item ? rowFor(item) : nullptr) {
+    // The menu's popover hangs on the message's widget.
+    auto buttons = std::vector<GtkWidget *>();
+    for (auto *child = gtk_widget_get_first_child(row->widgetFor(item)); child; child = gtk_widget_get_next_sibling(child)) {
+      if (GTK_IS_POPOVER(child) && gtk_widget_get_visible(child)) CollectReactionButtons(child, "reaction-choice", buttons);
+    }
+    if (!buttons.empty()) {
+      auto strip = std::string();
+      for (auto *button : buttons) strip += DescribeReactionButton(button);
+      g_message("chat reactions menu: %zu %s", buttons.size(), strip.c_str());
+    }
   }
 }
 

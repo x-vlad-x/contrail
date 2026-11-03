@@ -242,4 +242,16 @@ void HandleLink(const std::string &href) {
   }
 }
 
+std::string ShortCount(std::int64_t count) {
+  const auto shorten = [](std::int64_t value, std::int64_t unit, const char *suffix) {
+    const auto tenths = value * 10 / unit;
+    auto result = std::to_string(tenths / 10);
+    if (tenths % 10) result += "." + std::to_string(tenths % 10);
+    return result + suffix;
+  };
+  if (count >= 1'000'000) return shorten(count, 1'000'000, "M");
+  if (count >= 1'000) return shorten(count, 1'000, "K");
+  return std::to_string(count);
+}
+
 }  // namespace Contrail

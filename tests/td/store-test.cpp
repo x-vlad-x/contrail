@@ -214,6 +214,21 @@ void MarkReadClearsEverythingThatShows() {
                                                      api::toggleChatIsMarkedAsUnread::ID}));
 }
 
+// The heart in the list: a message TDLib holds tells the chat's count only in its own update.
+void UnreadReactionsAndTheQuickOne() {
+  auto f = Fixture();
+  f.addChat(1, 100);
+  f.update(api::make_object<api::updateChatUnreadReactionCount>(1, 2));
+  g_assert_cmpint(f.store.chat(1)->unreadReactions, ==, 2);
+  f.update(api::make_object<api::updateMessageUnreadReactions>(1, 77, std::vector<api::object_ptr<api::unreadReaction>>(), 0));
+  g_assert_cmpint(f.store.chat(1)->unreadReactions, ==, 0);
+  g_assert_null(f.store.defaultReaction());
+  f.update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("x")));
+  const auto quick = f.store.defaultReaction();
+  g_assert_nonnull(quick);
+  g_assert_cmpint(quick->get_id(), ==, api::reactionTypeEmoji::ID);
+}
+
 void UnreadChatsReachTheList() {
   auto f = Fixture();
   auto told = std::vector<ListKind>();
@@ -364,6 +379,7 @@ int main(int argc, char **argv) {
   g_test_add_func("/store/mute", MuteKeepsTheOtherSettings);
   g_test_add_func("/store/mark-read", MarkReadClearsEverythingThatShows);
   g_test_add_func("/store/unread-chats", UnreadChatsReachTheList);
+  g_test_add_func("/store/unread-reactions", UnreadReactionsAndTheQuickOne);
   g_test_add_func("/store/list-dates", ListDates);
   g_test_add_func("/store/topics", TopicsOfAGroupHeld);
   g_test_add_func("/store/pin-rights", PinRights);

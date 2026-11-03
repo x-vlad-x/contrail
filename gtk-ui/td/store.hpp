@@ -149,6 +149,8 @@ class Store final {
   [[nodiscard]] bool listComplete(ListKind kind) const { return _lists[int(kind)].complete; }
   [[nodiscard]] int unreadChats(ListKind kind) const { return _lists[int(kind)].unreadChats; }
   [[nodiscard]] const api::ConnectionState *connection() const { return _connection.get(); }
+  // The reaction a double tap sets (Telegram's "quick" one); null until TDLib tells.
+  [[nodiscard]] const api::ReactionType *defaultReaction() const { return _defaultReaction.get(); }
 
   // Asks for the next chats of a list. Quietly does nothing while a request runs or when the list is complete.
   void loadMore(ListKind kind, int limit = 50);
@@ -251,6 +253,7 @@ class Store final {
   UserId _selfId = 0;
   ChatId _repliesChatId = 0;
   api::object_ptr<api::ConnectionState> _connection;
+  api::object_ptr<api::ReactionType> _defaultReaction;
   std::vector<Subscriber<ChatHandler>> _chatHandlers;
   std::vector<Subscriber<ListHandler>> _listHandlers;
   std::vector<Subscriber<UserHandler>> _userHandlers;

@@ -3,7 +3,9 @@
 #include "app.hpp"
 #include "td/store.hpp"
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace Contrail {
@@ -55,6 +57,14 @@ class MessageWidget final {
   [[nodiscard]] bool replyPending() const { return _replyPending; }
   // Updates the time and the read ticks only.
   void refreshFooter();
+  // Updates the reactions under the message only: their numbers in place, or the chips made again when they
+  // changed otherwise. True when the chips were made again.
+  bool refreshReactions();
+  // For the debug state: how many times rows were built, built again (refresh()), and their chips of reactions
+  // made.
+  [[nodiscard]] static std::uint64_t BuildCount();
+  [[nodiscard]] static std::uint64_t RebuildCount();
+  [[nodiscard]] static std::uint64_t ReactionBarCount();
   // A file this row shows was downloaded further.
   void fileChanged(const Td::File &file);
   // In a run of messages from the same sender only the first shows the name and the avatar.
@@ -111,6 +121,7 @@ class MessageWidget final {
   GtkWidget *buildContact(const Td::api::contact &contact);
   GtkWidget *buildWebPage(MessageItem *item);
   GtkWidget *buildFooter();
+  void setupDoubleTap(GtkWidget *bubble);
   GtkWidget *makeStatus();
   void addPlayIcon(Cell &cell, GtkWidget *overlay);
   void watchPicture(Cell &cell, const Td::api::file *file);
@@ -131,6 +142,9 @@ class MessageWidget final {
   GtkWidget *_footer = nullptr;
   GtkWidget *_footerTime = nullptr;
   GtkWidget *_footerStatus = nullptr;
+  GtkWidget *_reactions = nullptr;
+  std::string _reactionsLayout;  // What the chips show (ReactionsLayoutKey), and their numbers.
+  std::string _reactionsCounts;
   bool _replyPending = false;
   bool _picturesNear = false;
   std::vector<std::unique_ptr<Cell>> _cells;

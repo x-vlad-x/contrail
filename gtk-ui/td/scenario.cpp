@@ -42,6 +42,22 @@ constexpr auto kIdStep = std::int64_t(1) << 20;
 // Friend 2's, one in the group's topic Random. Nobody but its admins may pin in the group: there the bar can only be
 // hidden.
 constexpr auto kPinnedPhoto = 70;
+// Reactions: some messages of the friends' chats have them (a 👍 from the friend, a ❤ of this account's), Friend 1's
+// three custom emoji ones (a still sticker, an animated one with a still thumbnail, one with nothing still), Friend
+// 2's newest an unread
+// 🔥. In the group with topics they come with the people who reacted. A channel below the group has many on every
+// post, and while it is open somebody reacts to its posts all the time, as in a busy channel.
+constexpr auto kReactionsChannelId = std::int64_t(-500);
+constexpr auto kReactionsChannelGroupId = std::int64_t(500);
+constexpr auto kReactionsChannelOrder = std::int64_t(1) << 30;
+constexpr auto kCustomStill = std::int64_t(5000000001);
+constexpr auto kCustomAnimated = std::int64_t(5000000002);
+constexpr auto kCustomNoStill = std::int64_t(5000000003);  // Animated, its thumbnail too: shown as its emoji.
+constexpr auto kCustomStillFile = 2000001;
+constexpr auto kCustomThumbnailFile = 2000002;
+constexpr auto kCustomAnimatedFile = 2000003;
+constexpr auto kUnreadReactionChat = std::int64_t(2);
+constexpr auto kReactionBurstMs = 150u;
 
 // CONTRAIL_SCENARIO=3000 gives a chat that long: enough to walk away from what is held.
 int MessagesInChat() {
@@ -129,6 +145,52 @@ std::string PhotoFile(int picture, int width, int height) {
   return result;
 }
 
+// The picture of a custom emoji: a PNG in the cache, as small as Telegram's (100 px).
+std::string EmojiFile(const char *name, guint32 color) {
+  auto *path = g_build_filename(g_get_user_cache_dir(), "contrail-scenario", name, nullptr);
+  auto result = std::string(path);
+  g_free(path);
+  if (g_file_test(result.c_str(), G_FILE_TEST_EXISTS)) return result;
+  auto *directory = g_path_get_dirname(result.c_str());
+  g_mkdir_with_parents(directory, 0700);
+  g_free(directory);
+  auto *pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, TRUE, 8, 100, 100);
+  gdk_pixbuf_fill(pixbuf, color);
+  auto *error = static_cast<GError *>(nullptr);
+  // Written whole or not at all, as the photos are.
+  gchar *buffer = nullptr;
+  gsize length = 0;
+  if (!gdk_pixbuf_save_to_buffer(pixbuf, &buffer, &length, "png", &error, nullptr)
+      || !g_file_set_contents(result.c_str(), buffer, gssize(length), &error)) {
+    g_warning("Scenario: %s not made: %s", result.c_str(), error ? error->message : "?");
+    g_clear_error(&error);
+  }
+  g_free(buffer);
+  g_object_unref(pixbuf);
+  return result;
+}
+
+api::object_ptr<api::file> EmojiFileObject(std::int32_t id, const std::string &path, bool complete) {
+  auto local = api::make_object<api::localFile>();
+  local->path_ = complete ? path : std::string();
+  local->is_downloading_completed_ = complete;
+  local->downloaded_size_ = complete ? 1000 : 0;
+  auto file = api::make_object<api::file>();
+  file->id_ = id;
+  file->size_ = 1000;
+  file->local_ = std::move(local);
+  file->remote_ = api::make_object<api::remoteFile>();
+  return file;
+}
+
+std::string CustomStillPath() {
+  return EmojiFile("emoji-still.png", 0xf08020ff);
+}
+
+std::string CustomThumbnailPath() {
+  return EmojiFile("emoji-thumbnail.png", 0x20a0f0ff);
+}
+
 // Made before anything is shown, so that measurements don't include encoding them.
 void MakePhotoFiles() {
   for (auto picture = 0; picture < kScenarioPictures; ++picture) {
@@ -205,6 +267,7 @@ class ScenarioTransport final : public Transport {
   ~ScenarioTransport() override {
     if (_source) g_source_remove(_source);
     if (_ticker) g_source_remove(_ticker);
+    if (_burst) g_source_remove(_burst);
   }
 
   void start(Sink sink) override {
@@ -217,7 +280,7 @@ class ScenarioTransport final : public Transport {
   }
 
   void send(std::uint64_t id, FunctionPtr function) override {
-    if (forumRequest(id, *function) || pinnedRequest(id, *function)) return;
+    if (forumRequest(id, *function) || pinnedRequest(id, *function) || reactionRequest(id, *function)) return;
     switch (function->get_id()) {
       case api::setTdlibParameters::ID:
         answer(id, api::make_object<api::ok>());
@@ -395,6 +458,7 @@ class ScenarioTransport final : public Transport {
       chat->last_read_inbox_message_id_ = (MessagesInChat() - chat->unread_count_) * kIdStep;
       chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
       chat->last_message_ = messageAt(id, MessagesInChat());
+      if (id == kUnreadReactionChat) chat->unread_reaction_count_ = 1;
       chat->positions_.push_back(api::make_object<api::chatPosition>(
           api::make_object<api::chatListMain>(), std::int64_t(kChatCount - i + 1) << 32, i == 1, nullptr));
       if (_fullList) decorate(*chat, i);
@@ -402,6 +466,8 @@ class ScenarioTransport final : public Transport {
       update(api::make_object<api::updateNewChat>(std::move(chat)));
     }
     addForum();
+    addReactionsChannel();
+    update(api::make_object<api::updateDefaultReactionType>(api::make_object<api::reactionTypeEmoji>("\xE2\x9D\xA4")));
     if (!_fullList) return;
     addOtherChats();
     _ticker = g_timeout_add(kNewMessageEveryMs, +[](gpointer data) -> gboolean {
@@ -569,6 +635,14 @@ class ScenarioTransport final : public Transport {
   api::object_ptr<api::message> messageAt(std::int64_t chatId, int index) {
     const auto sender = index % 3 == 0 ? kSelfId : chatId;
     auto message = MakeMessage(chatId, index * kIdStep, sender, kNow - (MessagesInChat() - index) * 600, MessageText(index));
+    if (chatId == kReactionsChannelId) {
+      message->sender_id_ = api::make_object<api::messageSenderChat>(chatId);
+      message->is_outgoing_ = false;
+      message->is_channel_post_ = true;
+      auto content = api::make_object<api::messageText>();
+      content->text_ = Formatted("Post " + std::to_string(index));
+      message->content_ = std::move(content);
+    }
     if (WithPhotos() && index % 4 == 1) message->content_ = PhotoContent(index);
     if (chatId == 1 && index == kPinnedPhoto) {
       auto photo = api::move_object_as<api::messagePhoto>(PhotoContent(index));
@@ -583,6 +657,7 @@ class ScenarioTransport final : public Transport {
     }
     applyEntry(*message);
     message->is_pinned_ = isPinned(chatId, message->id_);
+    applyReactions(*message);
     return message;
   }
 
@@ -834,6 +909,300 @@ class ScenarioTransport final : public Transport {
     }
   }
 
+  // --- reactions -----------------------------------------------------------------
+
+  struct Reaction {
+    std::string key;  // The emoji, or "custom:ID".
+    int count = 0;
+    bool chosen = false;
+    std::vector<std::int64_t> recent;  // Users, newest first; none in the channel.
+  };
+  using Reactions = std::vector<Reaction>;
+
+  static api::object_ptr<api::ReactionType> ReactionType(const std::string &key) {
+    if (key.starts_with("custom:")) return api::make_object<api::reactionTypeCustomEmoji>(std::atoll(key.c_str() + 7));
+    return api::make_object<api::reactionTypeEmoji>(key);
+  }
+
+  static std::string ReactionKey(const api::ReactionType *type) {
+    if (!type) return {};
+    if (type->get_id() == api::reactionTypeEmoji::ID) return static_cast<const api::reactionTypeEmoji &>(*type).emoji_;
+    if (type->get_id() == api::reactionTypeCustomEmoji::ID) {
+      return "custom:" + std::to_string(static_cast<const api::reactionTypeCustomEmoji &>(*type).custom_emoji_id_);
+    }
+    return "paid";
+  }
+
+  // What a message has before anybody here does anything.
+  static Reactions InitialReactions(std::int64_t chat, std::int64_t id) {
+    auto result = Reactions();
+    const auto thumbs = "\xF0\x9F\x91\x8D", heart = "\xE2\x9D\xA4", fire = "\xF0\x9F\x94\xA5", party = "\xF0\x9F\x8E\x89";
+    if (chat == kReactionsChannelId) {
+      const auto index = int(id / kIdStep);
+      result.push_back({thumbs, 5 + index * 37 % 900});
+      result.push_back({heart, 1 + index % 50 + (index % 4 == 0), index % 4 == 0});
+      if (index % 7) result.push_back({fire, index % 7});
+      if (index % 6 == 0) result.push_back({"custom:" + std::to_string(kCustomStill), 3});
+      return result;
+    }
+    if (chat == kForumId) {
+      const auto index = IndexOfId(id), topic = TopicOfId(id);
+      if (index % 4 == 1) result.push_back({thumbs, 2, false, {kForumUsers + topic % 3, kForumUsers + (topic + 1) % 3}});
+      if (index % 8 == 1) result.push_back({party, 1, true, {kSelfId}});
+      return result;
+    }
+    if (chat < 1 || chat > kChatCount) return result;
+    const auto index = int(id / kIdStep);
+    if (index > MessagesInChat()) return result;
+    if (index % 5 == 2) result.push_back({thumbs, 1, false, {chat}});
+    if (index % 10 == 2) result.push_back({heart, 1, true, {kSelfId}});
+    if (chat == 1 && index == MessagesInChat() - 3) result.push_back({"custom:" + std::to_string(kCustomStill), 1, false, {chat}});
+    if (chat == 1 && index == MessagesInChat() - 4) result.push_back({"custom:" + std::to_string(kCustomAnimated), 1, false, {chat}});
+    if (chat == 1 && index == MessagesInChat() - 5) result.push_back({"custom:" + std::to_string(kCustomNoStill), 1, false, {chat}});
+    if (chat == kUnreadReactionChat && index == MessagesInChat()) result.push_back({fire, 1, false, {chat}});
+    return result;
+  }
+
+  Reactions &reactionsOf(std::int64_t chat, std::int64_t id) {
+    const auto key = std::make_pair(chat, id);
+    auto it = _reactions.find(key);
+    if (it == _reactions.end()) it = _reactions.emplace(key, InitialReactions(chat, id)).first;
+    return it->second;
+  }
+
+  api::object_ptr<api::messageInteractionInfo> interactionInfo(std::int64_t chat, std::int64_t id) {
+    auto info = api::make_object<api::messageInteractionInfo>();
+    if (chat == kReactionsChannelId) info->view_count_ = 1000 + int(id / kIdStep);
+    const auto &list = reactionsOf(chat, id);
+    if (!list.empty()) {
+      auto reactions = api::make_object<api::messageReactions>();
+      // As TDLib: who reacted is told in groups, not in private chats or channels.
+      reactions->can_get_added_reactions_ = chat == kForumId;
+      for (const auto &reaction : list) {
+        auto recent = std::vector<api::object_ptr<api::MessageSender>>();
+        for (const auto user : reaction.recent) recent.push_back(api::make_object<api::messageSenderUser>(user));
+        reactions->reactions_.push_back(api::make_object<api::messageReaction>(
+            ReactionType(reaction.key), reaction.count, reaction.chosen,
+            reaction.chosen ? api::make_object<api::messageSenderUser>(kSelfId) : nullptr, std::move(recent)));
+      }
+      info->reactions_ = std::move(reactions);
+    }
+    return info;
+  }
+
+  bool unreadReaction(std::int64_t chat, std::int64_t id) const {
+    return !_reactionRead && chat == kUnreadReactionChat && id == MessagesInChat() * kIdStep;
+  }
+
+  void applyReactions(api::message &message) {
+    message.interaction_info_ = interactionInfo(message.chat_id_, message.id_);
+    if (unreadReaction(message.chat_id_, message.id_)) {
+      message.unread_reactions_.push_back(api::make_object<api::unreadReaction>(
+          ReactionType("\xF0\x9F\x94\xA5"), api::make_object<api::messageSenderUser>(message.chat_id_), false));
+    }
+  }
+
+  void reactionsChanged(std::int64_t chat, std::int64_t id) {
+    update(api::make_object<api::updateMessageInteractionInfo>(chat, id, interactionInfo(chat, id)));
+  }
+
+  // Which reactions may be set: in the channel only a few, in Saved Messages tags (Telegram Premium).
+  std::vector<std::string> available(std::int64_t chat) const {
+    if (chat == kReactionsChannelId) {
+      return {"\xF0\x9F\x91\x8D", "\xE2\x9D\xA4", "\xF0\x9F\x94\xA5", "\xF0\x9F\x8E\x89", "\xF0\x9F\x98\x81"};
+    }
+    return {"\xF0\x9F\x91\x8D", "\xE2\x9D\xA4", "\xF0\x9F\x94\xA5", "\xF0\x9F\xA5\xB0", "\xF0\x9F\x91\x8F",
+            "\xF0\x9F\x98\x81", "\xF0\x9F\xA4\x94", "\xF0\x9F\xA4\xAF", "\xF0\x9F\x98\xB1", "\xF0\x9F\x8E\x89"};
+  }
+
+  ObjectPtr addReaction(const api::addMessageReaction &request) {
+    const auto key = ReactionKey(request.reaction_type_.get());
+    if (!std::ranges::count(available(request.chat_id_), key)) return api::make_object<api::error>(400, "REACTION_INVALID");
+    auto &list = reactionsOf(request.chat_id_, request.message_id_);
+    // One reaction without Telegram Premium: the one chosen before goes, as TDLib does.
+    for (auto &reaction : list) {
+      if (!reaction.chosen || reaction.key == key) continue;
+      reaction.chosen = false;
+      --reaction.count;
+      std::erase(reaction.recent, kSelfId);
+    }
+    std::erase_if(list, [](const Reaction &reaction) { return reaction.count <= 0; });
+    auto it = std::ranges::find(list, key, &Reaction::key);
+    if (it == list.end()) {
+      list.push_back({key});
+      it = list.end() - 1;
+    }
+    if (!it->chosen) {
+      it->chosen = true;
+      ++it->count;
+      if (request.chat_id_ != kReactionsChannelId) it->recent.insert(it->recent.begin(), kSelfId);
+      if (it->recent.size() > 3) it->recent.resize(3);
+    }
+    reactionsChanged(request.chat_id_, request.message_id_);
+    return api::make_object<api::ok>();
+  }
+
+  ObjectPtr removeReaction(const api::removeMessageReaction &request) {
+    const auto key = ReactionKey(request.reaction_type_.get());
+    auto &list = reactionsOf(request.chat_id_, request.message_id_);
+    const auto it = std::ranges::find(list, key, &Reaction::key);
+    if (it == list.end() || !it->chosen) return api::make_object<api::ok>();
+    it->chosen = false;
+    --it->count;
+    std::erase(it->recent, kSelfId);
+    std::erase_if(list, [](const Reaction &reaction) { return reaction.count <= 0; });
+    reactionsChanged(request.chat_id_, request.message_id_);
+    return api::make_object<api::ok>();
+  }
+
+  // Everybody who reacted: the recent ones, then the group's other members.
+  ObjectPtr addedReactions(const api::getMessageAddedReactions &request) {
+    if (request.chat_id_ != kForumId) return api::make_object<api::error>(400, "MESSAGE_ID_INVALID");
+    const auto filter = ReactionKey(request.reaction_type_.get());
+    auto result = api::make_object<api::addedReactions>();
+    for (const auto &reaction : reactionsOf(request.chat_id_, request.message_id_)) {
+      if (!filter.empty() && reaction.key != filter) continue;
+      auto users = reaction.recent;
+      for (auto other = kForumUsers; int(users.size()) < reaction.count; ++other) {
+        if (!std::ranges::count(users, other)) users.push_back(other);
+      }
+      for (const auto user : users) {
+        result->reactions_.push_back(api::make_object<api::addedReaction>(
+            ReactionType(reaction.key), api::make_object<api::messageSenderUser>(user), user == kSelfId, kNow - 60));
+      }
+    }
+    result->total_count_ = int(result->reactions_.size());
+    return result;
+  }
+
+  ObjectPtr customEmojiStickers(const api::getCustomEmojiStickers &request) {
+    auto result = api::make_object<api::stickers>();
+    for (const auto id : request.custom_emoji_ids_) {
+      auto sticker = api::make_object<api::sticker>();
+      sticker->id_ = id;
+      sticker->width_ = sticker->height_ = 100;
+      sticker->full_type_ = api::make_object<api::stickerFullTypeCustomEmoji>(id, false);
+      if (id == kCustomStill) {
+        sticker->emoji_ = "\xF0\x9F\x8D\x8A";
+        sticker->format_ = api::make_object<api::stickerFormatWebp>();
+        sticker->sticker_ = EmojiFileObject(kCustomStillFile, CustomStillPath(), _customDownloaded);
+      } else if (id == kCustomAnimated) {
+        sticker->emoji_ = "\xF0\x9F\x90\xB3";
+        sticker->format_ = api::make_object<api::stickerFormatTgs>();
+        sticker->thumbnail_ = api::make_object<api::thumbnail>(api::make_object<api::thumbnailFormatWebp>(), 100, 100,
+                                                              EmojiFileObject(kCustomThumbnailFile, CustomThumbnailPath(),
+                                                                              _customDownloaded));
+        sticker->sticker_ = EmojiFileObject(kCustomAnimatedFile, std::string(), false);
+      } else if (id == kCustomNoStill) {
+        sticker->emoji_ = "\xF0\x9F\x90\x9F";
+        sticker->format_ = api::make_object<api::stickerFormatTgs>();
+        sticker->thumbnail_ = api::make_object<api::thumbnail>(api::make_object<api::thumbnailFormatTgs>(), 100, 100,
+                                                              EmojiFileObject(kCustomAnimatedFile + 1, std::string(), false));
+        sticker->sticker_ = EmojiFileObject(kCustomAnimatedFile + 2, std::string(), false);
+      } else {
+        continue;
+      }
+      result->stickers_.push_back(std::move(sticker));
+    }
+    return result;
+  }
+
+  void addReactionsChannel() {
+    auto group = api::make_object<api::supergroup>();
+    group->id_ = kReactionsChannelGroupId;
+    group->member_count_ = 25000;
+    group->is_channel_ = true;
+    group->status_ = api::make_object<api::chatMemberStatusMember>(0);
+    update(api::make_object<api::updateSupergroup>(std::move(group)));
+    auto chat = api::make_object<api::chat>();
+    chat->id_ = kReactionsChannelId;
+    chat->type_ = api::make_object<api::chatTypeSupergroup>(kReactionsChannelGroupId, true);
+    chat->title_ = "Reactions";
+    chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
+    chat->last_message_ = messageAt(kReactionsChannelId, MessagesInChat());
+    chat->last_read_inbox_message_id_ = MessagesInChat() * kIdStep;
+    chat->positions_.push_back(
+        api::make_object<api::chatPosition>(ListObject(false), kReactionsChannelOrder, false, nullptr));
+    _orders[kReactionsChannelId] = {kReactionsChannelOrder, false};
+    update(api::make_object<api::updateNewChat>(std::move(chat)));
+  }
+
+  // Somebody reacts to three posts of the channel every 150 ms while it is open.
+  void burst() {
+    for (auto i = 0; i < 3; ++i) {
+      _burstSeed = _burstSeed * 1103515245 + 12345;
+      const auto index = 1 + int((_burstSeed >> 8) % unsigned(MessagesInChat()));
+      const auto id = index * kIdStep;
+      auto &list = reactionsOf(kReactionsChannelId, id);
+      if (!list.empty()) ++list.front().count;
+      reactionsChanged(kReactionsChannelId, id);
+      ++_burstUpdates;
+    }
+    if (_burstUpdates % 300 == 0) g_message("Scenario: %d reaction updates in the channel", _burstUpdates);
+  }
+
+  bool reactionRequest(std::uint64_t id, api::Function &function) {
+    switch (function.get_id()) {
+      case api::addMessageReaction::ID:
+        answer(id, addReaction(static_cast<api::addMessageReaction &>(function)));
+        return true;
+      case api::removeMessageReaction::ID:
+        answer(id, removeReaction(static_cast<api::removeMessageReaction &>(function)));
+        return true;
+      case api::getMessageAvailableReactions::ID: {
+        const auto chat = static_cast<api::getMessageAvailableReactions &>(function).chat_id_;
+        auto result = api::make_object<api::availableReactions>();
+        for (const auto &key : available(chat)) {
+          result->top_reactions_.push_back(api::make_object<api::availableReaction>(ReactionType(key), false));
+        }
+        result->are_tags_ = chat == kSelfId;
+        answer(id, std::move(result));
+        return true;
+      }
+      case api::getMessageAddedReactions::ID:
+        answer(id, addedReactions(static_cast<api::getMessageAddedReactions &>(function)));
+        return true;
+      case api::getCustomEmojiStickers::ID:
+        answer(id, customEmojiStickers(static_cast<api::getCustomEmojiStickers &>(function)));
+        return true;
+      case api::downloadFile::ID: {
+        // The custom emoji pictures are not here until asked for.
+        const auto file = static_cast<api::downloadFile &>(function).file_id_;
+        if (file != kCustomStillFile && file != kCustomThumbnailFile) return false;
+        _customDownloaded = true;
+        answer(id, EmojiFileObject(file, file == kCustomStillFile ? CustomStillPath() : CustomThumbnailPath(), true));
+        return true;
+      }
+      case api::viewMessages::ID: {
+        // Seen on the screen: its new reaction is read, as TDLib tells of a message it holds.
+        const auto &request = static_cast<api::viewMessages &>(function);
+        for (const auto message : request.message_ids_) {
+          if (!unreadReaction(request.chat_id_, message)) continue;
+          _reactionRead = true;
+          update(api::make_object<api::updateMessageUnreadReactions>(
+              request.chat_id_, message, std::vector<api::object_ptr<api::unreadReaction>>(), 0));
+        }
+        return false;
+      }
+      case api::openChat::ID:
+        if (static_cast<api::openChat &>(function).chat_id_ == kReactionsChannelId && !_burst) {
+          _burst = g_timeout_add(kReactionBurstMs, +[](gpointer data) -> gboolean {
+            static_cast<ScenarioTransport *>(data)->burst();
+            return G_SOURCE_CONTINUE;
+          }, this);
+        }
+        return false;
+      case api::closeChat::ID:
+        if (static_cast<api::closeChat &>(function).chat_id_ == kReactionsChannelId && _burst) {
+          g_source_remove(_burst);
+          _burst = 0;
+        }
+        return false;
+      default:
+        return false;
+    }
+  }
+
   // --- the group with topics ---------------------------------------------------
 
   struct Topic {
@@ -870,6 +1239,7 @@ class ScenarioTransport final : public Transport {
     message->topic_id_ = api::make_object<api::messageTopicForum>(topic);
     applyEntry(*message);
     message->is_pinned_ = isPinned(kForumId, id);
+    applyReactions(*message);
     return message;
   }
 
@@ -1200,6 +1570,12 @@ class ScenarioTransport final : public Transport {
       {kForumId, {(10 * 10 + 3) * kIdStep}},
   };
   bool _selfAdded = false;
+  std::map<std::pair<std::int64_t, std::int64_t>, Reactions> _reactions;  // By chat and message id, once asked.
+  bool _reactionRead = false;
+  bool _customDownloaded = false;
+  guint _burst = 0;
+  unsigned _burstSeed = 1;
+  int _burstUpdates = 0;
 };
 
 }  // namespace

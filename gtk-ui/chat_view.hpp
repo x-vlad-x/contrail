@@ -34,6 +34,13 @@ class ChatView final {
   [[nodiscard]] Td::ChatId chat() const { return _chat; }
   [[nodiscard]] std::int32_t topic() const { return _topic; }  // 0: the whole chat.
   [[nodiscard]] Td::Store &store() const { return _store; }
+  [[nodiscard]] MainWindow &window() const { return _window; }
+  // Ends with the view: what is asked for it is dropped then.
+  [[nodiscard]] const Td::Lifetime &lifetime() const { return _lifetime; }
+  // A message held near the screen, null otherwise.
+  [[nodiscard]] const Td::api::message *heldMessage(std::int64_t id) const;
+  // A dialog about this chat's messages (who reacted, all the reactions): it goes when the chat does.
+  void holdDialog(AdwDialog *dialog);
   void showAt(std::int64_t message);
   // Cancels a reply, an edit or the messages to forward; false if there was nothing to cancel.
   bool handleEscape();
@@ -67,6 +74,13 @@ class ChatView final {
   void debugPin(std::int64_t number, bool pin);  // As the menu's Pin or Unpin does: the question comes.
   void debugPinnedBar(const std::string &what);  // tap | close | list | state
   void debugPinnedList(const std::string &what);  // state | pick N | action
+  // Reactions of message N (its server number), 0: the newest. A key is the emoji, or "custom:ID".
+  void debugReact(const std::string &key, std::int64_t number);  // As a tap on its chip, or in the menu.
+  void debugUnreact(std::int64_t number);  // Takes back the user's own.
+  void debugReacted(std::int64_t number);  // Who reacted.
+  void debugReactQuick(std::int64_t number);  // A double tap.
+  void debugReactionsMore(std::int64_t number);  // The button with all of them in the open menu.
+  void debugReactionsState(std::int64_t number);
 
  private:
   // One call of a function some time later. Started again, it waits from the start.
@@ -229,6 +243,7 @@ class ChatView final {
   GtkWidget *_pinnedListButton = nullptr;
   GtkWidget *_pinnedClose = nullptr;
   GtkWidget *_pinnedDialog = nullptr;  // The list of them while it is open.
+  std::vector<GtkWidget *> _dialogs;  // holdDialog()
   SignalConnections _signals;
 
   std::vector<std::unique_ptr<MessageItem>> _items;
@@ -283,6 +298,7 @@ class ChatView final {
   Td::api::object_ptr<Td::api::message> _pinnedMessage;  // The one the bar shows, once it came.
   Td::FileId _pinnedFile = 0;  // Its picture, being downloaded.
   double _lastScrollValue = 0.;
+  std::uint64_t _interactionUpdates = 0;  // Of held messages, for the debug state.
 
   Timer _readTimer;
   Timer _statusTimer;
