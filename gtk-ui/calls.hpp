@@ -24,6 +24,7 @@ class CallView final {
   void showFrame(Calls::Frame frame, bool local);
   void stopVideo();
   void switchCamera();
+  void loadCameras();
   void updateAudioRoute();
   void chooseAudioOutput();
   void toggleSpeaker();
@@ -71,6 +72,9 @@ class CallView final {
   int _remoteWidth = 0;
   int _localWidth = 0;
   std::string _output;
+  std::string _shownError;
+  std::vector<Calls::Camera> _cameras;
+  bool _devicesLoaded = false;
 };
 
 } // namespace Contrail

@@ -24,7 +24,7 @@
 //   edit-last (the up arrow in the empty field)
 //   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
 //   call-state|hide|present|speaker | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
-//   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5
+//   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
 #include "debug.hpp"
 
 #include "chat_list.hpp"

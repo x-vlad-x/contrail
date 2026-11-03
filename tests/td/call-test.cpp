@@ -15,6 +15,16 @@ struct Script final : Td::Transport {
   void start(Sink value) override { sink = std::move(value); }
   void send(std::uint64_t id, Td::FunctionPtr function) override {
     switch (function->get_id()) {
+      case api::getProxies::ID: {
+        auto list = api::make_object<api::addedProxies>();
+        auto proxy = api::make_object<api::addedProxy>();
+        proxy->is_enabled_ = true;
+        proxy->proxy_ = api::make_object<api::proxy>("localhost", 1080,
+            api::make_object<api::proxyTypeSocks5>("user", "password"));
+        list->proxies_.push_back(std::move(proxy));
+        sink(id, std::move(list));
+        break;
+      }
       case api::createCall::ID:
         // TDLib can send the update before the response to createCall.
         update(10, true, api::make_object<api::callStatePending>(true, true));
@@ -70,9 +80,13 @@ int main() {
   ready->servers_.push_back(api::make_object<api::callServer>(42, "127.0.0.1", "::1", 3478,
       api::make_object<api::callServerTypeTelegramReflector>(std::string(16, 't'), true)));
   ready->emojis_ = {"😀", "🍀", "🚀", "🐾"};
+  raw->sink(0, api::make_object<api::updateNewCallSignalingData>(12, "remote-muted"));
   raw->update(12, false, std::move(ready));
   assert(backend.snapshot().stage == S::Connecting);
   assert(negotiated.connectTimeout == 15.);
+  assert(negotiated.proxy.host == "localhost" && negotiated.proxy.port == 1080);
+  assert(negotiated.proxy.username == "user");
+  assert(backend.snapshot().remoteMuted);
   assert(negotiated.key == std::string(256, 'a'));
   assert(negotiated.servers.size() == 1 && negotiated.servers[0].tcp);
   assert(negotiated.servers[0].peerTag == std::string(16, 't'));

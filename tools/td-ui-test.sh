@@ -480,6 +480,8 @@ section_calls() {
   c 'call-hide' 0.2
   c 'chat 0' 1
   [[ $(asked 'call-state:' call-state) == *'active=1'*'visible=0'* ]] || fail "navigation ended or showed the call"
+  c close 0.3
+  [[ $(asked 'call-state:' call-state) == *'active=1'* ]] || fail "closing the chat window ended the call"
   c 'call-present' 0.2
   [[ $(asked 'call-state:' call-state) == *'visible=1'* ]] || fail "no return to the call"
   c 'call-reconnecting' 0.2
@@ -510,6 +512,9 @@ section_calls() {
   c 'call-start 1' 1.2
   c 'call-failed' 0.2
   [[ $(asked 'call-state:' call-state) == *'stage=11 active=0'* ]] || fail "no failure state"
+  c 'call-start 1' 1.2
+  c 'call-privacy' 0.3
+  grep -q 'because of their privacy settings' "$WORK/log.txt" || fail "no explanation of call privacy"
   c 'call-start 1' 1.2
   c 'call-rated' 0.3
   c 'call-rate 5' 0.3

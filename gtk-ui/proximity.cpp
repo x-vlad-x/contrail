@@ -1,4 +1,5 @@
 #include "proximity.hpp"
+#include "app.hpp"
 
 namespace Contrail {
 namespace {
@@ -150,7 +151,7 @@ void IdleInhibitor::set(bool inhibit) {
   _pending = true;
   // Flags: 4 suspending, 8 the session becoming idle (which blanks and then locks the screen).
   g_dbus_connection_call(SessionBus(), "org.gnome.SessionManager", "/org/gnome/SessionManager",
-      "org.gnome.SessionManager", "Inhibit", g_variant_new("(susu)", "io.github.x_vlad_x.Contrail", 0u,
+      "org.gnome.SessionManager", "Inhibit", g_variant_new("(susu)", kAppId, 0u,
       "A call is in progress", 4u | 8u), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
         GError *error = nullptr;

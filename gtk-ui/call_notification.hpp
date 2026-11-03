@@ -28,6 +28,7 @@ public:
   // Only takes the place of the incoming call's notification, a call started here gets none.
   void showOngoing(const std::string &name, const std::string &status);
   void close();
+  [[nodiscard]] guint32 id() const { return _id; }
 
 private:
   enum class State { None, Incoming, Ongoing };

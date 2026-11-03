@@ -10,6 +10,10 @@ ARCH=${1:?usage: $0 aarch64|x86_64 [test]}
 source api-credentials.env
 BUILD=${BUILD_DIR:-build-td/$ARCH}  # Another directory lets two builds run side by side.
 ARGS=()
+# Section calls: media remains optional when the WebRTC prefix is not mounted.
+if [[ -n ${CONTRAIL_CALLS:-} ]]; then
+  ARGS+=(-DCONTRAIL_CALLS="$CONTRAIL_CALLS")
+fi
 if [[ $ARCH == aarch64 ]]; then
   ARGS+=(-DCMAKE_TOOLCHAIN_FILE=/src/build-env/aarch64-toolchain.cmake)
 fi

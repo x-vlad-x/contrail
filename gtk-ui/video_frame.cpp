@@ -1,38 +1,26 @@
 #include "video_frame.hpp"
 
-#include <QtGui/QTransform>
-
-extern "C" {
-#include <libswscale/swscale.h>
-}
+#include <api/video/video_frame.h>
+#include <api/video/i420_buffer.h>
+#include <libyuv.h>
 
 namespace Contrail {
-
-QImage OrientVideoImage(const QImage &image, int rotation, bool mirror) {
-  if (image.isNull()) return {};
-  const auto degrees = ((rotation % 360) + 360) % 360;
-  auto oriented = degrees ? image.transformed(QTransform().rotate(degrees)) : image;
-  return mirror ? oriented.transformed(QTransform().scale(-1, 1)) : oriented;
+Calls::Frame ConvertCallVideoFrame(const webrtc::VideoFrame &frame, bool mirror) {
+  const auto source = frame.video_frame_buffer()->ToI420();
+  if (!source || source->width() <= 0 || source->height() <= 0) return {};
+  const auto rotation = static_cast<libyuv::RotationMode>(frame.rotation());
+  const auto sideways = rotation == libyuv::kRotate90 || rotation == libyuv::kRotate270;
+  const auto width = sideways ? source->height() : source->width();
+  const auto height = sideways ? source->width() : source->height();
+  const auto upright = webrtc::I420Buffer::Rotate(*source, frame.rotation());
+  auto pixels = std::make_shared<std::vector<std::uint8_t>>(std::size_t(width) * height * 4);
+  if (libyuv::I420ToARGB(upright->DataY(), upright->StrideY(), upright->DataU(), upright->StrideU(),
+      upright->DataV(), upright->StrideV(), pixels->data(), width * 4, width, height) != 0) return {};
+  if (mirror) {
+    auto mirrored = std::make_shared<std::vector<std::uint8_t>>(pixels->size());
+    if (libyuv::ARGBMirror(pixels->data(), width * 4, mirrored->data(), width * 4, width, height) != 0) return {};
+    pixels = std::move(mirrored);
+  }
+  return {.width = width, .height = height, .stride = width * 4, .pixels = std::move(pixels)};
 }
-
-VideoFrameConverter::~VideoFrameConverter() {
-  sws_freeContext(_context);
-}
-
-QImage VideoFrameConverter::fromYuv420(
-    const unsigned char *const planes[3], const int strides[3], int width, int height) {
-  if (width <= 0 || height <= 0 || !planes[0] || !planes[1] || !planes[2]) return {};
-  _context = sws_getCachedContext(_context, width, height, AV_PIX_FMT_YUV420P,
-      width, height, AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-  if (!_context) return {};
-  auto image = QImage(width, height, QImage::Format_ARGB32);
-  if (image.isNull()) return {};
-  unsigned char *destinations[4] = {image.bits(), nullptr, nullptr, nullptr};
-  const int destinationStrides[4] = {int(image.bytesPerLine()), 0, 0, 0};
-  const unsigned char *sources[4] = {planes[0], planes[1], planes[2], nullptr};
-  const int sourceStrides[4] = {strides[0], strides[1], strides[2], 0};
-  if (sws_scale(_context, sources, sourceStrides, 0, height, destinations, destinationStrides) != height) return {};
-  return image;
-}
-
 } // namespace Contrail

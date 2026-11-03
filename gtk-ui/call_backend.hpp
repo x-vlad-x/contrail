@@ -52,6 +52,7 @@ class CallBackend final {
   void updated(Td::api::Update &update);
   void call(const Td::api::call &call);
   void ready(const Td::api::callStateReady &ready);
+  void startMedia(Calls::Parameters parameters);
   void stop();
   void fail(const std::string &message);
   void changed();
@@ -65,12 +66,14 @@ class CallBackend final {
   Snapshot _call;
   std::unique_ptr<Calls::Media> _media;
   std::deque<std::string> _earlySignaling;
+  std::size_t _earlySignalingBytes = 0;
   std::function<void()> _changed;
   std::function<void(Calls::Frame, bool)> _frame;
   std::chrono::steady_clock::time_point _establishedAt;
   int _duration = 0;
   bool _established = false;
   bool _creating = false;
+  bool _startingMedia = false;
   bool _cancelCreate = false;
   std::string _outputDevice;
   double _connectTimeout = 30.;

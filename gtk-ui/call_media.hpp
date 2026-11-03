@@ -26,6 +26,13 @@ struct Server {
   std::string password;
 };
 
+struct Proxy {
+  std::string host;
+  int port = 0;
+  std::string username;
+  std::string password;
+};
+
 struct Parameters {
   std::string version;      // The protocol both sides chose (callStateReady.protocol.library_versions[0]).
   std::string key;          // 256 bytes.
@@ -39,6 +46,7 @@ struct Parameters {
   std::string statsLogPath;      // tgcalls writes the call's routes there when it stops.
   double connectTimeout = 30.;
   double packetTimeout = 10.;
+  Proxy proxy;
 };
 
 enum class State { Connecting, Established, Reconnecting, Failed };
@@ -65,6 +73,7 @@ struct Callbacks {
   std::function<void(std::string data)> signaling;  // To sendCallSignalingData.
   std::function<void(Frame frame)> remoteFrame;
   std::function<void(Frame frame)> localFrame;
+  std::function<void()> cameraFailed;
   std::function<void()> videoStopped;        // The other side's video went (or paused).
 };
 

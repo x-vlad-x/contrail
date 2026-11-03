@@ -26,7 +26,9 @@ constexpr auto kEarpieceVolume = kNormalVolume * 4 / 5;
 constexpr auto kVolumesGroup = "call-volume";
 
 std::string String(JsonObject *object, const char *key) {
-  return object && json_object_has_member(object, key) ? json_object_get_string_member(object, key) : "";
+  auto *node = object ? json_object_get_member(object, key) : nullptr;
+  return node && JSON_NODE_HOLDS_VALUE(node) && json_node_get_value_type(node) == G_TYPE_STRING
+      ? json_node_get_string(node) : "";
 }
 JsonObject *Object(JsonObject *object, const char *key) {
   return object && json_object_has_member(object, key) ? json_object_get_object_member(object, key) : nullptr;
@@ -126,8 +128,11 @@ void AudioRoute::begin(bool video) {
 
 void AudioRoute::startMonitor() {
   if (_monitor) return;
-  _monitor = g_subprocess_new(GSubprocessFlags(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE),
-      nullptr, "pactl", "subscribe", nullptr);
+  auto *launcher = g_subprocess_launcher_new(GSubprocessFlags(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE));
+  g_subprocess_launcher_setenv(launcher, "LC_ALL", "C", TRUE);
+  const char *arguments[] = {"pactl", "subscribe", nullptr};
+  _monitor = g_subprocess_launcher_spawnv(launcher, arguments, nullptr);
+  g_object_unref(launcher);
   if (!_monitor) return;
   _events = g_data_input_stream_new(g_subprocess_get_stdout_pipe(_monitor));
   readEvent();

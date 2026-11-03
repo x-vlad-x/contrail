@@ -70,6 +70,13 @@ MainWindow::MainWindow(GtkApplication *application) {
   gtk_stack_add_named(_stack, MakeLoadingPage(), "loading");
   buildChats();
 
+  // Section calls: closing the chat window must leave an ongoing call alive.
+  Connect<gboolean(GtkWindow *)>(_window, "close-request", [this](GtkWindow *) -> gboolean {
+    if (!_call || !_call->active()) return FALSE;
+    gtk_widget_set_visible(_window, FALSE);
+    return TRUE;
+  });
+
   // Telegram shows the account as online while the window is in front, and only then.
   Connect<void(GObject *, GParamSpec *)>(_window, "notify::is-active", [this](GObject *, GParamSpec *) {
     if (_session) _session->setOnline(gtk_window_is_active(GTK_WINDOW(_window)));

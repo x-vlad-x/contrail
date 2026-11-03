@@ -66,6 +66,7 @@ CallNotification::~CallNotification() {
 void CallNotification::showIncoming(const std::string &name, const std::string &status, GdkTexture *userpic) {
   if (_dismissed) return;
   _state = State::Incoming;
+  if (_userpic != userpic) _shown.clear();
   g_set_object(&_userpic, userpic);
   send(name, status);
 }

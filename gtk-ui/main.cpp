@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "call_media.hpp"
 #include "contrail_version.h"
 #include "debug.hpp"
 #include "main_window.hpp"
@@ -71,6 +72,7 @@ void Shutdown(GApplication *) {
   program.session.reset();
   GetApp().window = nullptr;
   program.window.reset();
+  Calls::WaitForStoppedMedia();
 }
 
 gboolean Quit(gpointer) {

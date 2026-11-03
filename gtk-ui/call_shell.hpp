@@ -40,6 +40,7 @@ public:
 
   void start();
   void stop();
+  [[nodiscard]] guint32 eventId() const { return _id; }
 
 private:
   void started(guint32 id);

@@ -89,6 +89,7 @@ void CallBackend::setMuted(bool muted) {
 
 void CallBackend::setCamera(std::string id) {
   if (!_media || !active()) return;
+  _call.error.clear();
   _call.camera = std::move(id);
   if (!_call.camera.empty()) _call.video = true;
   _media->setCamera(_call.camera);
@@ -118,7 +119,10 @@ void CallBackend::updated(api::Update &update) {
     if (value.call_id_ != _call.id || !active() || _call.stage == Stage::HangingUp) return;
     if (_media) _media->receiveSignaling(value.data_);
     // A peer can signal before Ready. Bound the queue while key exchange is pending.
-    else if (_earlySignaling.size() < 128 && value.data_.size() <= 1024 * 1024) _earlySignaling.push_back(value.data_);
+    else if (_earlySignaling.size() < 128 && value.data_.size() <= 1024 * 1024 - _earlySignalingBytes) {
+      _earlySignalingBytes += value.data_.size();
+      _earlySignaling.push_back(value.data_);
+    }
     else { hangup(true); fail("Too much early call signaling."); }
   } else if (update.get_id() == api::updateOption::ID) {
     const auto &value = static_cast<api::updateOption &>(update);
@@ -166,7 +170,7 @@ void CallBackend::call(const api::call &source) {
       if (_call.stage != Stage::HangingUp) _call.stage = Stage::Exchanging;
       break;
     case api::callStateReady::ID:
-      if (_call.stage != Stage::HangingUp && !_media) ready(static_cast<const api::callStateReady &>(*source.state_));
+      if (_call.stage != Stage::HangingUp && !_media && !_startingMedia) ready(static_cast<const api::callStateReady &>(*source.state_));
       break;
     case api::callStateHangingUp::ID:
       _call.stage = Stage::HangingUp;
@@ -217,10 +221,32 @@ void CallBackend::ready(const api::callStateReady &ready) {
   }
   _call.emojis.clear();
   for (const auto &emoji : ready.emojis_) { if (!_call.emojis.empty()) _call.emojis += ' '; _call.emojis += emoji; }
-  const auto cameras = Calls::Cameras();
-  if (_call.video && g_getenv("CONTRAIL_SCENARIO")) parameters.camera = _call.camera = "scenario-front";
-  else if (_call.video && !cameras.empty()) parameters.camera = _call.camera = cameras.front().id;
+  if (_call.video) {
+    if (g_getenv("CONTRAIL_SCENARIO")) parameters.camera = _call.camera = "scenario-front";
+    else {
+      const auto cameras = Calls::Cameras();
+      if (!cameras.empty()) parameters.camera = _call.camera = cameras.front().id;
+    }
+  }
   _call.stage = Stage::Connecting;
+  _startingMedia = true;
+  _client.request<api::addedProxies>(api::make_object<api::getProxies>(), _mediaLifetime,
+      [this, parameters = std::make_shared<Calls::Parameters>(std::move(parameters))](api::addedProxies &list) {
+        for (const auto &entry : list.proxies_) {
+          if (!entry->is_enabled_ || !entry->proxy_ || !entry->proxy_->type_
+              || entry->proxy_->type_->get_id() != api::proxyTypeSocks5::ID) continue;
+          const auto &proxy = *entry->proxy_;
+          const auto &type = static_cast<const api::proxyTypeSocks5 &>(*proxy.type_);
+          parameters->proxy = {.host = proxy.server_, .port = proxy.port_, .username = type.username_,
+              .password = type.password_};
+          break;
+        }
+        startMedia(std::move(*parameters));
+      }, [this](api::error &error) { hangup(true); fail(error.message_); });
+}
+
+void CallBackend::startMedia(Calls::Parameters parameters) {
+  _startingMedia = false;
   const auto token = _mediaLifetime.token();
   auto callbacks = Calls::Callbacks{
       .state = [this, token](Calls::State state) {
@@ -242,6 +268,13 @@ void CallBackend::ready(const api::callStateReady &ready) {
       },
       .remoteFrame = [this, token](Calls::Frame frame) { if (!token.expired() && _frame) _frame(std::move(frame), false); },
       .localFrame = [this, token](Calls::Frame frame) { if (!token.expired() && _frame) _frame(std::move(frame), true); },
+      .cameraFailed = [this, token] {
+        if (token.expired()) return;
+        _call.camera.clear();
+        _call.error = "CAMERA_UNAVAILABLE";
+        if (_frame) _frame({}, true);
+        changed();
+      },
       .videoStopped = [this, token] { if (!token.expired() && _frame) _frame({}, false); }};
   _media = _factory(std::move(parameters), std::move(callbacks));
   if (!_media) { hangup(true); fail("Unsupported call media protocol."); return; }
@@ -249,14 +282,17 @@ void CallBackend::ready(const api::callStateReady &ready) {
   _media->setOutputDevice(_outputDevice);
   for (const auto &data : _earlySignaling) _media->receiveSignaling(data);
   _earlySignaling.clear();
+  _earlySignalingBytes = 0;
 }
 
 void CallBackend::stop() {
   _duration = duration();
   _established = false;
   _mediaLifetime.reset();
+  _startingMedia = false;
   if (_media) { _media->stop(); _media.reset(); }
   _earlySignaling.clear();
+  _earlySignalingBytes = 0;
 }
 
 void CallBackend::fail(const std::string &message) {

@@ -2099,6 +2099,9 @@ class ScenarioTransport final : public Transport {
   }
   bool callRequest(std::uint64_t id, api::Function &function) {
     switch (function.get_id()) {
+      case api::getProxies::ID:
+        answer(id, api::make_object<api::addedProxies>());
+        return true;
       case api::createCall::ID: {
         const auto &request = static_cast<const api::createCall &>(function);
         ++_callId; _callUser = request.user_id_; _callVideo = request.is_video_;
@@ -2135,6 +2138,9 @@ class ScenarioTransport final : public Transport {
           ++_callId; _callUser = 2; _callOutgoing = false;
           _callVideo = command == "incoming-video"; _callActive = true;
           callUpdate(api::make_object<api::callStatePending>(true, true));
+        } else if (command == "privacy") {
+          _callActive = false;
+          callUpdate(api::make_object<api::callStateError>(api::make_object<api::error>(400, "USER_PRIVACY_RESTRICTED")));
         } else if (command == "end" || command == "busy" || command == "rated") {
           callEnd(command == "busy", command == "rated");
         } else update(api::make_object<api::updateNewCallSignalingData>(_callId, command));
