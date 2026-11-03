@@ -2128,6 +2128,10 @@ class ScenarioTransport final : public Transport {
         _notes.clear();
         answer(id, api::make_object<api::ok>());
         return true;
+      case api::setNetworkType::ID:
+        g_message("scenario: network %d", static_cast<api::setNetworkType &>(function).type_->get_id());
+        answer(id, api::make_object<api::ok>());
+        return true;
       case api::getProxies::ID:
         answer(id, addedProxies());
         return true;

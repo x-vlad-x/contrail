@@ -4,6 +4,7 @@
 #include "chat_view.hpp"
 #include "main_window.hpp"
 #include "memory_guard.hpp"
+#include "network.hpp"
 #include "notifications.hpp"
 #include "proxy.hpp"
 #include "settings.hpp"
@@ -46,6 +47,9 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
     g_message("mem-guard: %s", window.memoryGuard().debugState().c_str());
   } else if (name == "mem-simulate") {
     window.memoryGuard().debugSimulate(rest == "critical" ? MemoryLevel::Critical : MemoryLevel::Low);
+  } else if (name == "net-state" || name == "net-simulate") {
+    if (auto *network = window.networkWatch(); network && name == "net-state") network->debugState();
+    else if (network) network->debugSimulate(rest);
   } else if (name == "notify-state") {
     if (const auto *notifier = window.notifier()) notifier->debugState();
     else g_message("notify: none");

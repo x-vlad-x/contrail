@@ -8,6 +8,7 @@
 #include "login.hpp"
 #include "memory_guard.hpp"
 #include "memory_trim.hpp"
+#include "network.hpp"
 #include "notifications.hpp"
 #include "proxy.hpp"
 #include "settings.hpp"
@@ -156,6 +157,7 @@ void MainWindow::clearChats() {
   clearViews();
   _forwardDrafts.clear();
   _notifier = nullptr;
+  _network = nullptr;
   _unreadLifetime.reset();
   _unreadUnmuted = 0;
   updateTray();
@@ -222,6 +224,7 @@ void MainWindow::attach(Td::Session &session, const std::string &language) {
   _store = std::make_unique<Td::Store>(session.client(), [this](const api::message &message) {
     return Td::MessagePreview(message, *_store);
   });
+  _network = std::make_unique<NetworkWatch>(session.client());
   // The tray icon's badge: chats with unread messages that aren't muted, as Telegram Desktop counts them.
   session.client().subscribe([this](api::Update &update) {
     if (update.get_id() != api::updateUnreadChatCount::ID) return;

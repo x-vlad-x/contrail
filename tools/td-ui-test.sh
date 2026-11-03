@@ -527,6 +527,12 @@ section_background() {
   c bg-open 2
   [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
   clean
+  # A network gone and back: TDLib is told once each time.
+  [[ $(asked 'network:' net-state) == *'sent=0'* ]] || fail "the network type sent at the start: $(asked 'network:' net-state)"
+  c 'net-simulate none' 0.2
+  c 'net-simulate none' 0.2
+  c 'net-simulate mobile' 0.5
+  (( $(grep -c 'scenario: network' "$WORK/log.txt") == 2 )) || fail "the network changes weren't told once each"
   # The settings stay for the next start.
   kill "$P"; wait "$P" 2>/dev/null || true; P=
   start 120

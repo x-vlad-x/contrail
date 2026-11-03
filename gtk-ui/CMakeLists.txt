@@ -86,6 +86,7 @@ add_library(contrail_core STATIC
 target_sources(contrail_core PRIVATE
   background_debug.cpp
   memory_guard.cpp
+  network.cpp
   notifications.cpp
   proxy.cpp
   settings.cpp

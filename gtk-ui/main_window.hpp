@@ -18,6 +18,7 @@ class ChatList;
 class ChatView;
 class LoginView;
 class MemoryGuard;
+class NetworkWatch;
 class Notifier;
 class ProxyView;
 class SettingsView;
@@ -84,6 +85,7 @@ class MainWindow final {
   [[nodiscard]] bool isActive() const;
   [[nodiscard]] TrayIcon *tray() const { return _tray.get(); }
   [[nodiscard]] Notifier *notifier() const { return _notifier.get(); }
+  [[nodiscard]] NetworkWatch *networkWatch() const { return _network.get(); }
   [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
   void releaseMemory(MemoryLevel level);
 
@@ -145,6 +147,7 @@ class MainWindow final {
   std::unique_ptr<ProxyView> _proxy;
   std::unique_ptr<TrayIcon> _tray;
   std::unique_ptr<Notifier> _notifier;  // While signed in, with or without the window.
+  std::unique_ptr<NetworkWatch> _network;  // With every client.
   std::unique_ptr<MemoryGuard> _memoryGuard;
   std::optional<SavedChat> _saved;  // The chat the window had when it went.
   Td::Lifetime _unreadLifetime;

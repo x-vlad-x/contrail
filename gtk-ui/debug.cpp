@@ -27,7 +27,7 @@
 //   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
 //   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
 //   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
-//   proxy-enable N | proxy-remove N
+//   proxy-enable N | proxy-remove N | net-state | net-simulate none|mobile|wifi (as if the network changed)
 #include "debug.hpp"
 
 #include "background_debug.hpp"
