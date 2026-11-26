@@ -226,7 +226,8 @@ class TgcallsMedia final : public Media {
     const auto camera = std::find_if(cameras.begin(), cameras.end(), [&](const auto &camera) { return camera.id == id; });
     _outgoing->setMirrored(camera != cameras.end() && Lower(camera->name).find("front") != std::string::npos);
     if (!_capture) {
-      _capture = tgcalls::VideoCaptureInterface::Create(tgcalls::Threads::getThreads(), id);
+      // The 1:1 engine reads the capture object on its media thread.
+      _capture = tgcalls::VideoCaptureInterface::Create(tgcalls::StaticThreads::getThreads(), id);
       _capture->setOutput(_outgoing);
       _capture->setOnFatalError([shared = _shared, sink = _outgoing] {
         sink->setEnabled(false);
