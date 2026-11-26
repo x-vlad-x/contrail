@@ -335,8 +335,10 @@ def main():
         assets.append(destination / target)
     if args.validation:
         warning = destination / "NOT-FOR-RELEASE.txt"
-        warning.write_text("Built with Telegram's public test API credentials to check the release tooling. "
-                           "Do not publish these files.\n"
+        uses_test_api = any(info["api_credentials"] == "test" for info in infos.values())
+        warning.write_text("Local validation build for checking the release tooling.\n"
+                           + ("Includes packages built with Telegram's public test API credentials.\n"
+                              if uses_test_api else "")
                            + "".join(f"Not downloaded here (the release run fetches it): {url}\n"
                                      for url in unavailable))
         assets.append(warning)
