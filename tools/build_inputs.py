@@ -83,7 +83,7 @@ def main():
             headers[package] = headers.get(package, 0) + 1
 
     # The linker's own record of its inputs (ninja keeps it from -Wl,--dependency-file).
-    linked = deps("bin/Telegram")
+    linked = deps("contrail")
     if not linked:
         raise RuntimeError("The build has no record of the program's link inputs")
     static_records = []
@@ -91,13 +91,13 @@ def main():
         if not path.startswith("/") or not re.search(r"\.(a|o)$", path):
             continue
         if path.startswith("/src/"):
-            static_records.append(dict(file=path, origin="built by build-deps.sh (see static-libraries)"))
+            static_records.append(dict(file=path, origin="TDLib, built from source by build-env/build-tdlib.sh"))
             continue
         packages = owner(owners, path)
         if not packages:
             unowned.add(path)
         static_records.append(dict(file=path, packages=sorted(packages)))
-    command = subprocess.run(["ninja", "-C", build, "-t", "commands", "bin/Telegram"], check=True,
+    command = subprocess.run(["ninja", "-C", build, "-t", "commands", "contrail"], check=True,
                              capture_output=True, text=True).stdout.splitlines()[-1]
     compiler = next(word for word in shlex.split(command) if re.search(r"(g\+\+|c\+\+|clang\+\+)$", word))
 

@@ -2,6 +2,7 @@
 #include "call_media.hpp"
 #include "contrail_version.h"
 #include "debug.hpp"
+#include "local_state.hpp"
 #include "main_window.hpp"
 #include "td/scenario.hpp"
 #include "td/session.hpp"
@@ -38,7 +39,9 @@ void SessionClosed(bool lost) {
 
 void StartSession() {
   auto &program = Instance();
-  const auto language = SystemLanguage();
+  // The language Contrail 0.3 used, if this one came after it; otherwise the system's.
+  const auto chosen = ChosenLanguage();
+  const auto language = chosen.empty() ? SystemLanguage() : chosen;
   // The window's store and open chat go with the client they talk to, while it is still there.
   program.window->detach();
   GetApp().session = nullptr;
@@ -61,6 +64,16 @@ void Activate(GApplication *) {
     StartSession();
   }
   program.window->present();
+}
+
+// tg:// and t.me links from the desktop entry (Exec=contrail -- %u) and other apps, as 0.3.1 took them.
+void Open(GApplication *application, GFile **files, int count, const char *) {
+  Activate(application);
+  for (auto i = 0; i != count; ++i) {
+    auto *uri = g_file_get_uri(files[i]);
+    if (uri) Instance().window->openLinkWhenReady(uri);
+    g_free(uri);
+  }
 }
 
 void Shutdown(GApplication *) {
@@ -87,9 +100,10 @@ int main(int argc, char **argv) {
   using namespace Contrail;
   auto &program = Instance();
   g_set_prgname(kAppId);
-  g_set_application_name("Contrail TD");
-  program.application = adw_application_new(kAppId, G_APPLICATION_DEFAULT_FLAGS);
+  g_set_application_name(kAppName);
+  program.application = adw_application_new(kAppId, G_APPLICATION_HANDLES_OPEN);
   g_signal_connect(program.application, "activate", G_CALLBACK(Activate), nullptr);
+  g_signal_connect(program.application, "open", G_CALLBACK(Open), nullptr);
   g_signal_connect(program.application, "shutdown", G_CALLBACK(Shutdown), nullptr);
   // Ctrl+C and SIGTERM close TDLib cleanly too.
   g_unix_signal_add(SIGTERM, Quit, nullptr);

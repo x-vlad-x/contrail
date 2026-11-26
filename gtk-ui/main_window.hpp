@@ -175,6 +175,13 @@ class MainWindow final {
   int _unreadUnmuted = 0;  // Chats with unread messages that notify: the tray icon's badge.
   bool _authorized = false;  // The chats can be shown: the window built again shows them at once.
   bool _held = false;  // The app holds itself without a window (g_application_hold).
+
+ public:
+  // A tg:// or t.me link given to the program (the desktop entry, another app): opened once the chats are there.
+  void openLinkWhenReady(const std::string &link);
+
+ private:
+  std::string _pendingLink;
 };
 
 }  // namespace Contrail

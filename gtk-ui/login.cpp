@@ -1,5 +1,6 @@
 #include "login.hpp"
 
+#include "local_state.hpp"
 #include "td/login_errors.hpp"
 #include "td/session.hpp"
 #include "td/strings.hpp"
@@ -236,6 +237,17 @@ void LoginView::buildPhonePage() {
   gtk_editable_set_text(GTK_EDITABLE(_phone), "+");
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), _phone);
   _phonePage = makePage(Tr("lng_phone_title"), Tr("lng_phone_desc"), group, [this] { submitPhone(); });
+  if (SignedInBeforeTdlib()) {
+    // Updated from Contrail 0.3: TDLib can't take over Telegram Desktop's session (tdlib-migration).
+    const auto note = Translated(
+        "Contrail now works on TDLib and can't use the sign-in of Contrail 0.3. Please sign in again: your chats "
+        "are kept by Telegram, and your settings came along.",
+        "Contrail теперь работает на TDLib и не может использовать вход из Contrail 0.3. Войдите ещё раз: чаты "
+        "хранятся в Telegram, а настройки перенесены.",
+        "Contrail тепер працює на TDLib і не може використати вхід із Contrail 0.3. Увійдіть ще раз: чати "
+        "зберігаються в Telegram, а налаштування перенесено.");
+    gtk_label_set_text(GTK_LABEL(_phonePage.description), (Plain(Tr("lng_phone_desc")) + "\n\n" + note).c_str());
+  }
   Connect<void(AdwEntryRow *)>(_phone, "entry-activated", [this](AdwEntryRow *) { submitPhone(); });
   Connect<void(GtkEditable *)>(_phone, "changed", [this](GtkEditable *) { _phoneEdited = true; });
   _phoneEdited = false;

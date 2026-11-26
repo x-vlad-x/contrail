@@ -1,40 +1,26 @@
 #!/bin/sh
-# Contrail launcher. Works in three layouts:
-#   PREFIX/bin/contrail, PREFIX/libexec/contrail/contrail   packages: /usr/lib/contrail (DEB, RPM, reached through
-#                                                          /usr/bin/contrail), AppDir/usr (AppImage), /app (Flatpak)
-#   DIR/contrail, DIR/bin/contrail, DIR/lib, DIR/plugins     the development install over SSH (update-contrail.sh)
+# Contrail launcher: PREFIX/bin/contrail starts PREFIX/libexec/contrail/contrail. PREFIX is /usr/lib/contrail (or
+# /usr/lib/contrail-td for the test version) in the DEB and RPM, reached through a link in /usr/bin; AppDir/usr in
+# the AppImage; /app in the Flatpak.
 HERE="$(dirname "$(readlink -f "$0")")"
-if [ -x "$HERE/bin/contrail" ]; then
-  PROGRAM="$HERE/bin/contrail"
-  RESOURCES="$HERE"
-  INFO="$HERE/VERSION"
-  # The development install carries the libraries and the Qt plugins the phone doesn't have.
-  export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-  export QT_PLUGIN_PATH="$HERE/plugins"
-else
-  PREFIX="$(dirname "$HERE")"
-  PROGRAM="$PREFIX/libexec/contrail/contrail"
-  RESOURCES="$PREFIX/share/contrail"
-  INFO="$RESOURCES/version"
-  # The packages carry their own Qt (its plugins aren't where Qt looks by default).
-  if [ -d "$PREFIX/lib/qt6/plugins" ]; then
-    export QT_PLUGIN_PATH="$PREFIX/lib/qt6/plugins"
-  fi
-  # The DEB, RPM and AppImage also carry GTK: point it, GIO and gdk-pixbuf at the resources that come with it
-  # (the system's ones are built for the system's GTK). The bundled libraries are found through their RPATH.
-  if [ -d "$PREFIX/lib/gio/modules" ]; then
-    export XDG_DATA_DIRS="$PREFIX/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
-    export GSETTINGS_SCHEMA_DIR="$PREFIX/share/glib-2.0/schemas"
-    export GIO_MODULE_DIR="$PREFIX/lib/gio/modules"
-    export GDK_PIXBUF_MODULEDIR="$PREFIX/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-    # The loader cache lists absolute paths, which change with every mount of an AppImage.
-    cache="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/contrail-$(id -u)"
-    if mkdir -p "$cache" 2>/dev/null && chmod 700 "$cache" && \
-        LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" \
-          > "$cache/loaders.cache.$$" 2>/dev/null; then
-      mv -f "$cache/loaders.cache.$$" "$cache/loaders.cache"
-      export GDK_PIXBUF_MODULE_FILE="$cache/loaders.cache"
-    fi
+PREFIX="$(dirname "$HERE")"
+PROGRAM="$PREFIX/libexec/contrail/contrail"
+RESOURCES="$PREFIX/share/contrail"
+INFO="$RESOURCES/version"
+# The DEB, RPM and AppImage also carry GTK: point it, GIO and gdk-pixbuf at the resources that come with it
+# (the system's ones are built for the system's GTK). The bundled libraries are found through their RPATH.
+if [ -d "$PREFIX/lib/gio/modules" ]; then
+  export XDG_DATA_DIRS="$PREFIX/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+  export GSETTINGS_SCHEMA_DIR="$PREFIX/share/glib-2.0/schemas"
+  export GIO_MODULE_DIR="$PREFIX/lib/gio/modules"
+  export GDK_PIXBUF_MODULEDIR="$PREFIX/lib/gdk-pixbuf-2.0/2.10.0/loaders"
+  # The loader cache lists absolute paths, which change with every mount of an AppImage.
+  cache="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/contrail-$(id -u)"
+  if mkdir -p "$cache" 2>/dev/null && chmod 700 "$cache" && \
+      LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" \
+        > "$cache/loaders.cache.$$" 2>/dev/null; then
+    mv -f "$cache/loaders.cache.$$" "$cache/loaders.cache"
+    export GDK_PIXBUF_MODULE_FILE="$cache/loaders.cache"
   fi
 fi
 
@@ -47,18 +33,6 @@ case "${1:-}" in
     exit $? ;;
 esac
 
-# Telegram Desktop's core runs Qt, but its window is never shown: the interface is GTK.
-export QT_QPA_PLATFORM=offscreen
 # The interface's own icons.
 export CONTRAIL_DIR="$RESOURCES"
-# The core's application ID (D-Bus name, notifications) is Contrail's, not Telegram Desktop's.
-# (Tests can run a second instance under another ID.)
-export CONTRAIL_APP_ID="${CONTRAIL_APP_ID:-io.github.x_vlad_x.Contrail}"
-
-# The account and the cache, separate from the official Telegram Desktop (~/.local/share/TelegramDesktop).
-DATA="${XDG_DATA_HOME:-$HOME/.local/share}/contrail-data"
-mkdir -p "$DATA/tdata"
-# The core would register itself as the tg:// handler bypassing this launcher; the desktop entry does it.
-OPTIONS="$DATA/tdata/experimental_options.json"
-[ -f "$OPTIONS" ] || echo '{"skip-url-scheme-register": true}' > "$OPTIONS"
-exec "$PROGRAM" -workdir "$DATA/" "$@"
+exec "$PROGRAM" "$@"
