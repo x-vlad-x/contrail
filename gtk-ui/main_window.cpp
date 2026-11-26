@@ -5,6 +5,7 @@
 
 #include "chat_list.hpp"
 #include "chat_view.hpp"
+#include "contrail_app.h"
 #include "dialogs.hpp"
 #include "live_location.hpp"
 #include "local_state.hpp"
@@ -72,7 +73,7 @@ void MainWindow::buildWindow() {
     return FALSE;
   }), nullptr);
   gtk_widget_add_controller(_window, taps);
-  gtk_window_set_title(GTK_WINDOW(_window), "Contrail TD");
+  gtk_window_set_title(GTK_WINDOW(_window), kAppName);
   gtk_window_set_default_size(GTK_WINDOW(_window), 900, 700);
   gtk_widget_set_size_request(_window, 320, 294);
 

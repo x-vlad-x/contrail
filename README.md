@@ -6,7 +6,7 @@
 
 **A native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones**
 
-Built on the [Telegram Desktop](https://github.com/telegramdesktop/tdesktop) core · made for Phosh ·
+Built on [TDLib](https://github.com/tdlib/td) · made for Phosh ·
 developed on the FuriLabs FLX1s with FuriOS
 
 </div>
@@ -28,11 +28,9 @@ developed on the FuriLabs FLX1s with FuriOS
 > Contrail is an **unofficial** client that uses the Telegram API. It is not affiliated with or endorsed by Telegram. The chats in the
 > screenshots are made up (see [Screenshots](#screenshots)).
 
-Telegram Desktop works on a Linux phone, but its Qt interface is made for a mouse and a big screen. Contrail
-keeps everything below the interface — MTProto, the message database, local storage, media, calls,
-notifications — and replaces the interface itself with an adaptive GTK4/libadwaita one: a single column
-on a phone, the chat list and the chat side by side on a wider screen, touch gestures, the system's light
-or dark style and accent color.
+Contrail uses TDLib for the Telegram connection, message database and files. Its adaptive
+GTK4/libadwaita interface uses a single column on a phone and shows the chat list and the chat side by
+side on a wider screen. It supports touch gestures and follows the system's style and accent color.
 
 Contrail now has its own [Flatpak repository](#from-the-flatpak-repository) for x86_64 and ARM64: add it once, and
 new versions come through your app store or `flatpak update`.
@@ -136,9 +134,13 @@ Every package comes for x86_64 (`amd64`) and ARM64 (`aarch64`, Linux phones):
 The packages are ready to use: no building and no Telegram API keys needed. The DEB, RPM and AppImage carry the
 libraries Contrail needs and run on systems with glibc 2.39 or newer (Debian 13, Ubuntu 24.04, Fedora 40, openSUSE
 Leap 16 or newer); the Flatpak uses the GNOME runtime from Flathub. The account and the cache are kept in
-`~/.local/share/contrail-data` (the Flatpak's in `~/.var/app/io.github.x_vlad_x.Contrail`), separate from the
+`~/.local/share/contrail-data/td` (the Flatpak's in `~/.var/app/io.github.x_vlad_x.Contrail/data/contrail-data/td`), separate from the
 official Telegram Desktop. The installation guide that comes with each release (`README.md` among its files) has
 the details, including moving from the earlier SSH install to a package (`contrail-migrate-launcher`).
+
+On the first upgrade from Contrail 0.3 to TDLib, sign in once. Contrail carries over the language,
+notification and background settings. Contrail retrieves your cloud chats again. Downloaded files
+in the old cache, pending uploads and local live location state stay with 0.3.
 
 Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). Choosing where a call is heard
 needs `pactl` (PulseAudio, or PipeWire's PulseAudio server; the Flatpak carries it); the earpiece and the
@@ -171,88 +173,67 @@ This needs git, patch, python3 and podman (or docker); everything else happens i
 are built against Debian 13 (ARM64 cross-compiled), once each, and packaged four ways by `tools/package.py`: the
 DEB, RPM and AppImage carry every library the program needs except the system's base ones
 (`tools/bundle.py`, `packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. FFmpeg
-is built by `build-env/build-deps.sh` from Debian's source package with only what Telegram Desktop uses, which
-leaves out some 90 MB of codec libraries Debian's build would bring. The
-Telegram Desktop release is pinned in the script; the first build takes a few hours, later ones minutes. Nothing
-is installed or uploaded. `tools/prepare_release.py` then assembles the release files (packages, corresponding
+is built by `build-env/build-deps.sh` from Debian's source package with the codecs Contrail uses.
+The build pins TDLib and uses the tgcalls sources and WebRTC dependencies specified in
+`tools/build-packages.sh`. The first build takes a few hours, later ones minutes. Packages are built locally.
+`tools/prepare_release.py` assembles the release files (packages, corresponding
 sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LICENSES.md), and
 `tools/publish-release.sh` publishes them as a GitHub release.
 
 ### Development install over SSH
 
-For working on the interface, `update-contrail.sh` builds the latest Telegram Desktop release with Contrail
-and installs it into `~/.local/share/contrail` on the phone over SSH. The build machine needs git, patch,
-podman and ssh; the phone must accept SSH logins with a key. No root access on the phone is needed. Don't
-combine it with the Debian package on the same phone: its user launcher hides the package's.
+The default package build produces Contrail TDLib, which can run alongside Contrail 0.3. Build the
+ARM64 AppImage and copy it to a phone that accepts SSH logins with a key.
 
 ```bash
-./update-contrail.sh                # build and install
-./update-contrail.sh --check        # what is installed on the phone, is there an update
-./update-contrail.sh --ui-only      # quickly update only the program (after changes in gtk-ui/)
-./update-contrail.sh --build-only   # build without installing
-./update-contrail.sh --tag v7.3.3   # a specific Telegram Desktop release
-./update-contrail.sh --uninstall    # remove from the phone (--uninstall --purge also removes the account)
+CONTRAIL_FORMATS=appimage tools/build-packages.sh aarch64
+scp out/packages/Contrail-TDLib-*-aarch64.AppImage furios:
 ```
 
-The SSH destination is taken from `PHONE` (default `furios`), e.g. `PHONE=user@192.168.1.10`.
+Run the AppImage from the phone's graphical session. It uses `~/.local/share/contrail-td/app`.
 
 ## How it works
 
-Telegram Desktop's data layer (`Data::Session`, `ApiWrap`, `History`) is tied to its Qt code, so the whole
-program is built, with a small patch that adds the interface to its CMake target and starts it at the end
-of `Core::Application::run()`. Qt runs on the `offscreen` platform and on GLib's event loop — the same loop
-GTK runs on — so both live on the main thread. The GTK interface talks to `Main::Session` directly: it
-reads the chat list and the history, follows the core's change streams (`Data::Changes`) and sends
-requests through `ApiWrap` and `Data::Histories`. When the core opens a chat in its hidden window (a
-notification, a link), the GTK window follows.
-
-The build clones Telegram Desktop at the release tag into `tdesktop/`, applies the patches and builds in a
-container: cross-compiled for aarch64 against the same Debian snapshot as FuriOS (code generators that run
-during the build go through qemu-user), natively on Debian 13 for the x86_64 AppImage. Libraries Debian
-doesn't package (tg_owt, tde2e, tdesktop_rust) are built from source at the versions the official build
-uses, so nothing has to be installed on the build machine.
+The GTK interface sends requests to TDLib. A receive thread forwards responses and updates to the GLib
+main loop. The interface holds the messages around the visible part of a chat, and TDLib keeps its
+history on disk. Closing the window in background mode releases the interface while TDLib, notifications,
+downloads and calls keep running. TDLib handles call signaling and tgcalls handles audio and video.
 
 ### Project layout
 
 | Path | Contents |
 | --- | --- |
-| `gtk-ui/` | The interface, C++ on the plain GTK4/libadwaita C API, compiled into Telegram Desktop's executable: `main_window` (adaptive layout, releasing and rebuilding the interface), `login`, `chat_list`, `chat_view` (history, scrolling, message field), `message` (one message or an album; `album_layout.hpp`), `attach` and `paste.hpp` (files and pasted pictures before sending), `send_queue` (albums in order), `reactions`, `forward` (choosing where to forward), `location` (the device's position from GeoClue or the portal), `live_location` (live locations being shared; `geo.hpp`), `chat_live_locations` and `live_map` (a chat's live locations, on one map), `location_ui` (sending a location, a location on the map), `map_view` (libshumate maps), `memory_guard` (giving memory back when the system is short of it; `memory_pressure.hpp`), `voice_recorder`, `zoom_view` (the photo viewer; `zoom_geometry.hpp`), `text` (Telegram entities → Pango markup, links), `calls`, `call_notification`, `call_lockscreen`, `call_shell` (lock state, ringtone), `dialogs`, `settings`, `userpics`, `style.css`, `icons/` |
-| `patches/` | The patches for Telegram Desktop; `patches/tg_owt/` for WebRTC (built by `build-deps.sh`) |
+| `gtk-ui/` | The C++ interface on the GTK4/libadwaita C API, including chats, notifications, location and calls |
+| `gtk-ui/td/` | TDLib session, transport, chat state and scripted transport for tests |
+| `gtk-ui/media/` | Audio playback and recording, call audio and video |
+| `patches/tg_owt/` | WebRTC patches used by `build-deps.sh` |
 | `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
 | `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
 | `tools/` | Package and release scripts, testing helpers |
-| `tests/` | Regression tests (`test-gtk.sh`) and packaging tests (`python3 -m unittest discover tests`) |
+| `tests/` | TDLib, interface and packaging regression tests |
 
 ## Development
 
 ### Testing on the phone
 
-With `CONTRAIL_DEBUG=1` the app takes commands over D-Bus, so it can be driven over SSH without touching
-the phone. `tools/phone.sh` wraps that:
+Start the development AppImage with `CONTRAIL_DEBUG=1` from a terminal on the phone.
+On the build machine, `tools/phone.sh` sends commands to it over D-Bus.
 
 ```bash
-tools/phone.sh run              # start with CONTRAIL_DEBUG=1, the log goes to /tmp/contrail.log on the phone
-tools/phone.sh cmd 'chat 0'     # open the first chat
-tools/phone.sh cmd history-state
-tools/phone.sh shot shot.png    # a screenshot (tools/phone.sh get-grim once)
+tools/phone.sh td-cmd 'list-do 0 saved'
+tools/phone.sh td-cmd state
 ```
 
-The commands are listed at the top of `gtk-ui/debug.cpp`: opening chats and pages, scrolling, history and
-layout diagnostics, a call window preview, local call tests that never contact anybody.
-`tools/phone-touch.py` injects real touchscreen drags for testing scrolling and gestures. The core writes
-its own log to `~/.local/share/contrail-data/log.txt`.
+The commands are listed at the top of `gtk-ui/debug.cpp`. `tools/phone-touch.py` injects touchscreen
+gestures. TDLib writes to `~/.local/share/contrail-td/app.log`.
 
 ### Tests
 
-Regressions for the parts that don't need a Telegram account — GTK handler lifetimes, layout on a phone
-width, media sizing, telling taps from scrolling, Qt window closing, video frame rotation, audio
-routing, the photo viewer's zoom geometry, album cells on narrow screens, what a paste brings, when a live
-location is updated and when memory is short — run on
-any Linux desktop with GTK4, libadwaita, Qt 6, libswscale and a C++ compiler, under AddressSanitizer and
-UBSan:
+Build the test executables by passing `test` to `build-env/build-td.sh x86_64` in the desktop build
+container. Run the scripted UI suite on an Xvfb display with ImageMagick and FFmpeg.
 
 ```bash
-tools/test-gtk.sh
+tools/td-ui-test.sh build-td/x86_64/contrail
 ```
 
 The launcher, the migration from the SSH install, the release metadata and the release tooling have their
@@ -264,31 +245,14 @@ python3 -m unittest discover tests
 
 ### Measuring
 
-`tools/measure.sh` compares releases on the phone: memory (RSS, PSS, private, swap), CPU time, wakeups and
-network after starting, after loading a chat's media and 1, 5 and 15 minutes after closing the window
-(`background`), the charge used over a long run off the charger (`energy`), and which threads wake up
-(`ssh $PHONE python3 .cache/contrail-tools/phone-measure.py threads 120`). Only Saved Messages is opened.
+`tools/measure.sh snapshot` records the phone's running package, including memory, CPU time and
+wakeups. Compare the same chat and the same time after closing the window. Open Saved Messages
+for a run that leaves other chats' read state alone.
 
 ### Screenshots
 
-The screenshots show the real interface with a made-up account. `tools/demo.sh` starts a second Contrail
-on the phone with its own empty data directory and application ID, in English, inside a network namespace
-without network; the `demo` command (`gtk-ui/demo.cpp`) signs a fictional account in locally and fills it
-with chats, a group and a channel with generated pictures, reactions, a pinned message and locations. Nothing
-reaches Telegram's servers and the installed Contrail is not touched. The maps come from a few OpenStreetMap tiles
-that `tools/demo.sh tiles` downloads once and copies into the demo's own cache. The app draws its own window into
-a PNG, so the phone's screen can be locked meanwhile:
-
-```bash
-tools/demo.sh tiles             # once: the maps around the made-up places
-tools/demo.sh run               # or: tools/demo.sh run dark
-tools/demo.sh cmd demo
-tools/demo.sh cmd 'chat 0'
-tools/demo.sh shot chat.png
-tools/demo.sh stop
-```
-
-`PROGRAM=.local/share/contrail-test tools/demo.sh run` runs the demo from another SSH install on the phone.
+The screenshots use made-up chats. Package smoke tests run the scripted transport in a clean
+container and save screenshots to `out/smoke/`. Set `SMOKE_DARK=1` for the dark style.
 
 ## License
 
