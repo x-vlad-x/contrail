@@ -77,6 +77,30 @@ def index_sources(sources, destination, snapshot):
             text = path.read_text()
             path.write_text(re.sub(r"^Types: deb$", "Types: deb deb-src", text, flags=re.M))
     subprocess.run(["apt-get", "update", "-qq"], check=True)
+    records, errors = look_up(sources)
+    if errors and not snapshot:
+        # A point release of Debian replaced a version the build container still has: the archive keeps only the
+        # newest. snapshot.debian.org has the old one, in the (signed) archive of the time it came out.
+        times = set()
+        for error in errors:
+            if moment := first_seen(error["package"], error["version"]):
+                times.add(moment)
+        for moment in sorted(times):
+            (lists / f"snapshot-{moment}.sources").write_text(
+                f"Types: deb-src\nURIs: https://snapshot.debian.org/archive/debian/{moment}/\nSuites: sid\n"
+                "Components: main contrib non-free\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n")
+        if times:
+            Path("/etc/apt/apt.conf.d/99snapshot").write_text('Acquire::Check-Valid-Until "false";\n')
+            subprocess.run(["apt-get", "update", "-qq"], check=True)
+            found, errors = look_up({(e["package"], e["version"]) for e in errors})
+            records += found
+    destination.write_text(json.dumps(dict(sources=records, errors=errors), indent=2) + "\n")
+    if errors:
+        raise RuntimeError(f"Exact source versions unavailable: {errors}")
+
+
+def look_up(sources):
+    """The files of each source package version, from the indexes APT has."""
     records, errors = [], []
     for package, version in sorted(sources):
         result = subprocess.run(["apt-get", "--print-uris", "--download-only", "--only-source",
@@ -88,9 +112,21 @@ def index_sources(sources, destination, snapshot):
             records.append(dict(package=package, version=version, files=parse_uris(result.stdout)))
         except ValueError as error:
             errors.append(dict(package=package, version=version, error=str(error)))
-    destination.write_text(json.dumps(dict(sources=records, errors=errors), indent=2) + "\n")
-    if errors:
-        raise RuntimeError(f"Exact source versions unavailable: {errors}")
+    return records, errors
+
+
+def first_seen(package, version):
+    """When snapshot.debian.org first saw a source package version in the main archive (its .dsc), as a
+    timestamp of an archive state that has it in unstable; None when it doesn't know it."""
+    base = "https://snapshot.debian.org/mr"
+    try:
+        with urllib.request.urlopen(f"{base}/package/{package}/{version}/srcfiles?fileinfo=1", timeout=120) as r:
+            listing = json.load(r)
+    except OSError:
+        return None
+    moments = [info["first_seen"] for infos in listing.get("fileinfo", {}).values() for info in infos
+               if info.get("archive_name") == "debian" and info.get("name", "").endswith(".dsc")]
+    return min(moments) if moments else None
 
 
 def valid(path, record):
