@@ -678,6 +678,8 @@ def build_flatpak(args, stage, version, info):
     files = build / "files"
     shutil.copytree(stage / "usr", files, symlinks=True)
     (files / "bin/contrail-migrate-launcher").unlink(missing_ok=True)  # nothing to migrate inside a sandbox
+    desktop = files / "share/applications" / f"{APP_ID}.desktop"
+    desktop.write_text(desktop.read_text().replace(f"Exec={NAME} ", "Exec=contrail ", 1))
     bundle_step(args, "resources", files, "--pactl")
     bundle_step(args, "deploy", files, "--host", container_path(listing))
     bundle_step(args, "check", files, "--host", container_path(listing))

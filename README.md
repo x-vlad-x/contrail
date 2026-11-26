@@ -80,10 +80,10 @@ new versions come through your app store or `flatpak update`.
   wired headphones), otherwise on the earpiece, and can be moved to the loudspeaker or another device;
   each of the phone's outputs keeps its own call volume, apart from the media volume. The screen goes
   dark while the phone is held to the ear, and doesn't lock during a call. An incoming call rings with the
-  phone's own ringtone and, on a locked phone, fills the lock screen as the phone's dialer does: Accept and
-  Decline, then Mute, the loudspeaker and End Call without unlocking. It also comes as a notification with
-  Accept and Decline, then End Call while it goes on.
-- **Notifications** through the core's native Linux notifications, with the phone's own message sound;
+  phone's own ringtone. Phosh shows a notification with Accept and Decline on the lock screen and
+  End Call while the call goes on. With Wayland layer shell, Contrail can show full-screen controls
+  for the call, including mute and loudspeaker.
+- **Notifications** through the desktop's native Linux notifications, with the phone's own message sound;
   tapping one opens the chat.
 - **Running in the background** (Settings): closing the window keeps messages, notifications and calls
   coming; on a desktop an icon in the notification area opens the window again, on a phone the app's
@@ -145,8 +145,9 @@ in the old cache, pending uploads and local live location state stay with 0.3.
 Contrail is developed and tested on the FuriLabs FLX1s with FuriOS 14 (Phosh). Choosing where a call is heard
 needs `pactl` (PulseAudio, or PipeWire's PulseAudio server; the Flatpak carries it); the earpiece and the
 loudspeaker are the ports of FuriOS's PulseAudio Droid sink. The dark screen at the ear needs a proximity sensor
-behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from feedbackd, and a call
-over the lock screen needs a shell with the layer shell, as Phosh (gtk4-layer-shell comes with the packages).
+behind iio-sensor-proxy (or FuriOS's compatible service). The phone's ringtone comes from feedbackd.
+Full-screen call controls on the lock screen need Wayland layer shell. On FuriOS this is available to the
+native packages, and the Flatpak uses Phosh's lock-screen notification actions.
 Your location comes from GeoClue, through the desktop portal in the Flatpak (the system asks once whether
 Contrail may use it); the maps come from OpenStreetMap's tile servers and are drawn by libshumate, as in GNOME
 Maps (it comes with the packages).

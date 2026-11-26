@@ -114,9 +114,10 @@ It moves only that old launcher into a backup folder. Your account, chats, cache
 
 Contrail is developed on the FuriLabs FLX1s with FuriOS 14 (Phosh). Choosing where a call is heard needs `pactl`
 (PulseAudio, or PipeWire's PulseAudio server; the DEB and RPM recommend it, the Flatpak carries it). The dark
-screen at the ear needs a proximity sensor behind iio-sensor-proxy, the phone's ringtone comes from feedbackd,
-and a call over the lock screen needs a shell with the layer shell, as Phosh. For emoji in messages, install a
-color emoji font (for example Noto Color Emoji) if your system has none.
+screen at the ear needs a proximity sensor behind iio-sensor-proxy. The phone's ringtone comes from feedbackd.
+Phosh shows call notification actions on the lock screen. Full-screen controls need Wayland layer shell,
+which FuriOS offers to the native packages. For emoji in messages, install a color emoji font such as Noto Color
+Emoji if your system has none.
 
 ## Checking the download
 

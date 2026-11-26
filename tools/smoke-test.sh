@@ -90,7 +90,7 @@ smoke() {
     "$ENGINE" build -q --platform linux/arm64 -t localhost/contrail-smoke-furios -f build-env/Containerfile.smoke \
       build-env >/dev/null
   fi
-  local name base setup out tag install command
+  local name base setup out tag install
   for name in ${SMOKE_SYSTEMS:-$(printf '%s\n' "${!systems[@]}" | sort)}; do
     [[ -n ${systems[$name]:-} ]] || continue
     IFS='|' read -r base setup <<< "${systems[$name]}"
@@ -151,13 +151,15 @@ RUN $setup"
         local launcher_platform=linux/$HOST_MACHINE
         image "$tag" "$launcher_platform" build-env "FROM $base
 RUN $setup"
-        command="flatpak run --arch=$machine $APP_ID"
         run "$tag" "$launcher_platform" "set -e
           export FLATPAK_USER_DIR=/tmp/flatpak
           cp -a /src/out/flatpak/user /tmp/flatpak
           flatpak install --user -y --noninteractive --no-related --no-deps out/packages/$file
-          flatpak info --user $APP_ID | sed -n '/Version\\|Runtime\\|Arch/p'
-          tests/smoke/run-demo.sh /out/$out $APP_ID $command" --privileged ;;
+          flatpak info --user --arch=$machine $APP_ID | sed -n '/Version\\|Runtime\\|Arch/p'
+          desktop=\$(flatpak info --user --arch=$machine --show-location $APP_ID)/export/share/applications/$APP_ID.desktop
+          launcher=\$(sed -n 's/^Exec=.* --command=\\([^ ]*\\) .*/\\1/p' \"\$desktop\")
+          test -n \"\$launcher\"
+          tests/smoke/run-demo.sh /out/$out $APP_ID flatpak run --arch=$machine --command=\"\$launcher\" $APP_ID" --privileged ;;
     esac
     [[ -n ${SMOKE_KEEP:-} ]] || "$ENGINE" rmi -f "$tag" >/dev/null 2>&1 || true
   done
