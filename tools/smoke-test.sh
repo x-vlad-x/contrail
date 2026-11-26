@@ -11,12 +11,14 @@
 #   appimage  run on Debian 13, Ubuntu 24.04, Fedora 44 and (amd64) Arch Linux
 #   flatpak   installed with flatpak (user installation, runtime and GL extension from out/flatpak/) on Fedora 44
 #
-# ARM64 containers need qemu-user binfmt on the host. SMOKE_SYSTEMS limits the systems (e.g. "fedora-44"),
+# ARM64 on x86_64 needs qemu-user binfmt. Flatpak and bubblewrap run on the host architecture.
+# SMOKE_SYSTEMS limits the systems (e.g. "fedora-44"),
 # SMOKE_DARK=1 runs the program with the dark style. Screenshots and logs go to out/smoke/<format-arch-system>/.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 ENGINE="${CONTAINER_ENGINE:-$(command -v podman || command -v docker)}"
+HOST_MACHINE=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 # The flavour the packages were built as (tools/build-packages.sh): its names and version.
 FLAVOUR="${CONTRAIL_FLAVOUR:-devel}"
 read -r APP_ID NAME < <(python3 -c "import sys; sys.path.insert(0, 'tools'); import package
@@ -58,7 +60,7 @@ smoke() {
   [[ -f out/packages/$file ]] || { echo "No out/packages/$file: run tools/build-packages.sh $machine" >&2; return 1; }
   # Under emulation the program takes minutes to start.
   local emulated=
-  if [[ $arch != "$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" ]]; then
+  if [[ $arch != "$HOST_MACHINE" ]]; then
     emulated=1
     export SMOKE_SETTLE=${SMOKE_SETTLE:-30} SMOKE_TIMEOUT=${SMOKE_TIMEOUT:-900}
   fi
@@ -145,10 +147,12 @@ RUN $setup"
         fi ;;
       flatpak)
         # The runtime comes from the packaging's own download (out/flatpak/), not from the network.
-        image "$tag" "$platform" build-env "FROM $base
+        # Bubblewrap creates namespaces natively. Binfmt runs the foreign app and its runtime inside them.
+        local launcher_platform=linux/$HOST_MACHINE
+        image "$tag" "$launcher_platform" build-env "FROM $base
 RUN $setup"
         command="flatpak run --arch=$machine $APP_ID"
-        run "$tag" "$platform" "set -e
+        run "$tag" "$launcher_platform" "set -e
           export FLATPAK_USER_DIR=/tmp/flatpak
           cp -a /src/out/flatpak/user /tmp/flatpak
           flatpak install --user -y --noninteractive --no-related --no-deps out/packages/$file
