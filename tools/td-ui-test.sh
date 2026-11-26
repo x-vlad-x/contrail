@@ -862,6 +862,7 @@ section_media_view_player() {
   c 'player-play 2' 0.3
   player_until '*status=loading message=2 *' 2
   player_until '*status=playing message=2 *thread=1*' 6
+  grep -q 'scenario: content opened 2$' "$WORK/log.txt" || fail "the voice message wasn't marked as listened"
   line=$(asked 'chat media:' 'media 2')
   [[ $line == *'document="0:0'?' / 0:03"'*'icon=media-playback-pause-symbolic'* ]] || fail "a voice message playing: $line"
   # A pause keeps the place, a tap plays on from it.

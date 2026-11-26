@@ -688,6 +688,8 @@ void AudioPlayer::start(const Track &track, double from) {
   _resumeAfterSeeking = false;
   _asked = -1;
   _shared = std::make_shared<Shared>();
+  // Listened: the dot under a voice message goes for its sender too, as the official apps do when it plays.
+  if (track.message > 0) _store.client().send(Td::api::make_object<Td::api::openMessageContent>(track.chat, track.message));
   const auto known = _store.file(track.file);
   if (known) feed(*known);
   if (!known || !known->complete) {

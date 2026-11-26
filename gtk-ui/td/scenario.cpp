@@ -631,6 +631,10 @@ class ScenarioTransport final : public Transport {
       case api::getLanguagePackStrings::ID:
         answer(id, api::make_object<api::error>(400, "The scenario has no language pack"));
         break;
+      case api::openMessageContent::ID:
+        g_message("scenario: content opened %lld", (long long)(static_cast<api::openMessageContent &>(*function).message_id_ >> 20));
+        answer(id, api::make_object<api::ok>());
+        break;
       case api::setOption::ID:
       case api::openChat::ID:
       case api::closeChat::ID:
