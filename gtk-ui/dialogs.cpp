@@ -580,12 +580,29 @@ void ShowProfile(MainWindow &window, Td::ChatId chat) {
   g_message("Profile: shown for %lld", (long long)chat);
 }
 
+// The version a package was built as (share/contrail/version beside libexec/contrail/contrail): a test build
+// tells its number after VERSION's, "0.3.1-td.65", which a report of a problem needs.
+namespace {
+std::string InstalledVersion() {
+  auto version = std::string(kContrailVersion);
+  g_autofree auto *program = g_file_read_link("/proc/self/exe", nullptr);
+  if (!program) return version;
+  g_autofree auto *directory = g_path_get_dirname(program);
+  g_autofree auto *path = g_build_filename(directory, "..", "..", "share", "contrail", "version", nullptr);
+  g_autofree char *contents = nullptr;
+  if (!g_file_get_contents(path, &contents, nullptr, nullptr)) return version;
+  // "Contrail 0.3.1-td.65 (test version on TDLib)": the second word.
+  g_auto(GStrv) words = g_strsplit_set(contents, " \n", 3);
+  return (words[0] && words[1] && *words[1]) ? std::string(words[1]) : version;
+}
+}  // namespace
+
 void ShowAbout(MainWindow &window) {
   auto *about = adw_about_dialog_new();
-  adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), "Contrail");
+  adw_about_dialog_set_application_name(ADW_ABOUT_DIALOG(about), kAppName);
   adw_about_dialog_set_application_icon(ADW_ABOUT_DIALOG(about), kAppId);
   adw_about_dialog_set_developer_name(ADW_ABOUT_DIALOG(about), "Vladislav Shadiuk");
-  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), kContrailVersion);
+  adw_about_dialog_set_version(ADW_ABOUT_DIALOG(about), InstalledVersion().c_str());
   adw_about_dialog_set_comments(ADW_ABOUT_DIALOG(about),
                                 "An unofficial Telegram client that uses the Telegram API, with a GNOME interface on "
                                 "TDLib. Not affiliated with or endorsed by Telegram.");
