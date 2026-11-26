@@ -338,6 +338,8 @@ class ChatView final {
   bool _applyingPage = false;
   bool _stickToBottom = true;
   bool _adjustingScroll = false;
+  // A position set while GTK allocated the list: the list is placed again in the next frame.
+  bool _placeAgain = false;
   bool _touchActive = false;
   int _topReserve = 0;
   double _pendingShift = 0.;

@@ -1467,6 +1467,9 @@ void ChatView::buildList() {
       _adjustingScroll = true;
       gtk_adjustment_set_value(_adjustment, base + shift);
       _adjustingScroll = false;
+      // GTK may have placed the list already with the old position in this allocation and ignores a new one
+      // asked for during it: the scroll bar would say one place and the screen show another until something moves.
+      _placeAgain = true;
     }
     scheduleViewportUpdate();
   });
@@ -2073,6 +2076,7 @@ void ChatView::scheduleViewportUpdate() {
 void ChatView::updateViewport() {
   if (_applyingPage || !_initialLoaded) return;
   if (!gtk_widget_get_mapped(_root)) return;
+  if (std::exchange(_placeAgain, false)) gtk_widget_queue_allocate(gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(_scroll)));
   if (gtk_adjustment_get_page_size(_adjustment) <= 0
       || std::ranges::any_of(_rows, [](const auto &pair) {
            // A hidden row (an empty service message) has no height and never gets one.
