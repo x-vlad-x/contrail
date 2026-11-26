@@ -2454,7 +2454,9 @@ void ChatView::refreshSendButton() {
   const auto empty = gtk_text_buffer_get_char_count(gtk_text_view_get_buffer(GTK_TEXT_VIEW(_input))) == 0;
   // Messages to forward go without a comment too.
   const auto forward = !_editing && forwarding();
-  gtk_widget_set_sensitive(_sendButton, (!empty || forward) && !_editPending);
+  const auto item = _editing ? find(_editing) : nullptr;
+  const auto caption = item && item->data->content_->get_id() != api::messageText::ID && MessageTextOf(*item->data);
+  gtk_widget_set_sensitive(_sendButton, (!empty || forward || caption) && !_editPending);
   if (_recordBar) _recordBar->setFieldEmpty(empty && !forward && !_editing);
 }
 
@@ -2586,6 +2588,9 @@ void ChatView::applyEdit(const std::string &text) {
     cancelReplyOrEdit();
     return;
   }
+  const auto isText = item->data->content_->get_id() == api::messageText::ID;
+  if (isText && text.empty()) return;
+
   _editPending = true;
   refreshSendButton();
   gtk_text_view_set_editable(GTK_TEXT_VIEW(_input), FALSE);
@@ -2605,14 +2610,24 @@ void ChatView::applyEdit(const std::string &text) {
     ShowToast(error.message_);
   };
   auto function = Td::FunctionPtr();
-  if (item->data->content_->get_id() == api::messageText::ID) {
+  if (isText) {
     function = api::make_object<api::editMessageText>(
         _chat, editing, nullptr, api::make_object<api::inputMessageText>(Formatted(text), nullptr, false));
   } else {
-    function = api::make_object<api::editMessageCaption>(_chat, editing, nullptr, Formatted(text), false);
+    function = api::make_object<api::editMessageCaption>(
+        _chat, editing, nullptr, text.empty() ? nullptr : Formatted(text), false);
   }
-  _store.client().request<api::message>(std::move(function), _lifetime,
-                                        [finished](api::message &) { finished(); }, failed);
+  _store.client().request<api::message>(
+      std::move(function), _lifetime,
+      [this, finished](api::message &updated) {
+        if (const auto item = find(updated.id_); item && updated.content_ && item->data->edit_date_ <= updated.edit_date_) {
+          item->data->content_ = std::move(updated.content_);
+          item->data->edit_date_ = updated.edit_date_;
+          refreshItem(item);
+        }
+        finished();
+      },
+      failed);
 }
 
 void ChatView::send() {
@@ -2621,18 +2636,19 @@ void ChatView::send() {
   if (!known || !_store.canWrite(*known)) return;
   auto text = composerText();
   const auto first = text.find_first_not_of(" \t\r\n");
-  if (first == std::string::npos) {
+  if (first == std::string::npos) text.clear();
+  else text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+  if (_editing) {
+    applyEdit(text);
+    return;
+  }
+  if (text.empty()) {
     // Only the messages to forward.
-    if (!_editing && forwarding()) {
+    if (forwarding()) {
       sendForward();
       if (_reachedBottom) scrollToBottom();
       else reload(0);
     }
-    return;
-  }
-  text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
-  if (_editing) {
-    applyEdit(text);
     return;
   }
   // The comment goes first, then the messages to forward.

@@ -622,6 +622,20 @@ class ScenarioTransport final : public Transport {
         answer(id, MakeMessage(request.chat_id_, request.message_id_, kSelfId, kNow, text));
         break;
       }
+      case api::editMessageCaption::ID: {
+        const auto &request = static_cast<const api::editMessageCaption &>(*function);
+        const auto entry = _entries.find({request.chat_id_, request.message_id_});
+        if (entry == _entries.end() || !entry->second.sentFile) {
+          answer(id, api::make_object<api::error>(400, "Message has no editable caption"));
+          break;
+        }
+        _sentFiles.at(entry->second.sentFile).caption = request.caption_ ? request.caption_->text_ : std::string();
+        auto message = messageAt(request.chat_id_, int(request.message_id_ / kIdStep));
+        message->edit_date_ = kNow;
+        // The response also carries the edit when no separate update reaches the open chat.
+        answer(id, std::move(message));
+        break;
+      }
       case api::deleteMessages::ID: {
         auto &request = static_cast<api::deleteMessages &>(*function);
         update(api::make_object<api::updateDeleteMessages>(request.chat_id_, std::move(request.message_ids_), true, false));

@@ -1020,6 +1020,14 @@ section_media_send_attach() {
   grep -q 'Scenario: sent video .*thumbnail=1 album=1 caption=""' "$WORK/log.txt" || fail "the video in the album"
   sleep 2
   [[ $(asked 'chat media:' 'media 0') == *'[photo] ['* ]] || fail "the album isn't one row: $(asked 'chat media:' 'media 0')"
+  c 'menu 151' 1.5
+  c 'menu-do edit' 0.3
+  [[ $(asked 'attach field:' attach-field) == *'"Hello"' ]] || fail "the edit did not open the photo caption"
+  c type 0.3
+  [[ $(asked 'chat forward:' state) == *'sendable=1 '* ]] || fail "the empty caption cannot be saved"
+  c send 1
+  [[ $(state editing) == 0 ]] || fail "the caption edit did not finish"
+  [[ $(asked 'chat forward:' state) != *'["Hello"]'* ]] || fail "the caption remained on the photo"
   # Only photos: "images", and as documents one album of files.
   c "attach-files $F/small.jpg|$F/photo.png" 3
   [[ $(attach) == *'title="2 images selected"'* ]] || fail "images: $(attach)"
