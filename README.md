@@ -247,8 +247,9 @@ python3 -m unittest discover tests
 ### Measuring
 
 `tools/measure.sh snapshot` records the phone's running package, including memory, CPU time and
-wakeups. Compare the same chat and the same time after closing the window. Open Saved Messages
-for a run that leaves other chats' read state alone.
+wakeups. Compare the same chat and the same interval after closing the window. Open Saved Messages
+to preserve the read state of other chats. For a day-long background run, track anonymous memory plus
+swap, PSS and thread count separately. Check that the same process stays running with its window closed.
 
 ### Screenshots
 
