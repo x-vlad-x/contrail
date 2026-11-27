@@ -1,304 +1,354 @@
 // Remote control for testing on the phone without touching it (only with CONTRAIL_DEBUG=1):
-//   gdbus call --session --dest io.github.x_vlad_x.Contrail --object-path /io/github/x_vlad_x/Contrail/Debug
-//     --method org.gtk.Actions.Activate debug "[<'chat 0'>]" "{}"
-// Commands: testmode | login phone|code|name TEXT | chat N | open NAME | topic N | saved | back | settings | contacts | archive | about | profile | search TEXT | row TEXT |
-//           scroll-top | scroll-bottom | layout | call-preview [incoming|video] [NAME] |
-//           close | present | state | memory [low|critical] | zoom | reconnect | core-open [ID] | background on|off | check-draft | demo (fictional chats for screenshots, see gtk-ui/demo.hpp) | demo-sponsored |
-//           attach paste|files PATH|PATH|send|cancel|documents on|off|group on|off|clear-field|record-start|record-send|
-//             record-cancel|state |
-//           history-state [older|newer|end|id:ID|photo:ID|delete:ID (Saved Messages)|play:ID|speed:X|player|find:TEXT|
-//             react:ID:EMOJI (Saved Messages, demo)|reactions:ID|custom-reactions|menu:ID|location|map:ID|fix:LAT,LON,ACCURACY|live|live-update|
-//             live-start:SECONDS (Saved Messages)|live-map|live-bar|pinned|pinned-click|pinned-list|pin:ID|unpin:ID
-//             (Saved Messages)|forward:ID (Saved Messages)|forward-picker:ID|forward-state|forward-menu|trim (rows far from the screen)] |
-//           map | screenshot [call] PATH
-
+//   tools/phone.sh td-cmd 'tree'
+// Commands: tree (what is on the screen, into the log) | login phone|code|password|name TEXT | chat N | back
+//   state (of the open chat) | scroll top|bottom|PIXELS | send TEXT | type TEXT (a draft) | reply | edit TEXT | delete
+//   mem | trim | close | search TEXT | archive | list-state | list-scroll top|bottom|PIXELS | list-menu N
+//   list-do N ACTION | archive-do N ACTION (ACTION: pin, mute, read, archive, delete, delete-now without the
+//   question, saved)
+//   topic N (opens topic N of the group's topics shown) | topic-state | topic-menu N | topic-do N mute|read
+//   forward (the newest message of the open chat: the chats to choose from) | forward-pick N (row N of the chats
+//   shown) | forward-pick-topic N (of the group's topics) | forward-search TEXT | forward-enter | forward-picker
+//   (what it shows) | forward-mode names|no-names | forward-cancel | forward-menu (of the messages waiting)
+//   menu [N] (of message N, its server number; the newest without it) | pin [N] | unpin [N] (the question comes)
+//   pinned-state | pinned-bar (a tap on it) | pinned-close (its cross) | pinned-list (all of them) | pinned-list-state
+//   pinned-list-pick N | pinned-list-action (unpin all, or hide)
+//   dialog (the question shown: its texts and check box) | dialog-check 0|1 | dialog-answer RESPONSE (cancel, pin...)
+//   react KEY [N] (on message N, the newest without it: a tap on its chip, or as the menu does; KEY an emoji or
+//   custom:ID) | unreact [N] (the user's own taken back) | reacted [N] (who reacted) | react-quick [N] (a double tap)
+//   reactions-more [N] (in its menu open, the button with all of them) | reactions-state [N] (its reactions and
+//   chips, the dialogs and the menu strip open, rows built so far)
+//   menu-state (the items of the message menu open) | menu-do ACTION (as a tap on one: copy, save, delete, retry,
+//   reply, forward, edit, pin...) | media [N] (what message N shows: its media and downloads, the sizes of its bubble
+//   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
+//   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
+//   edit-last (the up arrow in the empty field)
+//   loc-picker (sending a location to the open chat) | loc-fix LAT LON [ACCURACY] (a position, as from the device)
+//   loc-service | in the picker: loc-send, loc-venue N, loc-search TEXT, loc-move LAT LON, loc-mine, loc-state |
+//   on a location's map (tap N on its message): loc-mine, loc-state, loc-stop | loc-close (the dialog shown)
+//   loc-live (the picker's live location row) | profile [CHAT_ID] (the card of the open chat) | profile-state
+//   profile-member N | profile-mute | profile-call 0|1 (1: video) | contacts | contacts-state | contacts-search TEXT | contacts-open N | about
+//   live-locations (what is shared from here) | live-update (a fix taken and sent now) | live-bar | live-bar-tap
+//   live-map (of the open chat) | on the shared map: live-state, live-share (its button), live-row N
+//   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
+//   launcher) | bg-restart (the restart without the window, if nothing keeps it, without its minute) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
+//   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
+//   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
+//   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1
+//   proxy-enable N | proxy-remove N | proxy-link URL | link URL (as a tap on it) | net-state | net-simulate none|mobile|wifi (as if the network changed)
+//   viewer-state (the photo viewer: the size shown, its zoom, textures alive) | viewer-save | viewer-close | viewer-pinch SCALE
+//   viewer-pan DX DY | viewer-double X Y | viewer-wheel DY (Ctrl+wheel; tap N on a photo opens the viewer)
+//   player-state | player-play N | player-pause | player-seek FRACTION | player-drag FRACTION | player-stop
+//   voice-state | voice-start (locked, as the keyboard) | voice-hold | voice-drag DX DY | voice-release | voice-send
+//   voice-delete (a voice message recorded from the open chat's composer)
+//   attach-paste | attach-files PATH|PATH | attach-send | attach-cancel | attach-documents on|off | attach-group on|off
+//   attach-caption TEXT | attach-remove N | attach-state (the attach dialog of the open chat) | attach-copy-image PATH
+//   attach-copy-files PATH|PATH | attach-copy-text TEXT (onto the clipboard) | attach-field (the field's text)
+//   attach-menu file|location (an item of the attach menu, as a tap on it)
+//   call-start|video USER | call-incoming|incoming-video | call-accept|hangup|mute|camera|switch-camera
+//   call-state|hide|present|speaker|camera-failed | call-route ID | call-near|lock 0|1 | call-reconnecting|established|failed
+//   call-remote-muted|remote-video-off|busy|end|rated | call-rate 1..5 | call-devices
+//   call-tone incoming|outgoing|connecting|ended|busy|stop (plays only a call tone, without calling)
 #include "debug.hpp"
 
-#include "demo.hpp"
+#include "background_debug.hpp"
 
+#include "chat_list.hpp"
+#include "chat_view.hpp"
+#include "dialogs.hpp"
+#include "forward.hpp"
+#include "live_map.hpp"
+#include "location_ui.hpp"
 #include "main_window.hpp"
-#include "map_view.hpp"
-#include "zoom_view.hpp"
-#include "core/sandbox.h"
+#include "media/audio_player.hpp"
+#include "media/voice_recorder.hpp"
+#include "voice_record_bar.hpp"
+#include "photo_viewer.hpp"
+#include "topic_list.hpp"
+#include "userpics.hpp"
 
-#include "history/history.h"
-#include "main/main_session.h"
-#include "main/main_account.h"
-#include "main/main_domain.h"
-#include "core/application.h"
-#include "window/window_session_controller.h"
-#include "window/window_controller.h"
-#include "core/core_settings.h"
-#include "mtproto/mtp_instance.h"
-#include "mtproto/mtproto_dc_options.h"
-#include "data/data_session.h"
-#include "data/data_user.h"
-#include "dialogs/dialogs_indexed_list.h"
-#include "dialogs/dialogs_main_list.h"
-#include "dialogs/dialogs_row.h"
+#include <malloc.h>
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <string>
 
 namespace Contrail {
 namespace {
 
-GtkWidget *FindWindow(const char *cssClass) {
-  GtkWidget *result = nullptr;
-  auto *list = gtk_window_list_toplevels();
-  for (auto *i = list; i; i = i->next) {
-    if (gtk_widget_get_visible(GTK_WIDGET(i->data)) && gtk_widget_has_css_class(GTK_WIDGET(i->data), cssClass)) {
-      result = GTK_WIDGET(i->data);
-    }
+std::string Describe(GtkWidget *widget) {
+  auto text = std::string();
+  const auto add = [&](const char *value) {
+    if (value && *value) text += std::string(" \"") + value + "\"";
+  };
+  if (GTK_IS_LABEL(widget)) add(gtk_label_get_text(GTK_LABEL(widget)));
+  if (GTK_IS_BUTTON(widget)) add(gtk_button_get_label(GTK_BUTTON(widget)));
+  if (ADW_IS_PREFERENCES_ROW(widget)) add(adw_preferences_row_get_title(ADW_PREFERENCES_ROW(widget)));
+  if (ADW_IS_ACTION_ROW(widget)) add(adw_action_row_get_subtitle(ADW_ACTION_ROW(widget)));
+  if (GTK_IS_EDITABLE(widget) && !ADW_IS_PASSWORD_ENTRY_ROW(widget) && !GTK_IS_PASSWORD_ENTRY(widget)) {
+    add(gtk_editable_get_text(GTK_EDITABLE(widget)));
   }
-  g_list_free(list);
-  return result;
+  return text;
 }
 
-// Open popovers (menus) are surfaces of their own: drawn over the window where the compositor shows them.
-void SnapshotPopovers(GtkWidget *root, GtkWidget *window, GtkSnapshot *snapshot) {
-  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
-    if (GTK_IS_POPOVER(child) && gtk_widget_get_mapped(child)) {
-      auto *surface = gtk_native_get_surface(GTK_NATIVE(child));
-      if (surface && GDK_IS_POPUP(surface)) {
-        double windowX = 0, windowY = 0, popoverX = 0, popoverY = 0;
-        gtk_native_get_surface_transform(GTK_NATIVE(window), &windowX, &windowY);
-        gtk_native_get_surface_transform(GTK_NATIVE(child), &popoverX, &popoverY);
-        const auto x = gdk_popup_get_position_x(GDK_POPUP(surface)) + popoverX - windowX;
-        const auto y = gdk_popup_get_position_y(GDK_POPUP(surface)) + popoverY - windowY;
-        auto *paintable = gtk_widget_paintable_new(child);
-        gtk_snapshot_save(snapshot);
-        const auto origin = GRAPHENE_POINT_INIT(float(x), float(y));
-        gtk_snapshot_translate(snapshot, &origin);
-        gdk_paintable_snapshot(paintable, snapshot, gtk_widget_get_width(child), gtk_widget_get_height(child));
-        gtk_snapshot_restore(snapshot);
-        g_object_unref(paintable);
-      }
-    }
-    SnapshotPopovers(child, window, snapshot);
+// Only what carries text, indented by depth: the structure of a window is hundreds of plain boxes.
+void Print(GtkWidget *widget, int depth, std::string &out) {
+  if (!gtk_widget_get_mapped(widget)) return;
+  if (const auto text = Describe(widget); !text.empty()) {
+    out += std::string(size_t(depth), ' ') + G_OBJECT_TYPE_NAME(widget) + text + " "
+        + std::to_string(gtk_widget_get_width(widget)) + "x" + std::to_string(gtk_widget_get_height(widget))
+        + (gtk_widget_get_sensitive(widget) ? "" : " insensitive") + "\n";
+  }
+  for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
+    Print(child, depth + 1, out);
   }
 }
 
-void SaveWindowPng(GtkWidget *window, const char *path, double scale) {
-  if (!window || !gtk_widget_get_realized(window)) {
-    g_warning("Screenshot: no window");
+// The question in front, if there is one.
+AdwAlertDialog *ShownAlert(MainWindow &window) {
+  auto *dialog = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(window.widget()));
+  return ADW_IS_ALERT_DIALOG(dialog) ? ADW_ALERT_DIALOG(dialog) : nullptr;
+}
+
+void DialogCommand(MainWindow &window, const std::string &name, const std::string &rest) {
+  auto *alert = ShownAlert(window);
+  if (!alert) {
+    g_message("dialog: none");
     return;
   }
-  const auto width = gtk_widget_get_width(window), height = gtk_widget_get_height(window);
-  // With the screen off the compositor doesn't ask for frames: lay out whatever changed since.
-  gtk_widget_allocate(window, width, height, -1, nullptr);
-  auto *paintable = gtk_widget_paintable_new(window);
-  auto *snapshot = gtk_snapshot_new();
-  gtk_snapshot_scale(snapshot, float(scale), float(scale));
-  gdk_paintable_snapshot(paintable, snapshot, width, height);
-  SnapshotPopovers(window, window, snapshot);
-  auto *node = gtk_snapshot_free_to_node(snapshot);
-  const auto bounds = GRAPHENE_RECT_INIT(0, 0, float(width * scale), float(height * scale));
-  auto *texture = gsk_renderer_render_texture(gtk_native_get_renderer(GTK_NATIVE(window)), node, &bounds);
-  g_message("Screenshot %s: %dx%d %s", path, int(width * scale), int(height * scale),
-            gdk_texture_save_to_png(texture, path) ? "saved" : "FAILED");
-  g_object_unref(texture);
-  gsk_render_node_unref(node);
-  g_object_unref(paintable);
-}
-
-GtkWidget *FindByClass(GtkWidget *root, const char *cssClass) {
-  for (auto *child = gtk_widget_get_first_child(root); child; child = gtk_widget_get_next_sibling(child)) {
-    if (gtk_widget_get_mapped(child) && gtk_widget_has_css_class(child, cssClass)) return child;
-    if (auto *found = FindByClass(child, cssClass)) return found;
+  auto *extra = adw_alert_dialog_get_extra_child(alert);
+  auto *check = GTK_IS_CHECK_BUTTON(extra) ? GTK_CHECK_BUTTON(extra) : nullptr;
+  if (name == "dialog-check") {
+    if (check) gtk_check_button_set_active(check, std::atoi(rest.c_str()) != 0);
+  } else if (name == "dialog-answer") {
+    // As a tap on the button: the answer, then the dialog closes.
+    g_signal_emit_by_name(alert, "response", rest.c_str());
+    adw_dialog_force_close(ADW_DIALOG(alert));
+  } else {
+    const auto heading = adw_alert_dialog_get_heading(alert);
+    const auto body = adw_alert_dialog_get_body(alert);
+    const auto label = check ? gtk_check_button_get_label(check) : nullptr;
+    g_message("dialog: heading=\"%s\" body=\"%s\" check=\"%s\" checked=%d", heading ? heading : "", body ? body : "",
+              label ? label : "", check ? int(gtk_check_button_get_active(check)) : -1);
   }
-  return nullptr;
 }
 
-// Activates the first visible row (AdwPreferencesRow or a list row with a label) containing |text|.
-bool ActivateRow(GtkWidget *root, const std::string &text) {
-  for (auto *c = gtk_widget_get_first_child(root); c; c = gtk_widget_get_next_sibling(c)) {
-    if (!gtk_widget_get_mapped(c)) {
-      continue;
-    }
-    if (ADW_IS_PREFERENCES_ROW(c)) {
-      const auto *title = adw_preferences_row_get_title(ADW_PREFERENCES_ROW(c));
-      if (title && std::string(title).find(text) != std::string::npos) {
-        if (ADW_IS_ACTION_ROW(c) || ADW_IS_BUTTON_ROW(c)) {
-          g_signal_emit_by_name(c, "activated");
-        } else {
-          gtk_widget_activate(c);
-        }
-        return true;
-      }
-    }
-    if (ActivateRow(c, text)) {
-      return true;
-    }
+// "N ACTION" for a row of a list.
+void ListAction(ChatList *list, const std::string &rest) {
+  const auto gap = rest.find(' ');
+  if (list && gap != std::string::npos) list->debugAction(std::atoi(rest.c_str()), rest.substr(gap + 1));
+}
+
+void Run(MainWindow &window, const std::string &command) {
+  const auto space = command.find(' ');
+  const auto name = command.substr(0, space);
+  const auto rest = space == std::string::npos ? std::string() : command.substr(space + 1);
+  if (RunBackgroundCommand(window, name, rest)) return;
+  // A call goes on without the window.
+  if (name.starts_with("call-")) {
+    window.debugCall(name.substr(5), rest);
+    return;
   }
-  return false;
-}
-
-void Run(MainWindow &w, const std::string &cmdline) {
-  g_message("Debug command: %s", cmdline.c_str());
-  const auto space = cmdline.find(' ');
-  const auto cmd = cmdline.substr(0, space);
-  const auto arg = (space == std::string::npos) ? std::string() : cmdline.substr(space + 1);
-  if (cmd == "chat") {
-    w.debugOpenChat(std::atoi(arg.c_str()));
-  } else if (cmd == "topic") {
-    w.debugOpenTopic(std::atoi(arg.c_str()));
-  } else if (cmd == "open") {
-    // A chat of the main list by (a part of) its name.
-    if (const auto session = w.session()) {
-      for (const auto &row : session->data().chatsList()->indexed()->all()) {
-        if (const auto history = row->history(); history && history->peer->name().contains(Q(arg.c_str()))) {
-          w.openHistory(history);
-          break;
-        }
+  // Without its window (the app in the background) only what needs none.
+  if (!window.widget() && name != "mem" && name != "mem-arenas" && name != "trim") {
+    g_message("debug: no window for %s", command.c_str());
+    return;
+  }
+  if (name == "mem") {
+    // What malloc holds: given out and still in use (tcache included), or freed and kept by the process. The top
+    // is the main arena's only.
+    const auto info = mallinfo2();
+    g_message("mem: in use %.1f MiB (arenas %.1f, mmap %.1f), free in the arenas %.1f MiB, releasable top %.1f MiB, "
+              "avatars %.1f MiB",
+              (info.uordblks + info.hblkhd) / 1048576., info.uordblks / 1048576., info.hblkhd / 1048576.,
+              info.fordblks / 1048576., info.keepcost / 1048576., AvatarCacheBytes() / 1048576.);
+  } else if (name == "mem-arenas") {
+    // Each malloc arena: what it took from the system and how much of it is free. Arena 0 is the main thread's
+    // (GTK and the interface), the others TDLib's threads and the decoders.
+    char *xml = nullptr;
+    size_t size = 0;
+    if (auto *stream = open_memstream(&xml, &size)) {
+      malloc_info(0, stream);
+      std::fclose(stream);
+      const auto text = std::string(xml, size);
+      std::free(xml);
+      const auto value = [&](std::size_t from, std::size_t to, const std::string &tag) {
+        const auto at = text.find(tag, from);
+        if (at == std::string::npos || at > to) return 0.;
+        const auto quote = text.find("size=\"", at);
+        return (quote == std::string::npos || quote > to) ? 0. : std::atof(text.c_str() + quote + 6) / 1048576.;
+      };
+      auto line = std::string("mem-arenas:");
+      for (auto at = text.find("<heap nr="); at != std::string::npos;) {
+        const auto next = text.find("<heap nr=", at + 1);
+        const auto end = (next == std::string::npos) ? text.size() : next;
+        const auto system = value(at, end, "<system type=\"current\"");
+        const auto free = value(at, end, "<total type=\"fast\"") + value(at, end, "<total type=\"rest\"");
+        char part[96];
+        std::snprintf(part, sizeof(part), " [%d] %.1f/%.1f", std::atoi(text.c_str() + at + 10), system - free, system);
+        line += part;
+        at = next;
       }
+      g_message("%s MiB used/taken", line.c_str());
     }
-  } else if (cmd == "testmode") {
-    // Telegram's test servers for a new account, as the "testmode" code on Telegram Desktop's intro.
-    auto &domain = Core::App().domain();
-    if (domain.started() && domain.accounts().size() == 1 && !domain.active().sessionExists()
-        && domain.active().mtp().environment() == MTP::Environment::Production) {
-      domain.addActivated(MTP::Environment::Test);
+  } else if (name == "trim") {
+    malloc_trim(0);
+    g_message("trim: done");
+  } else if (name == "close") {
+    // As the close button does: the window goes first, the program quits after it.
+    gtk_window_close(GTK_WINDOW(window.widget()));
+  } else if (name == "tree") {
+    auto out = std::string();
+    Print(window.widget(), 0, out);
+    g_message("tree\n%s", out.c_str());
+  } else if (name == "chat") {
+    window.debugOpenChat(std::atoi(rest.c_str()));
+  } else if (name == "back") {
+    window.debugBack();
+  } else if (name == "search") {
+    if (auto *list = window.chatList()) list->startSearch(rest);
+  } else if (name == "archive") {
+    window.openArchive();
+  } else if (name == "list-state") {
+    if (auto *list = window.chatList()) list->debugState();
+  } else if (name == "list-scroll") {
+    if (auto *list = window.chatList()) list->debugScroll(rest);
+  } else if (name == "list-menu") {
+    if (auto *list = window.chatList()) list->debugMenu(std::atoi(rest.c_str()));
+  } else if (name == "list-do") {
+    ListAction(window.chatList(), rest);
+  } else if (name == "archive-do") {
+    ListAction(window.chatList(true), rest);
+  } else if (name == "topic") {
+    window.debugOpenTopic(std::atoi(rest.c_str()));
+  } else if (name == "topic-state") {
+    if (auto *topics = window.topicList()) topics->debugState();
+  } else if (name == "topic-menu") {
+    if (auto *topics = window.topicList()) topics->debugMenu(std::atoi(rest.c_str()));
+  } else if (name == "topic-do") {
+    const auto gap = rest.find(' ');
+    if (auto *topics = window.topicList(); topics && gap != std::string::npos) {
+      topics->debugAction(std::atoi(rest.c_str()), rest.substr(gap + 1));
     }
-  } else if (cmd == "login") {
-    const auto value = Q(arg.c_str());
-    const auto space = value.indexOf(' ');
-    w.debugLogin(value.left(space), space < 0 ? QString() : value.mid(space + 1));
-  } else if (cmd == "saved") {
-    if (const auto session = w.session()) {
-      w.openPeer(session->user());
+  } else if (name == "forward" && window.chatView()) {
+    window.chatView()->debugForward();
+  } else if (name == "forward-pick" && window.forwardPicker()) {
+    window.forwardPicker()->debugPick(std::atoi(rest.c_str()), false);
+  } else if (name == "forward-pick-topic" && window.forwardPicker()) {
+    window.forwardPicker()->debugPick(std::atoi(rest.c_str()), true);
+  } else if (name == "forward-search" && window.forwardPicker()) {
+    window.forwardPicker()->debugSearch(rest);
+  } else if (name == "forward-enter" && window.forwardPicker()) {
+    window.forwardPicker()->debugEnter();
+  } else if (name == "forward-picker") {
+    if (auto *picker = window.forwardPicker()) picker->debugState();
+    else g_message("forward picker: none");
+  } else if (name == "forward-mode" && window.chatView()) {
+    window.chatView()->debugForwardMode(rest != "no-names");
+  } else if (name == "forward-cancel" && window.chatView()) {
+    window.chatView()->debugForwardCancel();
+  } else if (name == "forward-menu" && window.chatView()) {
+    window.chatView()->debugForwardMenu();
+  } else if (name == "menu" && window.chatView()) {
+    window.chatView()->debugMessageMenu(std::atoll(rest.c_str()));
+  } else if ((name == "pin" || name == "unpin") && window.chatView()) {
+    window.chatView()->debugPin(std::atoll(rest.c_str()), name == "pin");
+  } else if (name == "pinned-state" && window.chatView()) {
+    window.chatView()->debugPinnedBar("state");
+  } else if (name == "pinned-bar" && window.chatView()) {
+    window.chatView()->debugPinnedBar("tap");
+  } else if (name == "pinned-close" && window.chatView()) {
+    window.chatView()->debugPinnedBar("close");
+  } else if (name == "pinned-list" && window.chatView()) {
+    window.chatView()->debugPinnedBar("list");
+  } else if (name == "pinned-list-state" && window.chatView()) {
+    window.chatView()->debugPinnedList("state");
+  } else if (name == "pinned-list-pick" && window.chatView()) {
+    window.chatView()->debugPinnedList("pick " + rest);
+  } else if (name == "pinned-list-action" && window.chatView()) {
+    window.chatView()->debugPinnedList("action");
+  } else if (name == "react" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    window.chatView()->debugReact(rest.substr(0, gap),
+                                  gap == std::string::npos ? 0 : std::atoll(rest.c_str() + gap + 1));
+  } else if (name == "unreact" && window.chatView()) {
+    window.chatView()->debugUnreact(std::atoll(rest.c_str()));
+  } else if (name == "reacted" && window.chatView()) {
+    window.chatView()->debugReacted(std::atoll(rest.c_str()));
+  } else if (name == "react-quick" && window.chatView()) {
+    window.chatView()->debugReactQuick(std::atoll(rest.c_str()));
+  } else if (name == "reactions-more" && window.chatView()) {
+    window.chatView()->debugReactionsMore(std::atoll(rest.c_str()));
+  } else if (name == "reactions-state" && window.chatView()) {
+    window.chatView()->debugReactionsState(std::atoll(rest.c_str()));
+  } else if (name == "menu-state" && window.chatView()) {
+    window.chatView()->debugMenuState();
+  } else if (name == "menu-do" && window.chatView()) {
+    window.chatView()->debugMenuDo(rest);
+  } else if (name == "media" && window.chatView()) {
+    window.chatView()->debugMedia(std::atoll(rest.c_str()));
+  } else if (name == "tap" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    window.chatView()->debugTap(std::atoll(rest.c_str()), gap == std::string::npos ? 0 : std::atoi(rest.c_str() + gap + 1));
+  } else if (name == "tap-text" && window.chatView()) {
+    const auto gap = rest.find(' ');
+    if (gap != std::string::npos) window.chatView()->debugTapText(std::atoll(rest.c_str()), rest.substr(gap + 1));
+  } else if (name == "sponsored" && window.chatView()) {
+    window.chatView()->debugSponsored();
+  } else if (name == "dialog" || name == "dialog-check" || name == "dialog-answer") {
+    DialogCommand(window, name, rest);
+  } else if (name == "state" && window.chatView()) {
+    window.chatView()->debugState();
+  } else if (name == "scroll" && window.chatView()) {
+    window.chatView()->debugScroll(rest);
+  } else if (name == "send" && window.chatView()) {
+    window.chatView()->debugSend(rest);
+  } else if (name == "type" && window.chatView()) {
+    window.chatView()->debugType(rest);
+  } else if (name == "reply" && window.chatView()) {
+    window.chatView()->debugReply();
+  } else if (name == "edit" && window.chatView()) {
+    window.chatView()->debugEdit(rest);
+  } else if (name == "edit-last" && window.chatView()) {
+    window.chatView()->debugEditLast();
+  } else if (name == "delete" && window.chatView()) {
+    window.chatView()->debugDelete();
+  } else if (name == "loc-picker" && window.chatView()) {
+    window.chatView()->chooseLocation();
+  } else if (LocationDebugCommand(window, name, rest)) {
+  } else if (ProfileDebugCommand(window, name, rest)) {
+  } else if (LiveMapDebugCommand(window, name, rest)) {
+  } else if (name.starts_with("attach-") && window.chatView()) {
+    window.chatView()->debugAttach(name.substr(7) + (rest.empty() ? "" : " " + rest));
+  } else if (name.starts_with("voice-")) {
+    if (window.chatView() && window.chatView()->recordBar()) {
+      window.chatView()->recordBar()->debug(name.substr(6) + (rest.empty() ? "" : " " + rest));
+    } else if (const auto recorder = window.recorder(); recorder && name == "voice-state") {
+      g_message("voice: no chat %s", recorder->debugState().c_str());
     }
-  } else if (cmd == "back") {
-    w.debugBack();
-  } else if (cmd == "settings") {
-    w.openSettings();
-  } else if (cmd == "contacts") {
-    w.openContacts();
-  } else if (cmd == "archive") {
-    w.openArchive();
-  } else if (cmd == "about") {
-    w.showAbout();
-  } else if (cmd == "profile") {
-    if (const auto history = w.currentHistory()) {
-      w.openProfile(history->peer);
-    }
-  } else if (cmd == "search") {
-    w.searchChats(Q(arg.c_str()));
-  } else if (cmd == "row") {
-    if (w.widget()) ActivateRow(w.widget(), arg);
-  } else if (cmd == "scroll-top" || cmd == "scroll-bottom") {
-    w.debugScroll(cmd == "scroll-top");
-  } else if (cmd == "call-preview") {
-    // call-preview [incoming|video|outgoing] [name]
-    const auto value = Q(arg.c_str());
-    const auto mode = value.section(' ', 0, 0);
-    const auto name = value.section(' ', 1);
-    w.debugCallPreview(mode == u"incoming"_q, mode == u"video"_q, name.isEmpty() ? u"Contrail"_q : name);
-  } else if (cmd == "demo") {
-    StartDemo();
-  } else if (cmd == "demo-sponsored") {
-    AddDemoSponsored();
-  } else if (cmd == "map") {
-    // The open map (a location's, the location picker's): where it is, its zoom and rotation.
-#ifdef CONTRAIL_SHUMATE
-    if (auto *map = w.widget() ? FindByClass(w.widget(), "contrail-map") : nullptr) {
-      auto lat = 0., lon = 0.;
-      MapCenter(map, &lat, &lon);
-      g_message("Map: center=%.6f,%.6f zoom=%.3f rotation=%.3f", lat, lon, MapZoom(map), MapRotation(map));
-    } else {
-      g_message("Map: none");
-    }
-#endif  // CONTRAIL_SHUMATE
-  } else if (cmd == "screenshot") {
-    // screenshot [call] PATH: the window drawn by GTK itself, 3x, nothing of the phone around it.
-    const auto value = Q(arg.c_str());
-    const auto call = value.startsWith(u"call "_q);
-    if (auto *window = call ? FindWindow("call-window") : w.widget()) {
-      SaveWindowPng(window, U8(call ? value.mid(5) : value).c_str(), 3.);
-    }
-  } else if (cmd == "close") {
-    if (w.widget()) gtk_window_close(GTK_WINDOW(w.widget()));
-  } else if (cmd == "present") {
-    w.present();
-  } else if (cmd == "state") {
-    w.debugState();
-  } else if (cmd == "memory") {
-    // "memory": the system's memory as Contrail sees it; "memory low|critical": free memory as if it were short.
-    w.debugMemory(Q(arg.c_str()));
-  } else if (cmd == "core-open") {
-    // Saved Messages opened by the core, as a notification's click or a link does: "core-open [ID]".
-    const auto window = Core::App().activePrimaryWindow();
-    const auto controller = window ? window->sessionController() : nullptr;
-    if (controller) {
-      controller->showPeerHistory(controller->session().user()->id, Window::SectionShow::Way::ClearStack,
-                                  MsgId(std::atoll(arg.c_str())));
-    }
-  } else if (cmd == "reconnect") {
-    // Drops the connections as a network change would: what was being sent or uploaded is sent again.
-    if (const auto session = w.session()) session->account().mtp().restart();
-  } else if (cmd == "zoom") {
-    // The photo viewer's scale and position (history-state photo:ID opens a message's photo).
-    auto *view = ZoomViewFind(w.widget());
-    g_message("Zoom state: %s", view ? ZoomViewState(view).c_str() : "no viewer");
-  } else if (cmd == "background") {
-    Core::App().settings().setCloseBehavior(arg == "on" ? Core::Settings::CloseBehavior::RunInBackground
-                                                        : Core::Settings::CloseBehavior::Quit);
-    w.updateBackgroundMode();
-  } else if (cmd == "call-local-test") {
-    w.debugLocalCall(Q(arg.c_str()));
-  } else if (cmd == "attach") {
-    w.debugAttach(Q(arg.c_str()));
-  } else if (cmd == "check-draft") {
-    w.debugCheckDraft();
-  } else if (cmd == "history-state") {
-    w.debugHistory(Q(arg.c_str()));
-  } else if (cmd == "check-core-event") {
-    Core::Sandbox::Instance().postponeCall([] {
-      g_message("GTK/core event regression: postponed update completed");
-    });
-  } else if (cmd == "layout" && w.widget()) {
-    const auto width = gtk_widget_get_width(w.widget());
-    const auto check = [&](const auto &self, GtkWidget *widget) -> void {
-      if (!gtk_widget_get_mapped(widget)) return;
-      int minimum = 0, natural = 0;
-      gtk_widget_measure(widget, GTK_ORIENTATION_HORIZONTAL, -1, &minimum, &natural, nullptr, nullptr);
-      // Header bars extend one pixel beyond each edge to draw their separators.
-      if (minimum > width || gtk_widget_get_width(widget) > width + 2) {
-        g_warning("Layout overflow: %s allocated=%d min=%d natural=%d window=%d",
-            G_OBJECT_TYPE_NAME(widget), gtk_widget_get_width(widget), minimum, natural, width);
-      }
-      // A bubble shorter than its content for the width it got: the text runs out of it. Its bin
-      // gives it its whole size, padding included (the bubble's own size excludes the padding).
-      if (gtk_widget_has_css_class(widget, "bubble")) {
-        auto *bin = gtk_widget_get_parent(widget);
-        auto height = 0;
-        gtk_widget_measure(widget, GTK_ORIENTATION_VERTICAL, gtk_widget_get_width(bin), &height, nullptr, nullptr, nullptr);
-        if (height > gtk_widget_get_height(bin)) {
-          g_warning("Layout overflow: bubble %dx%d needs height %d", gtk_widget_get_width(bin), gtk_widget_get_height(bin), height);
-        }
-      }
-      for (auto *child = gtk_widget_get_first_child(widget); child; child = gtk_widget_get_next_sibling(child)) {
-        self(self, child);
-      }
-    };
-    g_message("Layout: %dx%d, chat=%s", width, gtk_widget_get_height(w.widget()),
-        w.currentHistory() ? "open" : "closed");
-    check(check, w.widget());
+  } else if (name == "player-state") {
+    if (const auto player = window.player()) g_message("player: %s", player->debugState().c_str());
+  } else if (name.starts_with("player-") && window.chatView()) {
+    window.chatView()->debugPlayer(name.substr(7) + (rest.empty() ? "" : " " + rest));
+  } else if (name.starts_with("viewer-")) {
+    PhotoViewerDebug(window, name.substr(7) + (rest.empty() ? "" : " " + rest));
+  } else if (name == "login") {
+    const auto gap = rest.find(' ');
+    window.debugLogin(rest.substr(0, gap), gap == std::string::npos ? std::string() : rest.substr(gap + 1));
+  } else {
+    g_message("unknown debug command: %s", command.c_str());
   }
 }
 
 }  // namespace
 
-void RegisterDebugActions(MainWindow &window) {
-  auto *group = g_simple_action_group_new();
+void RegisterDebugActions(GApplication *application, MainWindow &window) {
   auto *action = g_simple_action_new("debug", G_VARIANT_TYPE_STRING);
-  Connect<void(GSimpleAction *, GVariant *)>(action, "activate", [&window](GSimpleAction *, GVariant *param) {
-    Run(window, g_variant_get_string(param, nullptr));
-  });
-  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
+  g_signal_connect(action, "activate", G_CALLBACK(+[](GSimpleAction *, GVariant *parameter, gpointer data) {
+    Run(*static_cast<MainWindow *>(data), g_variant_get_string(parameter, nullptr));
+  }), &window);
+  g_action_map_add_action(G_ACTION_MAP(application), G_ACTION(action));
   g_object_unref(action);
-  if (auto *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr)) {
-    g_dbus_connection_export_action_group(bus, "/io/github/x_vlad_x/Contrail/Debug", G_ACTION_GROUP(group), nullptr);
-  }
 }
 
 }  // namespace Contrail

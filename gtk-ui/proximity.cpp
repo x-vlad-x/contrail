@@ -1,4 +1,5 @@
 #include "proximity.hpp"
+#include "app.hpp"
 
 namespace Contrail {
 namespace {
@@ -12,11 +13,6 @@ bool Property(GDBusProxy *proxy, const char *name) {
   const auto result = g_variant_is_of_type(value, G_VARIANT_TYPE_BOOLEAN) && g_variant_get_boolean(value);
   g_variant_unref(value);
   return result;
-}
-
-GDBusConnection *SessionBus() {
-  static auto *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
-  return bus;
 }
 
 bool Cancelled(GError *error) {
@@ -130,48 +126,45 @@ void Proximity::debugSetNear(bool near) {
   if (_enabled) setNear(near);
 }
 
-IdleInhibitor::IdleInhibitor() : _cancellable(g_cancellable_new()) {
+IdleInhibitor::IdleInhibitor() : _bus(g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr)) {
 }
 
 IdleInhibitor::~IdleInhibitor() {
-  g_cancellable_cancel(_cancellable);
+  _alive.reset();
   set(false);
-  g_object_unref(_cancellable);
+  if (_bus) g_object_unref(_bus);
 }
 
 void IdleInhibitor::set(bool inhibit) {
-  if (_requested == inhibit || !SessionBus()) return;
+  if (_requested == inhibit || !_bus) return;
   _requested = inhibit;
-  if (!inhibit) {
-    uninhibit();
-    return;
-  }
+  if (!inhibit) { uninhibit(); return; }
   if (_pending || _cookie) return;
   _pending = true;
-  // Flags: 4 suspending, 8 the session becoming idle (which blanks and then locks the screen).
-  g_dbus_connection_call(SessionBus(), "org.gnome.SessionManager", "/org/gnome/SessionManager",
-      "org.gnome.SessionManager", "Inhibit", g_variant_new("(susu)", "io.github.x_vlad_x.Contrail", 0u,
-      "A call is in progress", 4u | 8u), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
+  using Pending = std::pair<IdleInhibitor *, std::weak_ptr<char>>;
+  // A late Inhibit reply also owns a cookie: never cancel and lose it while the app stays connected to the bus.
+  g_dbus_connection_call(_bus, "org.gnome.SessionManager", "/org/gnome/SessionManager",
+      "org.gnome.SessionManager", "Inhibit", g_variant_new("(susu)", kAppId, 0u,
+      "A call is in progress", 4u | 8u), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
-        GError *error = nullptr;
-        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
-        if (Cancelled(error)) {
-          g_error_free(error);
-          return;
-        }
-        g_clear_error(&error);
-        const auto self = static_cast<IdleInhibitor *>(data);
-        self->_pending = false;
-        if (!reply) return;
-        g_variant_get(reply, "(u)", &self->_cookie);
-        g_variant_unref(reply);
-        if (!self->_requested) self->uninhibit();
-      }, this);
+        const auto pending = std::unique_ptr<Pending>(static_cast<Pending *>(data));
+        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, nullptr);
+        guint cookie = 0;
+        if (reply) { g_variant_get(reply, "(u)", &cookie); g_variant_unref(reply); }
+        if (!pending->second.expired()) {
+          auto *self = pending->first;
+          self->_pending = false;
+          self->_cookie = cookie;
+          if (!self->_requested) self->uninhibit();
+        } else if (cookie) g_dbus_connection_call(G_DBUS_CONNECTION(source), "org.gnome.SessionManager",
+            "/org/gnome/SessionManager", "org.gnome.SessionManager", "Uninhibit", g_variant_new("(u)", cookie),
+            nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+      }, new Pending(this, _alive));
 }
 
 void IdleInhibitor::uninhibit() {
   if (!_cookie) return;
-  g_dbus_connection_call(SessionBus(), "org.gnome.SessionManager", "/org/gnome/SessionManager",
+  g_dbus_connection_call(_bus, "org.gnome.SessionManager", "/org/gnome/SessionManager",
       "org.gnome.SessionManager", "Uninhibit", g_variant_new("(u)", _cookie), nullptr, G_DBUS_CALL_FLAGS_NONE, -1,
       nullptr, nullptr, nullptr);
   _cookie = 0;

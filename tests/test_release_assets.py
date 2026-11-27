@@ -1,7 +1,6 @@
 """Release metadata and tooling: consistent versions and names, source classification, archive splitting."""
 from pathlib import Path
 import hashlib
-import json
 import re
 import shutil
 import subprocess
@@ -26,7 +25,6 @@ class MetadataTest(unittest.TestCase):
         self.assertRegex(VERSION, r"^\d+\.\d+\.\d+(-(preview|rc)\d+)?$")
         self.assertEqual(package.deb_version("0.1.0-preview1"), "0.1.0~preview1-1")
         self.assertEqual(package.deb_version("0.1.0"), "0.1.0-1")
-        self.assertEqual(package.rpm_version("0.1.0-preview1"), "0.1.0~preview1")
         # "~" sorts before anything: a preview is older than the final release.
         if not shutil.which("dpkg"):
             self.skipTest("dpkg is not installed")
@@ -65,14 +63,21 @@ class MetadataTest(unittest.TestCase):
 
     def test_package_names(self):
         self.assertEqual(package.package_file("deb", "aarch64", "0.1.0"), "contrail_0.1.0-1_arm64.deb")
-        self.assertEqual(package.package_file("rpm", "x86_64", "0.1.0-rc1"), "contrail-0.1.0-rc1-1.x86_64.rpm")
-        self.assertEqual(package.package_file("appimage", "aarch64", "0.1.0"), "Contrail-0.1.0-aarch64.AppImage")
-        self.assertEqual(package.package_file("flatpak", "x86_64", "0.1.0"), "Contrail-0.1.0-x86_64.flatpak")
+        self.assertEqual(package.package_file("deb", "aarch64", "0.1.0-rc1"), "contrail_0.1.0-rc1-1_arm64.deb")
+        self.assertEqual(package.package_file("flatpak", "aarch64", "0.1.0"), "Contrail-0.1.0-aarch64.flatpak")
+
+    def test_arm64_deb_and_flatpak_only(self):
+        self.assertEqual(set(package.ARCHES), {"aarch64"})
+        self.assertEqual(set(package.FORMATS), {"deb", "flatpak"})
+        for kind in ("rpm", "appimage"):
+            with self.assertRaises(ValueError):
+                package.package_file(kind, "aarch64", "0.1.0")
+        self.assertEqual(set(prepare_release.TARGETS), {"arm64"})
 
     def test_host_libraries_are_the_base_system(self):
         names = {line.split()[0] for line in (ROOT / "packaging/bundle-host-libraries.txt").read_text().splitlines()
                  if line.strip() and not line.startswith("#")}
-        for name in ("libc.so.6", "libstdc++.so.6", "libEGL.so.1", "ld-linux-aarch64.so.1", "ld-linux-x86-64.so.2"):
+        for name in ("libc.so.6", "libstdc++.so.6", "libEGL.so.1", "ld-linux-aarch64.so.1"):
             self.assertIn(name, names)
         # GTK, Qt and FFmpeg travel with the packages.
         for name in ("libgtk-4.so.1", "libadwaita-1.so.0", "libQt6Core.so.6", "libglib-2.0.so.0"):
@@ -165,17 +170,6 @@ class SplitTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256(joined).hexdigest(), writer.hash.hexdigest())
             with tarfile.open(fileobj=_io.BytesIO(joined)) as archive:
                 self.assertEqual(archive.extractfile("a/b.bin").read(), data)
-
-
-class AppImageToolsTest(unittest.TestCase):
-    def test_tools_are_pinned(self):
-        tools = json.loads((ROOT / "packaging/appimage-tools.json").read_text())
-        runtime = json.loads((ROOT / "packaging/runtime-sources.json").read_text())
-        for name, tool in tools.items():
-            self.assertRegex(tool["sha256"], r"^[0-9a-f]{64}$", name)
-            self.assertTrue(tool["url"].startswith("https://"), name)
-        for arch in package.ARCHES:
-            self.assertEqual(tools[f"runtime-{arch}"]["source_commit"], runtime["runtime_commit"])
 
 
 if __name__ == "__main__":

@@ -1,120 +1,139 @@
 #pragma once
 
 #include "app.hpp"
+#include "forward.hpp"
 #include "memory_pressure.hpp"
+#include "td/client.hpp"
+#include "td/store.hpp"
 
-#include "base/timer.h"
-#include "base/weak_ptr.h"
-
-#include <rpl/lifetime.h>
-
-class History;
-class PeerData;
-class PhotoData;
-
-namespace Main {
-class Session;
-class Account;
-} // namespace Main
-
-namespace Data {
-class Forum;
-class Thread;
-} // namespace Data
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
 
 namespace Contrail {
 
-class LoginView;
+class AudioPlayer;
+class VoiceRecorder;
+class CallView;
 class ChatList;
 class ChatView;
-class SettingsView;
-class CallView;
-class TrayIcon;
+class LoginView;
 class MemoryGuard;
+class NetworkWatch;
+class Notifier;
+class ProxyView;
+class SettingsView;
+class TrayIcon;
+class TopicList;
 
-// The application's window. When it is closed and the app goes on in the background, the whole GTK
-// interface is released (the chats, the lists, the dialogs, their textures and GPU memory) and built
-// again from the session when the window is opened: only what is needed to come back to the same
-// place is kept, apart from GTK objects and messages (UiState). The session, updates, notifications,
-// links, downloads, calls and a voice message being recorded go on without it.
-class MainWindow final : public base::has_weak_ptr {
-public:
-  MainWindow();
+// The application's window: a spinner while TDLib starts, the login, then the chats.
+class MainWindow final {
+ public:
+  explicit MainWindow(GtkApplication *application);
   ~MainWindow();
 
-  // Null while the interface is released (the window is closed, the app runs in the background).
-  [[nodiscard]] GtkWidget *widget() const { return _window; }
-  [[nodiscard]] bool isActive() const;
-  // Opens the window, building the interface again if it was released.
+  [[nodiscard]] GtkWidget *widget() const { return _window; }  // Null while the app runs without its window.
   void present();
-  // Closing the window, the tray icon and launching the app again all come here and to present().
-  void closeToBackground();
-  void showToast(const QString &text);
+  void showToast(const std::string &text);
 
-  // Opens a chat in the content pane (on a phone: pushes it over the chat list). A group with
-  // topics opens its list of topics in the sidebar instead; a topic opens as a chat of its own.
-  void openHistory(not_null<History *> history, MsgId showAt = 0);
-  void openThread(not_null<Data::Thread *> thread, MsgId showAt = 0);
-  void openPeer(not_null<PeerData *> peer);
-  void openForum(not_null<History *> history);
-  void closeForum(Data::Forum *forum);
-  [[nodiscard]] History *currentHistory() const;
-  [[nodiscard]] Data::Thread *currentThread() const;
+  // Follows a new TDLib client: a lost session starts one with an empty database.
+  void attach(Td::Session &session, const std::string &language);
+  // Lets go of the client before it is destroyed.
+  void detach();
+  // Telegram ended the session: says why instead of just showing the login again.
+  void showSessionLost();
+
+  // On a phone the chat goes over the list. `showAt`: a message to show instead of the last place. A group with
+  // topics opens its list of topics instead, or the topic of `showAt`.
+  void openChat(Td::ChatId chat, std::int64_t showAt = 0);
+  // A topic is a chat of its own; its group's topics go in the sidebar, so that Back on a phone leads to them.
+  void openTopic(Td::ChatId chat, std::int32_t topic, std::int64_t showAt = 0);
+  // The list of topics over the chat list.
+  void openForum(Td::ChatId chat);
+  // The group stopped being a forum: its topics and an open topic of it go.
+  void closeForum(Td::ChatId chat);
   void closeChat();
-  void openSettings();
   void openArchive();
-  void openContacts();
-  void openProfile(not_null<PeerData *> peer);
-  void openPhoto(not_null<PhotoData *> photo, FullMsgId origin);
-  void showAbout();
-  void confirmDeleteChat(not_null<PeerData *> peer);
-  void searchChats(const QString &query);
-  void sendBotCommand(const QString &command);
-  void startCall(not_null<PeerData *> peer, bool video = false);
-  void setCallStatus(const QString &text, bool active);
-  // Closing the window either quits or leaves the app running, with an icon in the notification area.
-  void updateBackgroundMode();
-  [[nodiscard]] Main::Session *session() const { return _session; }
+  // A hashtag tapped in a message: the chat list searches for it (on a phone it comes over the chat).
+  void searchChats(const std::string &query);
+  [[nodiscard]] Td::ChatId currentChat() const;
+  [[nodiscard]] std::int32_t currentTopic() const;  // 0 unless a topic is open.
+  [[nodiscard]] TopicList *topicList() const { return _topics.get(); }
+  [[nodiscard]] Td::Store *store() const { return _store.get(); }
+  // Voice messages and music: one player for the account, made with the first bar of one. Null without a store.
+  [[nodiscard]] AudioPlayer *player();
+  // The voice message being recorded: it goes on with its chat closed. Null without a store.
+  [[nodiscard]] VoiceRecorder *recorder();
+  [[nodiscard]] ChatView *chatView() const { return _chat.get(); }
+  [[nodiscard]] ChatList *chatList(bool archive = false) const { return archive ? _archive.get() : _chatList.get(); }
 
-  // For the debug actions.
+  // Messages to forward: the chats to choose from, then they wait in the chosen chat (or topic) until sent there.
+  void showForwardPicker(ForwardDraft draft);
+  void forwardPickerClosed();
+  [[nodiscard]] ForwardPicker *forwardPicker() const { return _forwardPicker.get(); }
+  // Null when nothing waits there. An empty draft takes away what waited.
+  [[nodiscard]] const ForwardDraft *forwardDraft(Td::ChatId chat, std::int32_t topic) const;
+  void setForwardDraft(Td::ChatId chat, std::int32_t topic, ForwardDraft draft);
+
+  // Section calls: the call survives navigation between chats.
+  void startCall(Td::UserId user, bool video = false);
+  void setCallStatus(const std::string &text);
+  void debugCall(const std::string &action, const std::string &argument);
+  // The chat's card, the contacts in the sidebar, "About" (dialogs.cpp).
+  void openProfile(Td::ChatId chat);
+  void openContacts();
+  void showAbout();
+  // A page of the sidebar by its tag, if it is there.
+  [[nodiscard]] AdwNavigationPage *sidebarPage(const char *tag) const;
+  // Settings and the app in the background (settings.cpp, tray.cpp, memory_guard.cpp).
+  void openSettings();
+  [[nodiscard]] SettingsView *settingsView() const { return _settings.get(); }
+  // The proxies, over the settings.
+  void openProxy();
+  [[nodiscard]] ProxyView *proxyView() const { return _proxy.get(); }
+  // "Run in the background" was turned on or off: the tray icon, and whether closing the window quits.
+  void backgroundChanged();
+  // The window goes and its interface with it; TDLib, notifications and calls stay. Opening the app builds it
+  // again on the same chat. While signing in the window is only hidden: what was typed there would be lost.
+  void closeToBackground();
+  // This process was started again by the one before it (RestartWithoutWindow): no window until it is opened.
+  // `chat`: the place it comes back to, as SavedChat writes it.
+  void startWithoutWindow(const std::string &chat);
+  // bg-restart: the check of the restart in the background, at once. "bg: restart=..." into the log.
+  void debugRestart();
+  [[nodiscard]] const char *restartBlocker() const;  // Null when nothing keeps the process from starting again.
+  [[nodiscard]] bool isActive() const;
+  [[nodiscard]] TrayIcon *tray() const { return _tray.get(); }
+  [[nodiscard]] Notifier *notifier() const { return _notifier.get(); }
+  [[nodiscard]] NetworkWatch *networkWatch() const { return _network.get(); }
+  [[nodiscard]] MemoryGuard &memoryGuard() const { return *_memoryGuard; }
+  void releaseMemory(MemoryLevel level);
+
+  void debugLogin(const std::string &step, const std::string &value);
   void debugOpenChat(int index);
   void debugOpenTopic(int index);
   void debugBack();
-  void debugScroll(bool top);
-  void debugCallPreview(bool incoming, bool video = false, const QString &name = u"Contrail"_q);
-  void debugLocalCall(const QString &action);
-  void debugCheckDraft();
-  void debugLogin(const QString &step, const QString &value);
-  void debugHistory(const QString &action);
-  void debugAttach(const QString &action);
-  void debugState();
-  void debugMemory(const QString &action);
 
-private:
-  // Where the interface was, to come back there: a chat or a topic and the scroll position in it.
-  struct UiState {
-    PeerId peer = 0;
-    MsgId topicRootId = 0;
-    MsgId showAt = 0;       // A message to show (a notification, a link): wins over the scroll position.
-    MsgId anchor = 0;       // The message at the top of the screen, none at the bottom of the chat.
-    double anchorY = 0.;    // Where it was on the screen.
-  };
-
+ private:
+  void authorization(Td::api::AuthorizationState &state);
+  void stringsReady();
+  void showLogin(Td::api::AuthorizationState &state);
+  void showChats();
+  void buildChats();
+  void clearChats();
+  void setCurrent(Td::ChatId chat, std::int32_t topic);
+  // A new login dies within minutes if nobody confirms it on another device.
+  void warnAboutConfirmation();
+  void dropForwardPicker();
   void buildWindow();
+  void clearViews();
   void releaseWindow();
-  void restore(UiState state);
-  void showAccount(Main::Account *account);
-  void showSession(not_null<Main::Session *> session);
-  void showLogin(not_null<Main::Account *> account);
-  void clearSessionUi();
-  void setupShortcuts();
-  void followCoreWindow();
-  void openThreadAt(not_null<Data::Thread *> thread, MsgId showAt, MsgId anchor, double anchorY);
-  void endRecordingOutside(Data::Thread *thread);
-  // Short of memory: everything that isn't on the screen goes; when it's critical and the window isn't in front,
-  // the whole interface, as when the window is closed.
-  void releaseMemory(MemoryLevel level);
-  void unloadOtherChats();
+  void restoreChat();
+  void updateTray();
+  void scheduleRestart(int seconds);
+  void restartIfIdle();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
@@ -123,25 +142,55 @@ private:
   AdwNavigationView *_sidebarNav = nullptr;
   AdwNavigationPage *_contentPage = nullptr;
   GtkWidget *_placeholder = nullptr;
-  GtkWidget *_callBanner = nullptr;
-  QString _callStatus;
-  bool _callActive = false;
-  std::unique_ptr<CallView> _calls;
-  std::unique_ptr<TrayIcon> _tray;
-
-  Main::Account *_account = nullptr;
-  Main::Session *_session = nullptr;
-  std::optional<UiState> _saved;  // Set while the interface is released.
-  std::unique_ptr<LoginView> _login;
+  Td::Session *_session = nullptr;
+  std::unique_ptr<Td::Store> _store;
+  std::unique_ptr<AudioPlayer> _player;  // Goes before the store it downloads with.
+  std::unique_ptr<VoiceRecorder> _recorder;
+  std::unique_ptr<CallView> _call;
+  GtkWidget *_callBar = nullptr;
+  std::string _callStatus;
   std::unique_ptr<ChatList> _chatList;
   std::unique_ptr<ChatList> _archive;
-  std::unique_ptr<ChatList> _forum;
+  std::unique_ptr<TopicList> _topics;
   std::unique_ptr<ChatView> _chat;
+  std::unique_ptr<ForwardPicker> _forwardPicker;
+  guint _forwardPickerSource = 0;
+  std::map<std::pair<Td::ChatId, std::int32_t>, ForwardDraft> _forwardDrafts;
+  Td::Lifetime _sessionLifetime;
+  std::string _language;
+  guint _stringsTimeout = 0;
+  bool _stringsAsked = false;
+  bool _stringsReady = false;  // Pages are built with their text: nothing is shown before the strings.
+  std::unique_ptr<LoginView> _login;
+  bool _loginShown = false;  // This client went through the login: it isn't confirmed yet.
+
+  // The app in the background.
+  struct SavedChat {
+    Td::ChatId chat = 0;
+    std::int32_t topic = 0;
+    std::int64_t message = 0;  // The place on the screen (ChatView::Place).
+    double y = 0.;
+  };
+  GtkApplication *_application = nullptr;
   std::unique_ptr<SettingsView> _settings;
-  base::Timer _trimTimer;
+  std::unique_ptr<ProxyView> _proxy;
+  std::unique_ptr<TrayIcon> _tray;
+  std::unique_ptr<Notifier> _notifier;  // While signed in, with or without the window.
+  std::unique_ptr<NetworkWatch> _network;  // With every client.
   std::unique_ptr<MemoryGuard> _memoryGuard;
-  rpl::lifetime _sessionLifetime;
-  rpl::lifetime _lifetime;
+  std::optional<SavedChat> _saved;  // The chat the window had when it went.
+  Td::Lifetime _unreadLifetime;
+  int _unreadUnmuted = 0;  // Chats with unread messages that notify: the tray icon's badge.
+  bool _authorized = false;  // The chats can be shown: the window built again shows them at once.
+  bool _held = false;  // The app holds itself without a window (g_application_hold).
+  guint _restartTimer = 0;  // The process starts again without the GPU's driver once idle in the background.
+
+ public:
+  // A tg:// or t.me link given to the program (the desktop entry, another app): opened once the chats are there.
+  void openLinkWhenReady(const std::string &link);
+
+ private:
+  std::string _pendingLink;
 };
 
 }  // namespace Contrail

@@ -77,39 +77,36 @@ void ScreenLock::set(bool locked) {
   if (_changed) _changed(locked);
 }
 
-Ringer::Ringer() : _cancellable(g_cancellable_new()) {
+Ringer::Ringer() {
   _bus = SessionBus();
 }
 
 Ringer::~Ringer() {
+  _alive.reset();
   stop();
-  g_cancellable_cancel(_cancellable);
   if (_bus) g_object_unref(_bus);
-  g_object_unref(_cancellable);
 }
 
 void Ringer::start() {
+  if (_wanted) return;
   _wanted = true;
   if (!_bus || _pending || _id) return;
   _pending = true;
-  // Timeout 0: the feedback loops until it is ended.
+  using Pending = std::pair<Ringer *, std::weak_ptr<char>>;
+  // Don't cancel a TriggerFeedback already delivered to feedbackd: it may have started ringing. Even after this
+  // object goes away the reply must be consumed, so its event can be ended by the id the service returns.
   g_dbus_connection_call(_bus, kFeedbackName, kFeedbackPath, kFeedbackName, "TriggerFeedback",
       g_variant_new("(ss@a{sv}i)", kAppId, "phone-incoming-call", g_variant_new_array(G_VARIANT_TYPE("{sv}"), nullptr, 0), 0),
-      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, _cancellable,
+      G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
-        GError *error = nullptr;
-        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
-        if (!reply) {
-          const auto cancelled = g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
-          g_error_free(error);
-          if (!cancelled) static_cast<Ringer *>(data)->started(0);
-          return;
-        }
+        const auto pending = std::unique_ptr<Pending>(static_cast<Pending *>(data));
+        auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, nullptr);
         guint32 id = 0;
-        g_variant_get(reply, "(u)", &id);
-        g_variant_unref(reply);
-        static_cast<Ringer *>(data)->started(id);
-      }, this);
+        if (reply) { g_variant_get(reply, "(u)", &id); g_variant_unref(reply); }
+        if (!pending->second.expired()) pending->first->started(id);
+        else if (id) g_dbus_connection_call(G_DBUS_CONNECTION(source), kFeedbackName, kFeedbackPath, kFeedbackName,
+            "EndFeedback", g_variant_new("(u)", id), nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+      }, new Pending(this, _alive));
 }
 
 void Ringer::started(guint32 id) {

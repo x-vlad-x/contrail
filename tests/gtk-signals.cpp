@@ -5,39 +5,6 @@
 
 using Contrail::SignalConnections;
 
-static int coreEventDepth = 0;
-
-static void nativeSignalsEnterCore() {
-  const auto previous = Contrail::coreEventDispatcher;
-  Contrail::coreEventDispatcher = [](const std::function<void()> &fn) {
-    ++coreEventDepth;
-    fn();
-    --coreEventDepth;
-  };
-  auto *button = gtk_button_new();
-  auto *label = gtk_label_new("");
-  g_object_ref_sink(button);
-  g_object_ref_sink(label);
-  auto clicks = 0;
-  Contrail::OnClicked(button, [&] { g_assert_cmpint(coreEventDepth, >, 0); ++clicks; });
-  SignalConnections connections;
-  connections.connect<gboolean(GtkLabel *, const char *)>(label, "activate-link", [](GtkLabel *, const char *) -> gboolean {
-    g_assert_cmpint(coreEventDepth, >, 0);
-    return TRUE;
-  });
-  g_signal_emit_by_name(button, "clicked");
-  gboolean handled = FALSE;
-  g_signal_emit_by_name(label, "activate-link", "test:", &handled);
-  g_assert_true(handled);
-  g_assert_cmpint(clicks, ==, 1);
-  g_assert_cmpint(coreEventDepth, ==, 0);
-  connections.clear();
-  g_object_unref(button);
-  g_object_unref(label);
-  Contrail::coreEventDispatcher = previous;
-}
-
-// GTK can keep emitters alive while a navigation transition releases their C++ view.
 static void disconnectedView() {
   auto *adjustment = gtk_adjustment_new(0, 0, 100, 1, 10, 10);
   g_object_ref_sink(adjustment);
@@ -258,7 +225,6 @@ int main(int argc, char **argv) {
   gtk_init();
   g_test_init(&argc, &argv, nullptr);
   g_test_add_func("/gtk/view/disconnect", disconnectedView);
-  g_test_add_func("/gtk/core/native-event-entry", nativeSignalsEnterCore);
   g_test_add_func("/gtk/view/reentrant-teardown", reentrantTeardown);
   g_test_add_func("/gtk/view/emitter-lifetime", emitterReleasedBeforeView);
   g_test_add_func("/gtk/layout/long-message", longMessageFitsPhone);

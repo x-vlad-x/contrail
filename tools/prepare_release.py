@@ -4,7 +4,7 @@ Never tags, pushes or publishes anything.
 
   python3 tools/prepare_release.py [--validation]
 
-Before this: tools/build-packages.sh all (with your own API credentials), tools/smoke-test.sh, then the Debian
+Before this: tools/build-packages.sh aarch64 (with your own API credentials), tools/smoke-test.sh, then the Debian
 sources:
   python3 tools/prepare_release.py --collect-sources
 --validation accepts packages built with the public test API credentials and writes the kit to
@@ -19,17 +19,16 @@ import shutil
 import subprocess
 import tarfile
 
-from collect_debian_sources import verify_dsc, fetch_file
+from collect_debian_sources import verify_dsc
 from package import ARCHES, FORMATS
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ROOT / "out/packages"
 SOURCES = ROOT / "out/corresponding-sources"
 PART_SIZE = 64 * 1024 * 1024
-# Both architectures are built against Debian 13 (see tools/build-packages.sh).
+# The packages are for ARM64 only, built against Debian 13 (see tools/build-packages.sh).
 TARGETS = {
     "arm64": dict(arch="aarch64", container="localhost/contrail-arm64"),
-    "amd64": dict(arch="x86_64", container="localhost/contrail-desktop"),
 }
 
 
@@ -47,7 +46,7 @@ def workspace(deb_arch):
 
 
 def records(deb_arch):
-    """The inventories of a build: what it compiled in, what the DEB/RPM/AppImage carry, what the Flatpak carries."""
+    """The inventories of a build: what it compiled in, what the DEB carries, what the Flatpak carries."""
     space = workspace(deb_arch)
     return {
         "build-inputs": space / "stage/usr/share/doc/contrail/build-inputs.json",
@@ -80,46 +79,53 @@ def check_packages(version, commit, validation):
             problems.append("built with the public test API credentials")
         if missing := set(FORMATS) - set(info.get("files", {})):
             problems.append(f"no {', '.join(sorted(missing))} package")
+        if info.get("flavour") != "stable" and not validation:
+            problems.append(f"built as the {info.get('flavour')} flavour (CONTRAIL_FLAVOUR=stable)")
         if problems:
             raise RuntimeError(f"Rebuild the {deb_arch} package from the clean release commit: {', '.join(problems)}")
         infos[deb_arch] = info
-    cores = {(i["core_tag"], i["core_commit"], i["core_patches_sha256"]) for i in infos.values()}
-    if len(cores) != 1:
-        raise RuntimeError(f"The packages were built from different cores: {cores}")
+    builds = {(i["tdlib_commit"], i["call_media"]) for i in infos.values()}
+    if len(builds) != 1:
+        raise RuntimeError(f"The packages were built from different TDLib commits or call parts: {builds}")
     return infos
 
 
-def core_archive(destination, core_commit):
-    """Telegram Desktop at the pinned commit with every submodule, from git objects (without the patches)."""
-    core = ROOT / "tdesktop"
-    if git("rev-parse", "HEAD", cwd=core) != core_commit:
-        raise RuntimeError("tdesktop/ is not at the core commit the packages were built from")
-    entries = [("", core)]
-    status = git("submodule", "status", "--recursive", cwd=core)
-    for line in status.splitlines():
-        path = line[1:].split()[1]
-        entries.append((path, core / path))
-    target = destination / "telegram-desktop.tar"
+def git_archive(destination, name, directory, prefix, revisions):
+    """A source tree from git objects (exactly the commit, no local changes) as NAME.tar.xz, with a note of
+    where it came from in PREFIX/CONTRAIL-REVISIONS.txt."""
+    if git("status", "--porcelain", "--untracked-files=no", cwd=directory):
+        raise RuntimeError(f"{directory} has local changes: the packages were built from something else")
+    stream = subprocess.run(["git", "archive", "--format=tar", f"--prefix={prefix}/", "HEAD"], cwd=directory,
+                            check=True, capture_output=True).stdout
+    target = destination / f"{name}.tar"
     with tarfile.open(target, "w", format=tarfile.PAX_FORMAT) as output:
-        for prefix, directory in entries:
-            stream = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=directory, check=True,
-                                    capture_output=True).stdout
-            with tarfile.open(fileobj=io.BytesIO(stream)) as archive:
-                for member in archive:
-                    if member.isdir() and prefix and member.name in ("", "."):
-                        continue
-                    data = archive.extractfile(member) if member.isfile() else None
-                    member.name = "/".join(filter(None, ["tdesktop", prefix, member.name]))
-                    if member.linkname and member.islnk():
-                        member.linkname = "/".join(filter(None, ["tdesktop", prefix, member.linkname]))
-                    output.addfile(member, data)
-        revisions = (f"Telegram Desktop {git('describe', '--tags', cwd=core)} {core_commit}\n"
-                     f"Submodules (path commit):\n{status}\n").encode()
-        info = tarfile.TarInfo("tdesktop/CONTRAIL-REVISIONS.txt")
-        info.size = len(revisions)
-        output.addfile(info, io.BytesIO(revisions))
+        with tarfile.open(fileobj=io.BytesIO(stream)) as archive:
+            for member in archive:
+                output.addfile(member, archive.extractfile(member) if member.isfile() else None)
+        note = tarfile.TarInfo(f"{prefix}/CONTRAIL-REVISIONS.txt")
+        note.size = len(revisions)
+        output.addfile(note, io.BytesIO(revisions))
     subprocess.run(["xz", "-T0", "-6", "-f", target], check=True)
     return target.with_name(target.name + ".xz")
+
+
+def tdlib_archive(destination, tdlib_commit):
+    """TDLib at the commit pinned in build-env/build-tdlib.sh, the one the packages were built from."""
+    source = ROOT / "deps-td/src"
+    commit = git("rev-parse", "HEAD", cwd=source)
+    if not commit.startswith(tdlib_commit):
+        raise RuntimeError(f"deps-td/src is at {commit[:12]}, the packages were built from TDLib {tdlib_commit}")
+    return git_archive(destination, "tdlib", source, "td", f"TDLib {commit} (https://github.com/tdlib/td)\n".encode())
+
+
+def tgcalls_archive(destination):
+    """tgcalls, compiled into calls from Telegram Desktop's sources (tdesktop/, at its release tag)."""
+    core = ROOT / "tdesktop"
+    tgcalls = core / "Telegram/ThirdParty/tgcalls"
+    revisions = (f"tgcalls {git('rev-parse', 'HEAD', cwd=tgcalls)} (https://github.com/TelegramMessenger/tgcalls),\n"
+                 f"as a submodule of Telegram Desktop {git('describe', '--tags', cwd=core)} "
+                 f"{git('rev-parse', 'HEAD', cwd=core)}\n").encode()
+    return git_archive(destination, "tgcalls", tgcalls, "tgcalls", revisions)
 
 
 def project_archive(destination, version, commit, date):
@@ -224,7 +230,9 @@ def main():
         shutil.rmtree(bundle)
     bundle.mkdir(parents=True)
     files, debian_files = {}, {}
-    files[core_archive(bundle, info["core_commit"])] = "telegram-desktop.tar.xz"
+    files[tdlib_archive(bundle, info["tdlib_commit"])] = "tdlib.tar.xz"
+    if info["call_media"]:
+        files[tgcalls_archive(bundle)] = "tgcalls.tar.xz"
     for deb_arch, target in TARGETS.items():
         deps = ROOT / ARCHES[target["arch"]]["deps"] / "sources"
         manifest = json.loads((deps / "manifest.json").read_text())
@@ -247,7 +255,7 @@ def main():
         available = {(s["package"], s["version"]) for s in metadata["sources"]}
         if missing := wanted - available:
             raise RuntimeError(f"Debian sources missing for {deb_arch}: {sorted(missing)}")
-        # Source packages are the same for both architectures: each file goes in once.
+        # Each file goes in once.
         for source in metadata["sources"]:
             for record in source["files"]:
                 path = debian / record["name"]
@@ -261,25 +269,6 @@ def main():
                     files[path] = name
             verify_dsc(source, debian)
         files[debian / "sources.json"] = f"debian/sources-{deb_arch}.json"
-    runtime = json.loads((ROOT / "packaging/runtime-sources.json").read_text())
-    tools = json.loads((ROOT / "packaging/appimage-tools.json").read_text())
-    if any(tools[f"runtime-{target['arch']}"]["source_commit"] != runtime["runtime_commit"]
-           for target in TARGETS.values()):
-        raise RuntimeError("The AppImage runtime binaries and source pins disagree")
-    runtime_dir = SOURCES / "appimage-runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    unavailable = []
-    for record in runtime["files"]:
-        try:
-            fetch_file(record, runtime_dir)
-        except (RuntimeError, OSError):
-            # A check of the tooling may run where some hosts are blocked; a release may not.
-            if not args.validation:
-                raise
-            unavailable.append(record["url"])
-            continue
-        files[runtime_dir / record["name"]] = f"appimage-runtime/{record['name']}"
-    files[ROOT / "packaging/runtime-sources.json"] = "appimage-runtime/runtime-sources.json"
     files[ROOT / "packaging/LICENSES.md"] = "README.md"
 
     sources_tar = destination / f"Contrail-{version}-corresponding-sources.tar"
@@ -298,8 +287,8 @@ def main():
         "# Corresponding sources\n\n"
         "These files are not needed to install Contrail. They hold the complete sources of what the packages "
         "contain besides Contrail's own code (which is in "
-        f"`Contrail-{version}-sources.tar.gz`): Telegram Desktop with all its submodules, the libraries built "
-        "for the packages, the Debian source packages of the Debian parts, and the AppImage runtime. (The "
+        f"`Contrail-{version}-sources.tar.gz`): TDLib, tgcalls, the libraries built for the packages and the "
+        "Debian source packages of the Debian parts. (The "
         "Flatpak's runtime is not part of it: Flatpak installs it from Flathub, which publishes its sources.)\n\n"
         f"Download all {len(parts)} files `{sources_tar.name}.part*` and `SHA256SUMS` into one folder, then:\n\n"
         "```sh\nsha256sum --check --ignore-missing SHA256SUMS\n"
@@ -326,10 +315,10 @@ def main():
         assets.append(destination / target)
     if args.validation:
         warning = destination / "NOT-FOR-RELEASE.txt"
-        warning.write_text("Built with Telegram's public test API credentials to check the release tooling. "
-                           "Do not publish these files.\n"
-                           + "".join(f"Not downloaded here (the release run fetches it): {url}\n"
-                                     for url in unavailable))
+        uses_test_api = any(info["api_credentials"] == "test" for info in infos.values())
+        warning.write_text("Local validation build for checking the release tooling.\n"
+                           + ("Includes packages built with Telegram's public test API credentials.\n"
+                              if uses_test_api else ""))
         assets.append(warning)
     (destination / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in sorted(assets)))
     shutil.rmtree(bundle)
@@ -338,7 +327,7 @@ def main():
     if unexpected:
         raise RuntimeError(f"Files outside the asset list: {sorted(unexpected)}")
     print(f"Prepared {destination}")
-    print(f"Commit {commit}; Telegram Desktop {info['core_tag']} {info['core_commit']}")
+    print(f"Commit {commit}; TDLib {info['tdlib_commit']}")
     for path in sorted(destination.iterdir()):
         print(f"  {path.stat().st_size / 2**20:9.1f} MiB  {path.name}")
     print("Nothing was tagged, pushed or published.")

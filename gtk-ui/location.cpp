@@ -1,11 +1,13 @@
 #include "location.hpp"
 
-#include "base/weak_ptr.h"
-
 #include <gio/gio.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace Contrail {
@@ -54,20 +56,20 @@ Failure FailureOf(const GError *error) {
 
 // An asynchronous D-Bus call; `done` gets the reply or the error (never after the cancellable is cancelled).
 void Call(GDBusConnection *bus, const char *name, const char *path, const char *interface, const char *method,
-          GVariant *parameters, GCancellable *cancellable, Fn<void(GVariant *reply, GError *error)> done) {
+          GVariant *parameters, GCancellable *cancellable, std::function<void(GVariant *reply, GError *error)> done) {
   g_dbus_connection_call(
       bus, name, path, interface, method, parameters, nullptr, G_DBUS_CALL_FLAGS_NONE, -1, cancellable,
       +[](GObject *source, GAsyncResult *result, gpointer data) {
-        const auto done = std::unique_ptr<Fn<void(GVariant *, GError *)>>(static_cast<Fn<void(GVariant *, GError *)> *>(data));
+        const auto done = std::unique_ptr<std::function<void(GVariant *, GError *)>>(static_cast<std::function<void(GVariant *, GError *)> *>(data));
         GError *error = nullptr;
         auto *reply = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
         if (!g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-          RunCoreEvent([&] { (*done)(reply, error); });
+          (*done)(reply, error);
         }
         if (reply) g_variant_unref(reply);
         if (error) g_error_free(error);
       },
-      new Fn<void(GVariant *, GError *)>(std::move(done)));
+      new std::function<void(GVariant *, GError *)>(std::move(done)));
 }
 
 void CallAndForget(GDBusConnection *bus, const char *name, const char *path, const char *interface, const char *method,
@@ -76,7 +78,7 @@ void CallAndForget(GDBusConnection *bus, const char *name, const char *path, con
                          nullptr, nullptr);
 }
 
-using SignalCallback = Fn<void(const char *path, GVariant *parameters)>;
+using SignalCallback = std::function<void(const char *path, GVariant *parameters)>;
 
 guint Subscribe(GDBusConnection *bus, const char *sender, const char *interface, const char *member, const char *path,
                 SignalCallback callback) {
@@ -85,7 +87,7 @@ guint Subscribe(GDBusConnection *bus, const char *sender, const char *interface,
       +[](GDBusConnection *, const char *, const char *path, const char *, const char *, GVariant *parameters,
           gpointer data) {
         const auto callback = *static_cast<SignalCallback *>(data);
-        RunCoreEvent([&] { callback(path, parameters); });
+        callback(path, parameters);
       },
       new SignalCallback(std::move(callback)), +[](gpointer data) { delete static_cast<SignalCallback *>(data); });
 }
@@ -111,13 +113,26 @@ std::optional<GeoFix> ParseFix(GVariant *dict) {
   return fix;
 }
 
+// Once, on the main loop's next turn, unless `alive` has gone by then.
+void Later(std::weak_ptr<char> alive, std::function<void()> callback) {
+  struct Call {
+    std::weak_ptr<char> alive;
+    std::function<void()> callback;
+  };
+  g_idle_add_full(G_PRIORITY_DEFAULT, +[](gpointer data) -> gboolean {
+    const auto call = static_cast<Call *>(data);
+    if (!call->alive.expired()) call->callback();
+    return G_SOURCE_REMOVE;
+  }, new Call{std::move(alive), std::move(callback)}, +[](gpointer data) { delete static_cast<Call *>(data); });
+}
+
 }  // namespace
 
 // --- backends ----------------------------------------------------------------
 
-class LocationService::Backend : public base::has_weak_ptr {
+class LocationService::Backend {
 public:
-  explicit Backend(not_null<LocationService *> service) : _service(service), _cancellable(g_cancellable_new()) {}
+  explicit Backend(LocationService *service) : _service(service), _cancellable(g_cancellable_new()) {}
   virtual ~Backend() { detach(); }
 
   // No more fixes nor failures from it, before it is destroyed (later: it may be inside its own callback).
@@ -146,28 +161,29 @@ protected:
   }
   // Calls that end in a failure of the whole backend when they fail.
   void call(const char *name, const char *path, const char *interface, const char *method, GVariant *parameters,
-            Fn<void(GVariant *)> done) {
-    const auto weak = base::make_weak(this);
-    Call(_bus, name, path, interface, method, parameters, _cancellable, [=](GVariant *reply, GError *error) {
-      const auto strong = weak.get();
-      if (!strong || strong->_detached) return;
+            std::function<void(GVariant *)> done) {
+    const auto weak = std::weak_ptr<char>(_alive);
+    Call(_bus, name, path, interface, method, parameters, _cancellable, [=, this](GVariant *reply, GError *error) {
+      if (weak.expired() || _detached) return;
       if (error) {
         g_message("Location: %s.%s failed: %s", interface, method, error->message);
-        strong->failed(FailureOf(error));
+        failed(FailureOf(error));
       } else {
         done(reply);
       }
     });
   }
   void subscribe(const char *sender, const char *interface, const char *member, const char *path,
-                 Fn<void(const char *, GVariant *)> callback) {
-    const auto weak = base::make_weak(this);
-    _subscriptions.push_back(Subscribe(_bus, sender, interface, member, path, [=](const char *path, GVariant *parameters) {
-      if (const auto strong = weak.get(); strong && !strong->_detached) callback(path, parameters);
+                 std::function<void(const char *, GVariant *)> callback) {
+    const auto weak = std::weak_ptr<char>(_alive);
+    _subscriptions.push_back(Subscribe(_bus, sender, interface, member, path, [=, this](const char *path, GVariant *parameters) {
+      if (!weak.expired() && !_detached) callback(path, parameters);
     }));
   }
 
-  const not_null<LocationService *> _service;
+  LocationService *const _service;
+  // Ends with the backend: what its D-Bus calls and signals bring later is dropped then.
+  const std::shared_ptr<char> _alive = std::make_shared<char>();
   GDBusConnection *_bus = nullptr;
   GCancellable *_cancellable = nullptr;
   bool _detached = false;
@@ -178,21 +194,20 @@ protected:
 // (the shell) whether the app may know where the device is.
 class LocationService::GeoClue final : public Backend {
 public:
-  explicit GeoClue(not_null<LocationService *> service) : Backend(service) {
+  explicit GeoClue(LocationService *service) : Backend(service) {
     _bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, nullptr);
     if (!_bus) {
-      crl::on_main(this, [=] { failed(Failure::Unavailable); });
+      Later(_alive, [=, this] { failed(Failure::Unavailable); });
       return;
     }
     // CreateClient (GeoClue 2.5) gives every caller a client of its own; GetClient is the older one.
-    const auto weak = base::make_weak(this);
+    const auto weak = std::weak_ptr<char>(_alive);
     Call(_bus, kGeoClueName, kGeoClueManager, kGeoClueManagerInterface, "CreateClient", nullptr, _cancellable,
-         [=](GVariant *reply, GError *error) {
-           const auto strong = weak.get();
-           if (!strong || _detached) return;
+         [=, this](GVariant *reply, GError *error) {
+           if (weak.expired() || _detached) return;
            if (g_error_matches(error, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD)) {
              call(kGeoClueName, kGeoClueManager, kGeoClueManagerInterface, "GetClient", nullptr,
-                  [=](GVariant *reply) { created(reply); });
+                  [=, this](GVariant *reply) { created(reply); });
            } else if (error) {
              g_message("Location: GeoClue unavailable: %s", error->message);
              failed(FailureOf(error));
@@ -216,20 +231,20 @@ private:
     const char *path = nullptr;
     g_variant_get(reply, "(&o)", &path);
     _client = path;
-    const auto set = [=](const char *property, GVariant *value, Fn<void(GVariant *)> then) {
+    const auto set = [=, this](const char *property, GVariant *value, std::function<void(GVariant *)> then) {
       call(kGeoClueName, _client.c_str(), kProperties, "Set",
            g_variant_new("(ssv)", kGeoClueClientInterface, property, value), std::move(then));
     };
-    set("DesktopId", g_variant_new_string(DesktopId()), [=](GVariant *) {
-      set("RequestedAccuracyLevel", g_variant_new_uint32(kGeoClueAccuracyExact), [=](GVariant *) {
+    set("DesktopId", g_variant_new_string(DesktopId()), [=, this](GVariant *) {
+      set("RequestedAccuracyLevel", g_variant_new_uint32(kGeoClueAccuracyExact), [=, this](GVariant *) {
         subscribe(kGeoClueName, kGeoClueClientInterface, "LocationUpdated", _client.c_str(),
-                  [=](const char *, GVariant *parameters) {
+                  [=, this](const char *, GVariant *parameters) {
                     const char *location = nullptr, *previous = nullptr;
                     g_variant_get(parameters, "(&o&o)", &previous, &location);
                     read(location);
                   });
         // GeoClue may stop the client (the agent took the permission back): no more fixes come then.
-        subscribe(kGeoClueName, kProperties, "PropertiesChanged", _client.c_str(), [=](const char *, GVariant *parameters) {
+        subscribe(kGeoClueName, kProperties, "PropertiesChanged", _client.c_str(), [=, this](const char *, GVariant *parameters) {
           GVariant *changed = nullptr;
           g_variant_get(parameters, "(&s@a{sv}@as)", nullptr, &changed, nullptr);
           gboolean active = TRUE;
@@ -239,7 +254,7 @@ private:
           }
           g_variant_unref(changed);
         });
-        call(kGeoClueName, _client.c_str(), kGeoClueClientInterface, "Start", nullptr, [=](GVariant *) {
+        call(kGeoClueName, _client.c_str(), kGeoClueClientInterface, "Start", nullptr, [=, this](GVariant *) {
           _started = true;
         });
       });
@@ -248,7 +263,7 @@ private:
 
   void read(const char *location) {
     call(kGeoClueName, location, kProperties, "GetAll", g_variant_new("(s)", kGeoClueLocationInterface),
-         [=](GVariant *reply) {
+         [=, this](GVariant *reply) {
            GVariant *dict = nullptr;
            g_variant_get(reply, "(@a{sv})", &dict);
            if (const auto fix = ParseFix(dict)) received(*fix);
@@ -263,10 +278,10 @@ private:
 // The desktop portal's Location interface (xdg-desktop-portal asks GeoClue for the app, after asking the user).
 class LocationService::Portal final : public Backend {
 public:
-  explicit Portal(not_null<LocationService *> service) : Backend(service) {
+  explicit Portal(LocationService *service) : Backend(service) {
     _bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
     if (!_bus) {
-      crl::on_main(this, [=] { failed(Failure::Unavailable); });
+      Later(_alive, [=, this] { failed(Failure::Unavailable); });
       return;
     }
     static auto counter = 0;
@@ -276,7 +291,7 @@ public:
     _session = std::string(kPortalPath) + "/session/" + sender + "/" + token;
     const auto request = std::string(kPortalPath) + "/request/" + sender + "/" + token;
 
-    subscribe(kPortalName, kPortalLocation, "LocationUpdated", kPortalPath, [=](const char *, GVariant *parameters) {
+    subscribe(kPortalName, kPortalLocation, "LocationUpdated", kPortalPath, [=, this](const char *, GVariant *parameters) {
       const char *session = nullptr;
       GVariant *dict = nullptr;
       g_variant_get(parameters, "(&o@a{sv})", &session, &dict);
@@ -286,7 +301,7 @@ public:
       g_variant_unref(dict);
     });
     subscribe(kPortalName, "org.freedesktop.portal.Request", "Response", request.c_str(),
-              [=](const char *, GVariant *parameters) {
+              [=, this](const char *, GVariant *parameters) {
                 guint32 response = 2;
                 g_variant_get(parameters, "(u@a{sv})", &response, nullptr);
                 if (response != 0) {
@@ -296,13 +311,13 @@ public:
               });
     // The interface is there only when xdg-desktop-portal was built with GeoClue.
     call(kPortalName, kPortalPath, kProperties, "Get", g_variant_new("(ss)", kPortalLocation, "version"),
-         [=](GVariant *) {
+         [=, this](GVariant *) {
            auto options = GVariantBuilder();
            g_variant_builder_init(&options, G_VARIANT_TYPE_VARDICT);
            g_variant_builder_add(&options, "{sv}", "session_handle_token", g_variant_new_string(token.c_str()));
            g_variant_builder_add(&options, "{sv}", "accuracy", g_variant_new_uint32(kPortalAccuracyExact));
            call(kPortalName, kPortalPath, kPortalLocation, "CreateSession", g_variant_new("(a{sv})", &options),
-                [=](GVariant *reply) {
+                [=, this](GVariant *reply) {
                   const char *session = nullptr;
                   g_variant_get(reply, "(&o)", &session);
                   _session = session;
@@ -340,14 +355,14 @@ LocationService::~LocationService() {
   if (_backend) _backend->detach();
 }
 
-std::unique_ptr<LocationService::Watch> LocationService::watch(Fn<void(const GeoFix &)> fix, Fn<void(Failure)> failed) {
+std::unique_ptr<LocationService::Watch> LocationService::watch(std::function<void(const GeoFix &)> fix, std::function<void(Failure)> failed) {
   const auto id = ++_lastId;
   _watchers.push_back({.id = id, .fix = std::move(fix), .failed = std::move(failed)});
-  if (!_backend) {
+  if (!running()) {
     start();
   } else if (const auto last = recent(30)) {
     // Something to show while the next fix comes.
-    crl::on_main([=] {
+    Later(_alive, [=, this] {
       for (const auto &watcher : _watchers) {
         if (watcher.id == id) {
           const auto callback = watcher.fix;
@@ -366,7 +381,7 @@ std::optional<GeoFix> LocationService::recent(int maxAge) const {
 }
 
 bool LocationService::running() const {
-  return _backend != nullptr;
+  return _backend != nullptr || _scripted;
 }
 
 void LocationService::release(int id) {
@@ -375,6 +390,12 @@ void LocationService::release(int id) {
 }
 
 void LocationService::start() {
+  // The scenario transport has no device to ask: positions come from the debug command loc-fix.
+  if (g_getenv("CONTRAIL_SCENARIO")) {
+    _scripted = true;
+    g_message("Location: started (scenario)");
+    return;
+  }
   _backend = (InFlatpak() || _triedPortal) ? std::unique_ptr<Backend>(std::make_unique<Portal>(this))
                                            : std::unique_ptr<Backend>(std::make_unique<GeoClue>(this));
   g_message("Location: started (%s)", (InFlatpak() || _triedPortal) ? "portal" : "GeoClue");
@@ -382,6 +403,7 @@ void LocationService::start() {
 
 void LocationService::stop() {
   _triedPortal = false;
+  if (std::exchange(_scripted, false)) g_message("Location: stopped");
   if (_backend) {
     g_message("Location: stopped");
     _backend->detach();
@@ -393,7 +415,7 @@ void LocationService::received(const GeoFix &fix) {
   if (!FreshFix(fix, _last, g_get_real_time())) return;
   _last = fix;
   // A watcher may go (or come) from its callback.
-  auto callbacks = std::vector<std::pair<int, Fn<void(const GeoFix &)>>>();
+  auto callbacks = std::vector<std::pair<int, std::function<void(const GeoFix &)>>>();
   for (const auto &watcher : _watchers) callbacks.emplace_back(watcher.id, watcher.fix);
   for (const auto &[id, callback] : callbacks) {
     if (std::any_of(_watchers.begin(), _watchers.end(), [&](const Watcher &w) { return w.id == id; })) {
@@ -413,7 +435,7 @@ void LocationService::fail(Failure failure) {
     return;
   }
   _triedPortal = false;
-  auto callbacks = std::vector<std::pair<int, Fn<void(Failure)>>>();
+  auto callbacks = std::vector<std::pair<int, std::function<void(Failure)>>>();
   for (const auto &watcher : _watchers) callbacks.emplace_back(watcher.id, watcher.failed);
   for (const auto &[id, callback] : callbacks) {
     if (callback && std::any_of(_watchers.begin(), _watchers.end(), [&](const Watcher &w) { return w.id == id; })) {
@@ -422,13 +444,14 @@ void LocationService::fail(Failure failure) {
   }
 }
 
-QString LocationService::debugState() const {
-  auto result = u"watchers=%1 running=%2"_q.arg(_watchers.size()).arg(_backend ? 1 : 0);
+std::string LocationService::debugState() const {
+  char buffer[160];
+  std::snprintf(buffer, sizeof(buffer), "watchers=%d running=%d", int(_watchers.size()), running() ? 1 : 0);
+  auto result = std::string(buffer);
   if (_last) {
-    result += u" last=%1,%2 accuracy=%3 age=%4s"_q.arg(_last->lat, 0, 'f', 6)
-                  .arg(_last->lon, 0, 'f', 6)
-                  .arg(_last->accuracy)
-                  .arg((g_get_real_time() - _last->time) / G_USEC_PER_SEC);
+    std::snprintf(buffer, sizeof(buffer), " last=%.6f,%.6f accuracy=%g age=%llds", _last->lat, _last->lon,
+                  _last->accuracy, (long long)((g_get_real_time() - _last->time) / G_USEC_PER_SEC));
+    result += buffer;
   }
   return result;
 }

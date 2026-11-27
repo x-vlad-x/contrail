@@ -2,6 +2,7 @@
 
 #include <gio/gio.h>
 #include <functional>
+#include <memory>
 
 namespace Contrail {
 
@@ -40,19 +41,19 @@ public:
 
   void start();
   void stop();
+  [[nodiscard]] guint32 eventId() const { return _id; }
 
 private:
   void started(guint32 id);
 
   GDBusConnection *_bus = nullptr;
-  GCancellable *_cancellable = nullptr;
+  std::shared_ptr<char> _alive = std::make_shared<char>();
   guint32 _id = 0;
   bool _pending = false;
   bool _wanted = false;
 };
 
-// Whether the phone rings by itself (feedbackd is there): the core then doesn't play its own ringtone
-// for an incoming call (see patches/).
+// Whether feedbackd already owns its bus name: the call view uses the phone's ringtone then.
 bool SystemRingtone();
 
 } // namespace Contrail

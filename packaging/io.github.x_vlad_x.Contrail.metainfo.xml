@@ -7,9 +7,9 @@
   <summary>Unofficial Telegram client for Linux phones</summary>
   <description>
     <p>
-      Contrail is an unofficial client that uses the Telegram API. It is built on the Telegram Desktop core
-      and replaces its interface with an adaptive GTK4 and libadwaita one: a single column on a phone, the chat
-      list and the chat side by side on a wider screen.
+      Contrail is an unofficial client that uses the Telegram API, made for Linux phones with Phosh. It is
+      built on TDLib, Telegram's library for clients, with an adaptive GTK4 and libadwaita interface: a single
+      column on a phone, the chat list and the chat side by side on a wider screen.
     </p>
     <p>
       Contrail is not affiliated with or endorsed by Telegram. Group calls, stories, folders and
@@ -69,6 +69,14 @@
     <content_attribute id="social-location">intense</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.4.0" date="2026-11-27" type="stable">
+      <description>
+        <p>Contrail is now built on TDLib instead of the Telegram Desktop core: it starts faster and takes far
+          less memory, about 70 MB with the window closed instead of 230 MB, and the packages are a third of the
+          size or less. After the update from 0.3, sign in once. Contrail is made for FuriOS on the FuriPhone FLX1s and
+          comes for ARM64 only, as a Flatpak and a DEB.</p>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-28" type="stable">
       <description>
         <p>No more freezes while scrolling groups and channels with reactions. Voice messages and music can be

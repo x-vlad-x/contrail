@@ -1,9 +1,12 @@
 #pragma once
 
-#include "app.hpp"
 #include "memory_pressure.hpp"
 
-#include "base/timer.h"
+#include <glib.h>
+
+#include <cstdint>
+#include <functional>
+#include <string>
 
 namespace Contrail {
 
@@ -11,23 +14,27 @@ namespace Contrail {
 // asks to free what can be freed when it gets short: as soon as the level rises, then again every minute while it
 // stays (what was freed may have filled up again).
 class MemoryGuard final {
-public:
-  explicit MemoryGuard(Fn<void(MemoryLevel)> release);
+ public:
+  explicit MemoryGuard(std::function<void(MemoryLevel)> release);
+  ~MemoryGuard();
+  MemoryGuard(const MemoryGuard &) = delete;
+  MemoryGuard &operator=(const MemoryGuard &) = delete;
 
   void setForeground(bool foreground);
 
   // For the debug actions: the state now, and a level as if the system were that short of memory.
-  [[nodiscard]] QString debugState() const;
+  [[nodiscard]] std::string debugState() const;
   void debugSimulate(MemoryLevel level);
 
-private:
+ private:
+  void schedule();
   void check();
   void apply(MemoryLevel level);
 
-  const Fn<void(MemoryLevel)> _release;
-  base::Timer _timer;
+  const std::function<void(MemoryLevel)> _release;
+  guint _timer = 0;
   MemoryLevel _level = MemoryLevel::Normal;
-  crl::time _released = 0;
+  std::int64_t _released = 0;  // g_get_monotonic_time() of the last release, 0 before the first.
   bool _foreground = false;
 };
 

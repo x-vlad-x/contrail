@@ -1,86 +1,76 @@
 #include "text.hpp"
 
-#include "main_window.hpp"
+#include "chat_view.hpp"
 #include "layout.hpp"
+#include "main_window.hpp"
+#include "proxy.hpp"
 #include "scroll_helpers.hpp"
-
-#include "base/unixtime.h"
-#include "core/application.h"
-#include "core/local_url_handlers.h"
-#include "data/data_session.h"
-#include "data/data_user.h"
-#include "lang/lang_keys.h"
-#include "main/main_session.h"
-#include "ui/text/format_values.h"
-#include "ui/text/text_utilities.h"
-
-#include <QtCore/QDateTime>
-#include <QtCore/QLocale>
+#include "td/strings.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <vector>
 
 namespace Contrail {
 namespace {
 
+namespace api = Td::api;
+
+constexpr char kSpoilerHref[] = "spoiler:";
+
+// In UTF-8 bytes of the text.
 struct Tag {
-  int start = 0;
-  int end = 0;
+  std::size_t start = 0;
+  std::size_t end = 0;
   std::string open;
   std::string close;
-  QString href;  // Links only.
+  std::string href;  // Links, and spoilers to be tapped.
+  bool spoiler = false;
 };
 
-std::string Attr(const QString &s) {
-  return Escape(s);
-}
-
-std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers, bool links) {
-  std::vector<Tag> tags;
-  const auto add = [&](const EntityInText &e, std::string open, std::string close) {
-    tags.push_back({e.offset(), e.offset() + e.length(), std::move(open), std::move(close)});
-  };
-  const auto link = [&](const EntityInText &e, const QString &href) {
-    if (links) {
-      add(e, "<a href=\"" + Attr(href) + "\">", "</a>");
-      tags.back().href = href;
-    }
-  };
-  for (const auto &e : text.entities) {
-    if (e.length() <= 0 || e.offset() < 0 || e.offset() + e.length() > text.text.size()) {
-      continue;
-    }
-    const auto part = text.text.mid(e.offset(), e.length());
-    switch (e.type()) {
-      case EntityType::Bold:
-      case EntityType::Semibold: add(e, "<b>", "</b>"); break;
-      case EntityType::Italic: add(e, "<i>", "</i>"); break;
-      case EntityType::Underline: add(e, "<u>", "</u>"); break;
-      case EntityType::StrikeOut: add(e, "<s>", "</s>"); break;
-      case EntityType::Code:
-      case EntityType::Pre: add(e, "<tt>", "</tt>"); break;
-      case EntityType::Subscript: add(e, "<sub>", "</sub>"); break;
-      case EntityType::Superscript: add(e, "<sup>", "</sup>"); break;
-      case EntityType::Blockquote: add(e, "<i>", "</i>"); break;
-      case EntityType::Colorized: add(e, "<span weight=\"600\">", "</span>"); break;
-      case EntityType::Url: link(e, part.startsWith(u"http"_q, Qt::CaseInsensitive) ? part : (u"https://"_q + part)); break;
-      case EntityType::CustomUrl: link(e, e.data()); break;
-      case EntityType::Email: link(e, u"mailto:"_q + part); break;
-      case EntityType::Phone: link(e, u"tel:"_q + part); break;
-      case EntityType::Mention: link(e, u"tg-mention:"_q + part); break;
-      case EntityType::MentionName: link(e, u"tg-user:"_q + e.data()); break;
-      case EntityType::Hashtag:
-      case EntityType::Cashtag: link(e, u"tg-hashtag:"_q + part); break;
-      case EntityType::BotCommand: link(e, u"tg-command:"_q + part); break;
-      case EntityType::Spoiler:
-        if (!revealSpoilers && links) {
-          add(e, "<a href=\"spoiler:\"><span background=\"#808080\" foreground=\"#808080\" underline=\"none\">",
-              "</span></a>");
-          tags.back().href = u"spoiler:"_q;
-        } else if (!revealSpoilers) {
-          add(e, "<span background=\"#808080\" foreground=\"#808080\">", "</span>");
-        }
+// The tags of a text with spoilers hidden and links in place; what a label shows is chosen from these.
+std::vector<Tag> CollectTags(const api::formattedText &text) {
+  auto tags = std::vector<Tag>();
+  for (const auto &entity : text.entities_) {
+    if (!entity || !entity->type_ || entity->length_ <= 0 || entity->offset_ < 0) continue;
+    const auto start = Utf8Offset(text.text_, entity->offset_);
+    const auto end = Utf8Offset(text.text_, entity->offset_ + entity->length_);
+    if (start >= end) continue;
+    const auto part = text.text_.substr(start, end - start);
+    const auto add = [&](std::string open, std::string close) {
+      tags.push_back({start, end, std::move(open), std::move(close)});
+    };
+    const auto link = [&](std::string href) {
+      add("<a href=\"" + Escape(href) + "\">", "</a>");
+      tags.back().href = std::move(href);
+    };
+    switch (entity->type_->get_id()) {
+      case api::textEntityTypeBold::ID: add("<b>", "</b>"); break;
+      case api::textEntityTypeItalic::ID: add("<i>", "</i>"); break;
+      case api::textEntityTypeUnderline::ID: add("<u>", "</u>"); break;
+      case api::textEntityTypeStrikethrough::ID: add("<s>", "</s>"); break;
+      case api::textEntityTypeCode::ID:
+      case api::textEntityTypePre::ID:
+      case api::textEntityTypePreCode::ID: add("<tt>", "</tt>"); break;
+      case api::textEntityTypeBlockQuote::ID:
+      case api::textEntityTypeExpandableBlockQuote::ID: add("<i>", "</i>"); break;
+      case api::textEntityTypeUrl::ID:
+        link(g_ascii_strncasecmp(part.c_str(), "http", 4) == 0 ? part : "https://" + part);
+        break;
+      case api::textEntityTypeTextUrl::ID: link(static_cast<const api::textEntityTypeTextUrl &>(*entity->type_).url_); break;
+      case api::textEntityTypeEmailAddress::ID: link("mailto:" + part); break;
+      case api::textEntityTypePhoneNumber::ID: link("tel:" + part); break;
+      case api::textEntityTypeMention::ID: link("tg-mention:" + part); break;
+      case api::textEntityTypeMentionName::ID:
+        link("tg-user:" + std::to_string(static_cast<const api::textEntityTypeMentionName &>(*entity->type_).user_id_));
+        break;
+      case api::textEntityTypeHashtag::ID:
+      case api::textEntityTypeCashtag::ID: link("tg-hashtag:" + part); break;
+      case api::textEntityTypeBotCommand::ID: link("tg-command:" + part); break;
+      case api::textEntityTypeSpoiler::ID:
+        add("<span background=\"#808080\" foreground=\"#808080\">", "</span>");
+        tags.back().spoiler = true;
         break;
       default: break;
     }
@@ -88,70 +78,60 @@ std::vector<Tag> CollectTags(const TextWithEntities &text, bool revealSpoilers, 
   return tags;
 }
 
-}  // namespace
-
-std::string ToMarkup(const TextWithEntities &text, bool revealSpoilers, bool links) {
-  const auto tags = CollectTags(text, revealSpoilers, links);
-  if (tags.empty()) {
-    return Escape(text.text);
+std::vector<Tag> ShownTags(std::vector<Tag> tags, bool revealSpoilers, bool links) {
+  std::erase_if(tags, [&](const Tag &tag) {
+    return tag.spoiler ? revealSpoilers : (!links && !tag.href.empty());
+  });
+  if (links) {
+    for (auto &tag : tags) {
+      if (!tag.spoiler) continue;
+      tag.open = "<a href=\"spoiler:\"><span background=\"#808080\" foreground=\"#808080\" underline=\"none\">";
+      tag.close = "</span></a>";
+      tag.href = kSpoilerHref;
+    }
   }
+  return tags;
+}
+
+std::string MarkupOf(const std::string &text, const std::vector<Tag> &tags) {
+  if (tags.empty()) return Escape(text);
   // Split the text at every tag boundary and wrap each piece into the tags covering it: Pango needs
   // strictly nested tags, Telegram entities can overlap.
-  std::set<int> bounds = {0, int(text.text.size())};
+  auto bounds = std::set<std::size_t>{0, text.size()};
   for (const auto &tag : tags) {
     bounds.insert(tag.start);
     bounds.insert(tag.end);
   }
-  std::string result;
+  auto result = std::string();
   for (auto it = bounds.begin(); it != bounds.end(); ++it) {
     const auto next = std::next(it);
-    if (next == bounds.end()) {
-      break;
-    }
+    if (next == bounds.end()) break;
     const auto from = *it, till = *next;
-    std::vector<const Tag *> active;
-    for (const auto &tag : tags) {
-      if (tag.start <= from && tag.end >= till) {
-        active.push_back(&tag);
-      }
-    }
-    // Links can't be nested in Pango: keep only the outermost one.
+    auto active = std::vector<const Tag *>();
     auto hasLink = false;
-    std::erase_if(active, [&](const Tag *tag) {
-      if (tag->open.rfind("<a ", 0) == 0) {
-        if (hasLink) {
-          return true;
-        }
+    for (const auto &tag : tags) {
+      if (tag.start > from || tag.end < till) continue;
+      // Links can't be nested in Pango: keep only the outermost one.
+      if (tag.open.starts_with("<a ")) {
+        if (hasLink) continue;
         hasLink = true;
       }
-      return false;
-    });
-    for (const auto *tag : active) {
-      result += tag->open;
+      active.push_back(&tag);
     }
-    result += Escape(text.text.mid(from, till - from));
-    for (auto i = active.rbegin(); i != active.rend(); ++i) {
-      result += (*i)->close;
-    }
+    for (const auto *tag : active) result += tag->open;
+    result += Escape(text.substr(from, till - from));
+    for (auto i = active.rbegin(); i != active.rend(); ++i) result += (*i)->close;
   }
   return result;
 }
 
-namespace {
-
 struct LabelText {
-  TextWithEntities text;
+  std::string text;
+  std::vector<Tag> tags;
   bool revealed = false;
-  // The links in the label's text, in UTF-8 bytes of the Pango layout.
-  struct Link {
-    int from = 0;
-    int till = 0;
-    QString href;
-  };
-  std::vector<Link> links;
 };
 
-const LabelText::Link *LinkAt(GtkWidget *label, const LabelText &data, double x, double y) {
+const Tag *LinkAt(GtkWidget *label, const LabelText &data, double x, double y) {
   auto offsetX = 0, offsetY = 0;
   gtk_label_get_layout_offsets(GTK_LABEL(label), &offsetX, &offsetY);
   auto index = 0, trailing = 0;
@@ -159,111 +139,288 @@ const LabelText::Link *LinkAt(GtkWidget *label, const LabelText &data, double x,
                                 int((y - offsetY) * PANGO_SCALE), &index, &trailing)) {
     return nullptr;
   }
-  for (const auto &link : data.links) {
-    if (index >= link.from && index < link.till) {
-      return &link;
-    }
+  // A hidden spoiler over a link is a spoiler first.
+  const Tag *found = nullptr;
+  for (const auto &tag : data.tags) {
+    if (std::size_t(index) < tag.start || std::size_t(index) >= tag.end) continue;
+    if (tag.spoiler && !data.revealed) return &tag;
+    if (!tag.href.empty() && !tag.spoiler && !found) found = &tag;
   }
-  return nullptr;
+  return found;
 }
 
 void ApplyLabelText(GtkWidget *label, LabelText *data) {
-  data->links.clear();
-  const auto utf8Offset = [&](int offset) { return int(data->text.text.left(offset).toUtf8().size()); };
-  for (const auto &tag : CollectTags(data->text, data->revealed, true)) {
-    if (!tag.href.isEmpty()) {
-      data->links.push_back({utf8Offset(tag.start), utf8Offset(tag.end), tag.href});
-    }
-  }
-  gtk_label_set_markup(GTK_LABEL(label), ToMarkup(data->text, data->revealed).c_str());
+  gtk_label_set_markup(GTK_LABEL(label), MarkupOf(data->text, ShownTags(data->tags, data->revealed, true)).c_str());
   DisableLabelGestures(label);
 }
 
-}  // namespace
-
-void SetLabelText(GtkWidget *label, const TextWithEntities &text) {
-  auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"));
-  if (!data) {
-    data = AttachData(label, "contrail-text", std::make_unique<LabelText>());
+// A tap on a spoiler reveals the label's spoilers, on a link opens it.
+void TapTag(GtkWidget *label, LabelText *data, const Tag &tag) {
+  if (tag.spoiler && !data->revealed) {
+    data->revealed = true;
+    ApplyLabelText(label, data);
+    return;
   }
-  data->text = text;
-  data->revealed = false;
-  ApplyLabelText(label, data);
+  const auto href = tag.href;  // HandleLink() may destroy the label (another chat opens).
+  if (!href.empty() && !tag.spoiler) HandleLink(href);
 }
 
-GtkWidget *MakeTextLabel(const TextWithEntities &text) {
+[[nodiscard]] std::string Lowercase(std::string text) {
+  for (auto &c : text) c = char(g_ascii_tolower(c));
+  return text;
+}
+
+GtkWidget *MakeLabel(std::string text, std::vector<Tag> tags) {
   auto *label = gtk_label_new(nullptr);
   ConfigureMessageWrapping(GTK_LABEL(label));
   gtk_label_set_xalign(GTK_LABEL(label), 0);
   gtk_label_set_selectable(GTK_LABEL(label), FALSE);
   gtk_widget_set_focusable(label, FALSE);
   gtk_widget_add_css_class(label, "message-text");
+  auto data = std::make_unique<LabelText>();
+  data->text = std::move(text);
+  data->tags = std::move(tags);
+  auto *raw = AttachData(label, "contrail-text", std::move(data));
+  if (raw->tags.empty()) {
+    gtk_label_set_text(GTK_LABEL(label), raw->text.c_str());
+    return label;
+  }
   // Doesn't claim the touch: the scrolled chat takes it as soon as the finger moves.
   auto *click = gtk_gesture_click_new();
   g_object_set_data(G_OBJECT(click), "contrail-own", GINT_TO_POINTER(1));
   gtk_widget_add_controller(label, GTK_EVENT_CONTROLLER(click));
-  SetLabelText(label, text);
-  Connect<void(GtkGestureClick *, int, double, double)>(click, "released", [label](GtkGestureClick *, int, double x, double y) {
-    auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"));
-    const auto link = (data && TapAllowed()) ? LinkAt(label, *data, x, y) : nullptr;
-    if (!link) {
-      return;
-    }
-    if (link->href == u"spoiler:"_q) {
-      data->revealed = true;
-      ApplyLabelText(label, data);
-      return;
-    }
-    const auto href = link->href;  // HandleLink() may destroy the label (another chat opens).
-    HandleLink(href);
-  });
+  ApplyLabelText(label, raw);
+  Connect<void(GtkGestureClick *, int, double, double)>(click, "released",
+      [label, raw](GtkGestureClick *, int, double x, double y) {
+        if (const auto *link = TapAllowed() ? LinkAt(label, *raw, x, y) : nullptr) TapTag(label, raw, *link);
+      });
   return label;
 }
 
-void HandleLink(const QString &href) {
-  auto *window = GetApp().window;
-  if (href.startsWith(u"tg-mention:"_q)) {
-    const auto name = href.mid(11).mid(href.mid(11).startsWith('@') ? 1 : 0);
-    Core::App().openLocalUrl(u"tg://resolve?domain="_q + name, QVariant());
-  } else if (href.startsWith(u"tg-user:"_q)) {
-    const auto fields = TextUtilities::MentionNameDataToFields(href.mid(8));
-    if (window && window->session() && fields.userId) {
-      if (const auto user = window->session()->data().userLoaded(UserId(fields.userId))) {
-        window->openPeer(user);
+// An invite link (t.me/+..., joinchat): a chat already joined opens at once; otherwise its name and members, and
+// joining on Join (or asking to, for a chat that approves its members), then it opens.
+void OpenInvite(MainWindow &window, const std::string &link, const api::chatInviteLinkInfo &info) {
+  if (info.chat_id_ && info.accessible_for_ == 0) {
+    window.openChat(info.chat_id_);
+    return;
+  }
+  if (!window.widget()) return;
+  const auto channel = info.type_ && info.type_->get_id() == api::inviteLinkChatTypeChannel::ID;
+  const auto members = TrCount(channel ? "lng_chat_status_subscribers" : "lng_chat_status_members", info.member_count_);
+  const auto join = Tr(info.creates_join_request_ ? "lng_group_request_to_join"
+                       : channel                 ? "lng_profile_join_channel"
+                                                 : "lng_profile_join_group");
+  auto body = members;
+  if (!info.description_.empty()) body += "\n\n" + info.description_;
+  auto *dialog = adw_alert_dialog_new(info.title_.c_str(), body.c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "join", join.c_str(),
+                                 nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "join", ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [link](AdwAlertDialog *, const char *response) {
+    auto *window = GetApp().window;
+    if (g_strcmp0(response, "join") != 0 || !window || !window->store()) return;
+    window->store()->client().send(api::make_object<api::joinChatByInviteLink>(link), [](Td::ObjectPtr object) {
+      auto *window = GetApp().window;
+      if (!object || !window) return;
+      if (object->get_id() == api::chat::ID) {
+        window->openChat(static_cast<api::chat &>(*object).id_);
+      } else if (object->get_id() == api::error::ID) {
+        // A chat that approves its members: the request went, and the server says so.
+        ShowToast(static_cast<api::error &>(*object).message_);
       }
-    }
-  } else if (href.startsWith(u"tg-hashtag:"_q)) {
-    if (window) {
-      window->searchChats(href.mid(11));
-    }
-  } else if (href.startsWith(u"tg-command:"_q)) {
-    if (window) {
-      window->sendBotCommand(href.mid(11));
-    }
-  } else if (const auto local = Core::TryConvertUrlToLocal(href); local.startsWith(u"tg://"_q, Qt::CaseInsensitive)) {
-    // t.me links: Telegram Desktop resolves them and opens the chat, which the GTK window follows.
-    Core::App().openLocalUrl(local, QVariant());
+    });
+  });
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("invite: title=\"%s\" body=\"%s\" join=\"%s\"", info.title_.c_str(),
+                                            body.c_str(), join.c_str());
+  adw_dialog_present(ADW_DIALOG(dialog), window.widget());
+}
+
+}  // namespace
+
+std::size_t Utf8Offset(std::string_view text, int utf16Offset) {
+  auto units = 0;
+  auto index = std::size_t(0);
+  while (index < text.size() && units < utf16Offset) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    const auto length = lead < 0x80 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+    const auto width = length == 4 ? 2 : 1;  // Beyond the first plane: a surrogate pair.
+    if (units + width > utf16Offset) break;
+    units += width;
+    index = std::min(index + length, text.size());
+  }
+  return index;
+}
+
+std::string ToMarkup(const api::formattedText &text, bool revealSpoilers, bool links) {
+  return MarkupOf(text.text_, ShownTags(CollectTags(text), revealSpoilers, links));
+}
+
+GtkWidget *MakeTextLabel(const api::formattedText &text) {
+  return MakeLabel(text.text_, CollectTags(text));
+}
+
+GtkWidget *MakeTextLabel(const std::string &text) {
+  return MakeLabel(text, {});
+}
+
+void HandleLink(const std::string &href) {
+  // Only until the next link: an answer for a link tapped before does nothing after it.
+  static auto lifetime = Td::Lifetime();
+  auto *window = GetApp().window;
+  auto *store = window ? window->store() : nullptr;
+  if (!store) return;
+  const auto open = [window](Td::api::chat &chat) { window->openChat(chat.id_); };
+  const auto failed = [](api::error &error) { ShowToast(error.message_); };
+  if (href.starts_with("tg-mention:")) {
+    auto name = href.substr(std::string_view("tg-mention:").size());
+    if (name.starts_with('@')) name.erase(0, 1);
+    lifetime.reset();
+    store->client().request<api::chat>(api::make_object<api::searchPublicChat>(name), lifetime, open, failed);
+  } else if (href.starts_with("tg-user:")) {
+    const auto id = std::atoll(href.c_str() + std::string_view("tg-user:").size());
+    lifetime.reset();
+    store->client().request<api::chat>(api::make_object<api::createPrivateChat>(id, false), lifetime, open, failed);
+  } else if (href.starts_with("tg-hashtag:")) {
+    // As in 0.3.1: the chat list searches for it.
+    window->searchChats(href.substr(std::string_view("tg-hashtag:").size()));
+  } else if (href.starts_with("tg-command:")) {
+    if (auto *chat = window->chatView()) chat->sendText(href.substr(std::string_view("tg-command:").size()));
+  } else if (IsTelegramLink(href)) {
+    OpenTelegramLink(href);
   } else {
-    OpenUri(U8(href));
+    OpenUri(href);
   }
 }
 
-QString FormatTime(TimeId date) {
-  return QLocale().toString(base::unixtime::parse(date).time(), QLocale::ShortFormat);
+bool IsTelegramLink(const std::string &href) {
+  auto link = Lowercase(href);
+  if (link.starts_with("tg://") || link.starts_with("tg:")) return true;
+  for (const auto *scheme : {"https://", "http://"}) {
+    if (link.starts_with(scheme)) link.erase(0, std::string_view(scheme).size());
+  }
+  if (link.starts_with("www.")) link.erase(0, 4);
+  for (const std::string_view host : {"t.me", "telegram.me", "telegram.dog"}) {
+    if (link.starts_with(host) && (link.size() == host.size() || link[host.size()] == '/')) return true;
+  }
+  return false;
 }
 
-QString FormatListDate(TimeId date) {
-  return Ui::FormatDialogsDate(base::unixtime::parse(date));
+void OpenTelegramLink(const std::string &href) {
+  // Only until the next link, as in HandleLink().
+  static auto lifetime = Td::Lifetime();
+  auto *window = GetApp().window;
+  auto *store = window ? window->store() : nullptr;
+  if (!store) return;
+  lifetime.reset();
+  auto &client = store->client();
+  // What isn't routed here yet: a web link goes to the browser (which may hand it back), a tg:// one can't.
+  const auto elsewhere = [href] {
+    if (Lowercase(href).starts_with("tg:")) {
+      ShowToast(Translated("This link can't be opened yet", "Эта ссылка пока не открывается",
+                           "Це посилання поки не відкривається"));
+    } else {
+      OpenUri(href);
+    }
+  };
+  const auto openChat = [window](api::chat &chat) { window->openChat(chat.id_); };
+  const auto failed = [](api::error &error) { ShowToast(error.message_); };
+  client.send(
+      api::make_object<api::getInternalLinkType>(href),
+      [window, &client, elsewhere, openChat, failed](Td::ObjectPtr object) {
+        if (!object) return;
+        switch (object->get_id()) {
+          case api::internalLinkTypePublicChat::ID: {
+            const auto &type = static_cast<api::internalLinkTypePublicChat &>(*object);
+            client.request<api::chat>(api::make_object<api::searchPublicChat>(type.chat_username_), lifetime,
+                                      openChat, failed);
+            break;
+          }
+          case api::internalLinkTypeBotStart::ID: {
+            // The bot's chat opens; its start button is the user's to press.
+            const auto &type = static_cast<api::internalLinkTypeBotStart &>(*object);
+            client.request<api::chat>(api::make_object<api::searchPublicChat>(type.bot_username_), lifetime,
+                                      openChat, failed);
+            break;
+          }
+          case api::internalLinkTypeMessage::ID: {
+            const auto &type = static_cast<api::internalLinkTypeMessage &>(*object);
+            client.request<api::messageLinkInfo>(
+                api::make_object<api::getMessageLinkInfo>(type.url_), lifetime,
+                [window](api::messageLinkInfo &info) {
+                  const auto message = info.message_ ? info.message_->id_ : 0;
+                  const auto forum = info.topic_id_ && info.topic_id_->get_id() == api::messageTopicForum::ID
+                                         ? static_cast<const api::messageTopicForum *>(info.topic_id_.get())
+                                         : nullptr;
+                  if (forum && forum->forum_topic_id_) {
+                    window->openTopic(info.chat_id_, forum->forum_topic_id_, message);
+                  } else if (info.chat_id_) {
+                    window->openChat(info.chat_id_, message);
+                  }
+                },
+                failed);
+            break;
+          }
+          case api::internalLinkTypeUserPhoneNumber::ID: {
+            const auto &type = static_cast<api::internalLinkTypeUserPhoneNumber &>(*object);
+            client.request<api::user>(
+                api::make_object<api::searchUserByPhoneNumber>(type.phone_number_, false), lifetime,
+                [&client, openChat, failed](api::user &user) {
+                  client.request<api::chat>(api::make_object<api::createPrivateChat>(user.id_, false), lifetime,
+                                            openChat, failed);
+                },
+                failed);
+            break;
+          }
+          case api::internalLinkTypeChatInvite::ID: {
+            const auto link = static_cast<api::internalLinkTypeChatInvite &>(*object).invite_link_;
+            client.request<api::chatInviteLinkInfo>(
+                api::make_object<api::checkChatInviteLink>(link), lifetime,
+                [window, link](api::chatInviteLinkInfo &info) { OpenInvite(*window, link, info); },
+                [](api::error &) { ShowToast(Tr("lng_group_invite_bad_link")); });
+            break;
+          }
+          case api::internalLinkTypeSettings::ID: window->openSettings(); break;
+          case api::internalLinkTypeProxy::ID:
+            ConfirmAddProxy(*window, std::move(static_cast<api::internalLinkTypeProxy &>(*object).proxy_));
+            break;
+          default: elsewhere(); break;
+        }
+      },
+      lifetime);
 }
 
-QString FormatDay(TimeId date) {
-  // Adds the year itself for the past years.
-  return langDayOfMonthFull(base::unixtime::parse(date).date());
+bool DebugTapLabel(GtkWidget *label, const std::string &part) {
+  auto *data = static_cast<LabelText *>(g_object_get_data(G_OBJECT(label), "contrail-text"));
+  if (!data || part.empty()) return false;
+  const Tag *found = nullptr;
+  for (const auto &tag : data->tags) {
+    const auto hidden = tag.spoiler && !data->revealed;
+    if ((!hidden && (tag.href.empty() || tag.spoiler))
+        || data->text.substr(tag.start, tag.end - tag.start).find(part) == std::string::npos) {
+      continue;
+    }
+    // A hidden spoiler over a link is a spoiler first, as for a finger.
+    if (!found || hidden) found = &tag;
+    if (hidden) break;
+  }
+  if (!found) return false;
+  g_message("chat tap: %s \"%s\"", (found->spoiler && !data->revealed) ? "spoiler" : found->href.c_str(),
+            data->text.substr(found->start, found->end - found->start).c_str());
+  TapTag(label, data, *found);
+  return true;
 }
 
-QString Translated(const char *english, const char *russian, const char *ukrainian) {
-  const auto language = Lang::LanguageIdOrDefault(Lang::Id());
-  return QString::fromUtf8(language.startsWith(u"ru"_q) ? russian : language.startsWith(u"uk"_q) ? ukrainian : english);
+std::string ShortCount(std::int64_t count) {
+  const auto shorten = [](std::int64_t value, std::int64_t unit, const char *suffix) {
+    const auto tenths = value * 10 / unit;
+    auto result = std::to_string(tenths / 10);
+    if (tenths % 10) result += "." + std::to_string(tenths % 10);
+    return result + suffix;
+  };
+  if (count >= 1'000'000) return shorten(count, 1'000'000, "M");
+  if (count >= 1'000) return shorten(count, 1'000, "K");
+  return std::to_string(count);
 }
 
 }  // namespace Contrail

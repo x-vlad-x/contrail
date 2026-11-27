@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Self-contained packages: puts the shared libraries and run-time resources of a finished build into a bundle
-tree. Runs inside the build container (Containerfile.desktop for x86_64, Containerfile.arm64 for aarch64),
-called by tools/package.py. ELF files are only read (readelf), so an ARM64 bundle is made
-on x86_64 the same way; only gio-querymodules runs, through qemu-user when cross-building.
+tree. Runs inside the ARM64 build container (Containerfile.arm64), called by tools/package.py. ELF files are only
+read (readelf), so the ARM64 bundle is made on x86_64; only gio-querymodules runs, through qemu-user when
+cross-building.
 
   bundle.py resources ROOT TRIPLE [--gtk] [--pactl]   files loaded at run time that aren't ELF dependencies:
-                                                      Qt plugins; with --gtk also GIO modules, gdk-pixbuf loaders,
+                                                      with --gtk: GIO modules, gdk-pixbuf loaders,
                                                       GSettings schemas, icon themes, MIME data, translations;
                                                       with --pactl also PulseAudio's pactl (the Flatpak runtime
                                                       has none)
@@ -20,8 +20,8 @@ on x86_64 the same way; only gio-querymodules runs, through qemu-user when cross
                                                       from a Debian source package by build-deps.sh are listed with
                                                       that source package
 
-ROOT is the bundle's prefix: AppDir/usr in the AppImage, /usr/lib/contrail in the DEB and RPM, /app in the
-Flatpak. It has bin/, libexec/contrail/ (the program), lib/ (the bundled libraries) and share/.
+ROOT is the bundle's prefix: /usr/lib/contrail in the DEB, /app in the Flatpak. It has bin/, libexec/contrail/
+(the program), lib/ (the bundled libraries) and share/.
 
 The bundled libraries are Debian's files as they are: the program finds them through its DT_RPATH
 ($ORIGIN/../../lib, set when it is linked), which also applies to every library it loads (the ones without a
@@ -38,12 +38,10 @@ import subprocess
 
 DOC = Path("share/doc/contrail")
 ORIGINS = DOC / "bundled/origins.json"
-# Qt runs offscreen; Telegram Desktop needs the image formats (WebP emoji) and the TLS backend.
-QT_PLUGINS = ["platforms/libqoffscreen.so", "imageformats", "tls", "networkinformation"]
 GIO_MODULES = ["libdconfsettings.so", "libgiognutls.so", "libgiolibproxy.so"]
 LOCALE_DOMAINS = {"gtk40", "libadwaita", "glib20", "gdk-pixbuf"}
 # e_machine of each target.
-MACHINES = {"x86_64-linux-gnu": 62, "aarch64-linux-gnu": 183}
+MACHINES = {"aarch64-linux-gnu": 183}
 # Files of the package itself, not taken from Debian.
 OWN = ("libexec/", "share/doc/", "share/contrail/", "share/applications/", "share/metainfo/")
 OWN_FILES = {"bin/contrail", "bin/contrail-migrate-launcher"}
@@ -117,14 +115,6 @@ def target_tool(triple, path):
 
 def resources(root, triple, gtk, pactl):
     lib = Path(f"/usr/lib/{triple}")
-    plugins = root / "lib/qt6/plugins"
-    for name in QT_PLUGINS:
-        source = lib / "qt6/plugins" / name
-        if source.is_dir():
-            copy_tree(source, plugins / name)
-        else:
-            (plugins / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, plugins / name)
     if pactl:
         (root / "bin").mkdir(parents=True, exist_ok=True)
         if machine(Path("/usr/bin/pactl")) != MACHINES[triple]:
@@ -367,7 +357,7 @@ def licenses(root, triple, own=None):
 
 
 def triple_arch(triple):
-    return {"x86_64-linux-gnu": "amd64", "aarch64-linux-gnu": "arm64"}[triple]
+    return {"aarch64-linux-gnu": "arm64"}[triple]
 
 
 def main():

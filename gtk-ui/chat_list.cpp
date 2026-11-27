@@ -1,229 +1,100 @@
 #include "chat_list.hpp"
 
-#include "demo.hpp"
-
 #include "main_window.hpp"
-#include "text.hpp"
+#include "td/chat_row.hpp"
+#include "td/dates.hpp"
+#include "td/strings.hpp"
 #include "userpics.hpp"
 
-#include "apiwrap.h"
-#include "core/application.h"
-#include "core/core_settings.h"
-#include "core/core_settings_proxy.h"
-#include "data/data_changes.h"
-#include "data/data_channel.h"
-#include "data/data_chat.h"
-#include "data/data_folder.h"
-#include "data/data_forum.h"
-#include "data/data_forum_topic.h"
-#include "data/data_histories.h"
-#include "data/data_peer.h"
-#include "data/data_send_action.h"
-#include "history/view/history_view_send_action.h"
-#include "data/data_session.h"
-#include "data/data_user.h"
-#include "data/notify/data_notify_settings.h"
-#include "dialogs/dialogs_indexed_list.h"
-#include "dialogs/dialogs_main_list.h"
-#include "dialogs/dialogs_row.h"
-#include "history/history.h"
-#include "history/history_item.h"
-#include "history/view/history_view_item_preview.h"
-#include "lang/lang_keys.h"
-#include "main/main_account.h"
-#include "main/main_session.h"
-#include "mtproto/mtproto_dc_options.h"
-#include "mtproto/mtp_instance.h"
+#include <algorithm>
+#include <cstdlib>
+#include <map>
+#include <memory>
+#include <utility>
+
+// An item of the list's model: which chat a row shows. The widgets come and go, this stays for every chat.
+G_DECLARE_FINAL_TYPE(ContrailListEntry, contrail_list_entry, CONTRAIL, LIST_ENTRY, GObject)
+
+struct _ContrailListEntry {
+  GObject parent_instance;
+  int kind;
+  gint64 id;
+};
+
+G_DEFINE_FINAL_TYPE(ContrailListEntry, contrail_list_entry, G_TYPE_OBJECT)
+
+static void contrail_list_entry_class_init(ContrailListEntryClass *) {}
+static void contrail_list_entry_init(ContrailListEntry *) {}
 
 namespace Contrail {
 namespace {
 
-constexpr auto kRowKey = "contrail-entry";
+namespace api = Td::api;
 
-QString EntryName(not_null<Dialogs::Entry *> entry) {
-  if (const auto history = entry->asHistory()) {
-    if (history->peer->isSelf()) {
-      return tr::lng_saved_messages(tr::now);
-    } else if (history->peer->isRepliesChat()) {
-      return tr::lng_replies_messages(tr::now);
-    }
-    return history->peer->name();
-  } else if (entry->asFolder()) {
-    return tr::lng_archived_name(tr::now);
-  }
-  return entry->chatListName();
+constexpr auto kRowKey = "contrail-row";
+constexpr auto kAvatarSize = 48;
+constexpr auto kFoundAvatarSize = 40;
+constexpr auto kArchiveNames = 4;
+constexpr auto kSearchDelayMs = 400;
+constexpr auto kGlobalSearchMinLength = 3;
+constexpr auto kGlobalSearchLimit = 30;
+
+std::string Trimmed(const char *text) {
+  auto *copy = g_strstrip(g_strdup(text));
+  auto result = std::string(copy);
+  g_free(copy);
+  return result;
 }
 
-TextWithEntities EntryPreview(not_null<Dialogs::Entry *> entry) {
-  if (const auto folder = entry->asFolder()) {
-    // The archive: names of the chats on top of it.
-    QStringList names;
-    for (const auto &row : folder->chatsList()->indexed()->all()) {
-      if (const auto history = row->history()) {
-        names.push_back(history->peer->name());
-        if (names.size() >= 4) {
-          break;
-        }
-      }
-    }
-    return {names.join(u", "_q)};
-  }
-  const auto thread = entry->asThread();
-  if (!thread) {
-    return {};
-  }
-  const auto history = thread->owningHistory();
-  if (const auto draft = history->localDraft(thread->topicRootId(), thread->monoforumPeerId())) {
-    if (!draft->textWithTags.text.isEmpty()) {
-      auto result = Ui::Text::Colorized(tr::lng_from_draft(tr::now) + u": "_q);
-      result.append(draft->textWithTags.text);
-      return result;
-    }
-  }
-  const auto item = entry->chatListMessage();
-  if (!item) {
-    return {};
-  }
-  auto preview = item->toPreview({.hideSender = false, .generateImages = false});
-  if (item->out() && !item->isService() && !history->peer->isSelf() && !history->peer->isBroadcast()
-      && !preview.text.text.startsWith(tr::lng_from_you(tr::now))) {
-    auto result = Ui::Text::Colorized(tr::lng_from_you(tr::now) + u": "_q);
-    result.append(std::move(preview.text));
-    return result;
-  }
-  return std::move(preview.text);
+// What comes first in a preview: "Draft:", "You:".
+std::string Lead(const std::string &text) {
+  return "<span weight=\"600\">" + Escape(text + ": ") + "</span>";
 }
 
-// One line: newlines in a preview would break the row.
-TextWithEntities OneLine(TextWithEntities text) {
-  for (auto &ch : text.text) {
-    if (ch == '\n' || ch == '\r') {
-      ch = ' ';
-    }
-  }
-  return text;
+api::object_ptr<api::ChatList> MakeList(Td::ListKind kind) {
+  if (kind == Td::ListKind::Main) return api::make_object<api::chatListMain>();
+  return api::make_object<api::chatListArchive>();
 }
 
 }  // namespace
 
-ChatList::ChatList(not_null<Main::Session *> session, Data::Folder *folder, not_null<MainWindow *> window,
-                   Data::Forum *forum)
-    : _session(session), _folder(folder), _window(window), _forum(forum), _searchTimer([=] { searchGlobal(_query); }) {
+ChatList::ChatList(Td::Store &store, Td::ListKind kind, MainWindow &window)
+    : _store(store), _kind(kind), _window(window) {
   buildPage();
-  refreshRows();
+  refresh();
 
-  auto &data = _session->data();
-  if (_forum) {
-    _forum->chatsListChanges() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
-    _forum->chatsListLoadedEvents() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
-    using TopicFlag = Data::TopicUpdate::Flag;
-    _session->changes().topicUpdates(TopicFlag::Title | TopicFlag::Notifications | TopicFlag::Closed
-                                     | TopicFlag::UnreadView | TopicFlag::UnreadMentions | TopicFlag::UnreadReactions
-                                     | TopicFlag::CloudDraft)
-        | rpl::on_next([=](const Data::TopicUpdate &update) { updateEntry(update.topic); }, _lifetime);
-  } else {
-    data.chatsListChanges() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
-      scheduleRefresh();
-    }, _lifetime);
-    data.chatsListLoadedEvents() | rpl::filter([=](Data::Folder *f) { return f == _folder; }) | rpl::on_next([=] {
-      scheduleRefresh();
-    }, _lifetime);
-  }
-  _session->changes().entryUpdates(Data::EntryUpdate::Flag::Repaint | Data::EntryUpdate::Flag::LocalDraftSet)
-      | rpl::on_next([=](const Data::EntryUpdate &update) { updateEntry(update.entry); }, _lifetime);
-  _session->changes().entryUpdates(Data::EntryUpdate::Flag::Destroyed) | rpl::on_next([=](const Data::EntryUpdate &update) {
-    // A deleted topic goes at once: its row must not outlive it until the next refresh.
-    removeEntry(update.entry);
-    scheduleRefresh();
+  _store.onList([this](Td::ListKind list) {
+    if (list == Td::ListKind::Archive && _archiveRow) updateRow(*_archiveRow);
+    if (list == _kind || _kind == Td::ListKind::Main) scheduleRefresh();
   }, _lifetime);
-  using HistoryFlag = Data::HistoryUpdate::Flag;
-  _session->changes().historyUpdates(HistoryFlag::IsPinned | HistoryFlag::UnreadView | HistoryFlag::Folder
-                                     | HistoryFlag::UnreadMentions | HistoryFlag::UnreadReactions
-                                     | HistoryFlag::OutboxRead | HistoryFlag::CloudDraft)
-      | rpl::on_next([=](const Data::HistoryUpdate &update) {
-          updateEntry(update.history);
-          if (update.flags & (HistoryFlag::IsPinned | HistoryFlag::Folder)) {
-            scheduleRefresh();
-          }
-        }, _lifetime);
-  using PeerFlag = Data::PeerUpdate::Flag;
-  _session->changes().peerUpdates(PeerFlag::Name | PeerFlag::Notifications | PeerFlag::OnlineStatus)
-      | rpl::on_next([=](const Data::PeerUpdate &update) {
-          if (const auto history = _session->data().historyLoaded(update.peer)) {
-            updateEntry(history);
-          }
-        }, _lifetime);
-  data.newItemAdded() | rpl::on_next([=](not_null<HistoryItem *> item) {
-    updateEntry(item->history());
-    updateEntry(item->topic());
-    scheduleRefresh();
-  }, _lifetime);
-  data.itemRemoved() | rpl::on_next([=](not_null<const HistoryItem *> item) {
-    updateEntry(item->history());
-    updateEntry(item->topic());
-  }, _lifetime);
-  data.itemDataChanges() | rpl::on_next([=](not_null<HistoryItem *> item) {
-    if (item->history()->chatListMessage() == item) {
-      updateEntry(item->history());
-    }
-    if (const auto topic = item->topic(); topic && topic->chatListMessage() == item) {
-      updateEntry(topic);
-    }
-  }, _lifetime);
-  data.dialogsRowReplacements() | rpl::on_next([=] { scheduleRefresh(); }, _lifetime);
-  data.sendActionManager().animationUpdated()
-      | rpl::filter([](const Data::SendActionManager::AnimationUpdate &update) { return update.textUpdated; })
-      | rpl::on_next([=](const Data::SendActionManager::AnimationUpdate &update) {
-          updateEntry(update.thread->owningHistory());
-          updateEntry(update.thread);
-        }, _lifetime);
+  _store.onChat([this](Td::ChatId id) { chatChanged(id); }, _lifetime);
+  _store.onUser([this](Td::UserId id) { userChanged(id); }, _lifetime);
+  _store.onConnection([this] { connectionChanged(); }, _lifetime);
+  connectionChanged();
 
-  // "Connecting..." in the header while there is no connection. The core reports every change of the
-  // main connection's state (Main::Account's state handler), nothing has to ask it all the time.
-  auto *header = static_cast<GtkWidget *>(g_object_get_data(G_OBJECT(_page), "contrail-title"));
-  Core::App().settings().proxy().connectionTypeValue() | rpl::on_next([=] {
-    const auto state = _session->account().mtp().dcstate();
-    const auto connecting = !DemoActive() && (state == MTP::ConnectingState || state == MTP::DisconnectedState
-                             || (state < 0 && state > -600));
-    adw_window_title_set_subtitle(ADW_WINDOW_TITLE(header),
-                                  connecting ? U8(tr::lng_status_connecting(tr::now)).c_str() : "");
-  }, _lifetime);
-
-  if (_forum) {
-    _forum->requestTopics();
-    // The group stopped being a forum: there are no topics to show.
-    _forum->destroyed() | rpl::on_next([=] {
-      crl::on_main(_window.get(), [window = _window, forum = _forum] { window->closeForum(forum); });
-    }, _lifetime);
-  } else if (_folder) {
-    _session->api().requestDialogs(_folder);
-  } else {
-    _session->api().requestMoreDialogsIfNeeded();
-  }
-}
-
-not_null<Dialogs::MainList *> ChatList::list() const {
-  return _forum ? _forum->topicsList() : _session->data().chatsList(_folder);
-}
-
-QString ChatList::title() const {
-  return _forum ? _forum->peer()->name() : _folder ? tr::lng_archived_name(tr::now) : u"Contrail"_q;
+  // The archive has a row of its own in the main list: its first chats say whether to show it and what to write there.
+  if (_kind == Td::ListKind::Main) _store.loadMore(Td::ListKind::Archive);
 }
 
 ChatList::~ChatList() {
-  if (_globalRequest) {
-    _session->api().request(_globalRequest).cancel();
-  }
-  _lifetime.destroy();
+  if (_searchTimer) g_source_remove(_searchTimer);
+  if (_refreshSource) g_source_remove(_refreshSource);
+  if (_loadSource) g_source_remove(_loadSource);
+  // The page can outlive this object in a navigation animation: its rows go now, while unbinding still works.
+  gtk_list_view_set_model(GTK_LIST_VIEW(_list), nullptr);
+  gtk_list_view_set_factory(GTK_LIST_VIEW(_list), nullptr);
+  _connections.clear();
   g_object_unref(_page);
 }
 
 void ChatList::buildPage() {
   auto *view = adw_toolbar_view_new();
   auto *header = adw_header_bar_new();
-  auto *title = adw_window_title_new(U8(this->title()).c_str(), "");
-  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), title);
-  if (!_folder && !_forum) {
+  const auto archive = _kind == Td::ListKind::Archive;
+  const auto titleText = archive ? Tr("lng_archived_name") : std::string("Contrail");
+  _title = adw_window_title_new(titleText.c_str(), "");
+  adw_header_bar_set_title_widget(ADW_HEADER_BAR(header), _title);
+  if (!archive) {
     auto *menuButton = gtk_menu_button_new();
     gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(menuButton), "open-menu-symbolic");
     gtk_menu_button_set_primary(GTK_MENU_BUTTON(menuButton), TRUE);
@@ -232,107 +103,60 @@ void ChatList::buildPage() {
   }
   auto *searchToggle = gtk_toggle_button_new();
   gtk_button_set_icon_name(GTK_BUTTON(searchToggle), "system-search-symbolic");
-  gtk_widget_set_tooltip_text(searchToggle, U8(tr::lng_dlg_filter(tr::now)).c_str());
+  gtk_widget_set_tooltip_text(searchToggle, Tr("lng_dlg_filter").c_str());
   adw_header_bar_pack_end(ADW_HEADER_BAR(header), searchToggle);
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), header);
 
   _searchEntry = gtk_search_entry_new();
-  gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(_searchEntry), U8(tr::lng_dlg_filter(tr::now)).c_str());
+  gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(_searchEntry), Tr("lng_dlg_filter").c_str());
   gtk_widget_set_hexpand(_searchEntry, TRUE);
   auto *clamp = adw_clamp_new();
   adw_clamp_set_child(ADW_CLAMP(clamp), _searchEntry);
   _searchBar = gtk_search_bar_new();
   gtk_search_bar_set_child(GTK_SEARCH_BAR(_searchBar), clamp);
   gtk_search_bar_connect_entry(GTK_SEARCH_BAR(_searchBar), GTK_EDITABLE(_searchEntry));
-  g_object_bind_property(searchToggle, "active", _searchBar, "search-mode-enabled", G_BINDING_BIDIRECTIONAL);
+  g_object_bind_property(searchToggle, "active", _searchBar, "search-mode-enabled",
+                         GBindingFlags(G_BINDING_BIDIRECTIONAL | G_BINDING_SYNC_CREATE));
   adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(view), _searchBar);
-  Connect<void(GtkSearchEntry *)>(_searchEntry, "search-changed", [this](GtkSearchEntry *) { applySearch(); });
-  Connect<void(GtkSearchEntry *)>(_searchEntry, "activate", [this](GtkSearchEntry *) {
-    // Enter opens the first chat found.
-    if (auto *row = gtk_list_box_get_row_at_y(GTK_LIST_BOX(_list), 0)) {
-      activated(row);
-    }
+  _connections.connect<void(GtkSearchEntry *)>(_searchEntry, "search-changed", [this](GtkSearchEntry *) {
+    applySearch();
   });
-  Connect<void(GtkSearchEntry *)>(_searchEntry, "stop-search", [=](GtkSearchEntry *) {
+  _connections.connect<void(GtkSearchEntry *)>(_searchEntry, "activate", [this](GtkSearchEntry *) {
+    // Enter opens the first chat found.
+    openRow(0);
+  });
+  _connections.connect<void(GtkSearchEntry *)>(_searchEntry, "stop-search", [searchToggle](GtkSearchEntry *) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(searchToggle), FALSE);
   });
 
-  _list = gtk_list_box_new();
+  _model = g_list_store_new(contrail_list_entry_get_type());
+  _selection = gtk_single_selection_new(G_LIST_MODEL(_model));
+  // Selected means open here: a tap doesn't select, and nothing is open at first.
+  gtk_single_selection_set_autoselect(_selection, FALSE);
+  gtk_single_selection_set_can_unselect(_selection, TRUE);
+  auto *factory = gtk_signal_list_item_factory_new();
+  _connections.connect<void(GtkSignalListItemFactory *, GObject *)>(
+      factory, "setup", [this](GtkSignalListItemFactory *, GObject *item) { setupRow(GTK_LIST_ITEM(item)); });
+  _connections.connect<void(GtkSignalListItemFactory *, GObject *)>(
+      factory, "bind", [this](GtkSignalListItemFactory *, GObject *item) { bindRow(GTK_LIST_ITEM(item)); });
+  _connections.connect<void(GtkSignalListItemFactory *, GObject *)>(
+      factory, "unbind", [this](GtkSignalListItemFactory *, GObject *item) { unbindRow(GTK_LIST_ITEM(item)); });
+  _list = gtk_list_view_new(GTK_SELECTION_MODEL(_selection), factory);
   gtk_widget_add_css_class(_list, "navigation-sidebar");
   gtk_widget_add_css_class(_list, "chat-list");
-  gtk_list_box_set_selection_mode(GTK_LIST_BOX(_list), GTK_SELECTION_SINGLE);
-  // Same order as Telegram Desktop: pinned chats first, then by the last message.
-  gtk_list_box_set_sort_func(
-      GTK_LIST_BOX(_list),
-      +[](GtkListBoxRow *a, GtkListBoxRow *b, gpointer data) -> int {
-        auto *self = static_cast<ChatList *>(data);
-        const auto filterId = FilterId();
-        auto *ea = static_cast<Dialogs::Entry *>(g_object_get_data(G_OBJECT(a), kRowKey));
-        auto *eb = static_cast<Dialogs::Entry *>(g_object_get_data(G_OBJECT(b), kRowKey));
-        const auto ka = ea->sortKeyInChatList(filterId), kb = eb->sortKeyInChatList(filterId);
-        (void)self;
-        return (ka > kb) ? -1 : (ka < kb) ? 1 : 0;
-      },
-      this, nullptr);
-  gtk_list_box_set_filter_func(
-      GTK_LIST_BOX(_list),
-      +[](GtkListBoxRow *row, gpointer data) -> gboolean {
-        auto *self = static_cast<ChatList *>(data);
-        if (self->_query.isEmpty()) {
-          return TRUE;
-        }
-        auto *entry = static_cast<Dialogs::Entry *>(g_object_get_data(G_OBJECT(row), kRowKey));
-        const auto name = EntryName(entry).toLower();
-        for (const auto &word : self->_query.toLower().split(' ', Qt::SkipEmptyParts)) {
-          if (!name.contains(word)) {
-            if (const auto history = entry->asHistory()) {
-              if (const auto username = history->peer->username(); username.toLower().startsWith(word)) {
-                continue;
-              }
-            }
-            return FALSE;
-          }
-        }
-        return TRUE;
-      },
-      this, nullptr);
-  Connect<void(GtkListBox *, GtkListBoxRow *)>(_list, "row-activated", [this](GtkListBox *, GtkListBoxRow *row) {
-    activated(row);
+  gtk_list_view_set_single_click_activate(GTK_LIST_VIEW(_list), TRUE);
+  _connections.connect<void(GtkListView *, guint)>(_list, "activate", [this](GtkListView *, guint position) {
+    if (position < _shown.size()) activate(_shown[position]);
   });
-
-  // Global search results (people, groups, channels by username).
-  _globalHeader = gtk_label_new(U8(tr::lng_search_global_results(tr::now)).c_str());
-  gtk_widget_add_css_class(_globalHeader, "heading");
-  gtk_widget_add_css_class(_globalHeader, "dim-label");
-  gtk_label_set_xalign(GTK_LABEL(_globalHeader), 0);
-  gtk_widget_set_margin_start(_globalHeader, 18);
-  gtk_widget_set_margin_top(_globalHeader, 12);
-  gtk_widget_set_margin_bottom(_globalHeader, 6);
-  gtk_widget_set_visible(_globalHeader, FALSE);
-  _globalList = gtk_list_box_new();
-  gtk_widget_add_css_class(_globalList, "navigation-sidebar");
-  gtk_widget_set_visible(_globalList, FALSE);
-  Connect<void(GtkListBox *, GtkListBoxRow *)>(_globalList, "row-activated", [this](GtkListBox *, GtkListBoxRow *row) {
-    auto *peer = static_cast<PeerData *>(g_object_get_data(G_OBJECT(row), "contrail-peer"));
-    if (peer) {
-      _window->openPeer(peer);
-    }
-  });
-
-  auto *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_box_append(GTK_BOX(box), _list);
-  gtk_box_append(GTK_BOX(box), _globalHeader);
-  gtk_box_append(GTK_BOX(box), _globalList);
 
   _scroll = gtk_scrolled_window_new();
   gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(_scroll), box);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(_scroll), _list);
   gtk_widget_set_vexpand(_scroll, TRUE);
-  Connect<void(GtkScrolledWindow *, GtkPositionType)>(_scroll, "edge-reached", [this](GtkScrolledWindow *, GtkPositionType pos) {
-    if (pos == GTK_POS_BOTTOM) {
-      loadMore();
-    }
-  });
+  auto *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
+  // Before the end comes into view, and also when a short list doesn't fill the window and can't be scrolled.
+  _connections.connect<void(GtkAdjustment *)>(adjustment, "value-changed", [this](GtkAdjustment *) { loadMoreIfNear(); });
+  _connections.connect<void(GtkAdjustment *)>(adjustment, "changed", [this](GtkAdjustment *) { loadMoreIfNear(); });
 
   _stack = gtk_stack_new();
   auto *loading = adw_spinner_new();
@@ -343,21 +167,20 @@ void ChatList::buildPage() {
   gtk_stack_add_named(GTK_STACK(_stack), _scroll, "list");
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(view), _stack);
 
-  _page = adw_navigation_page_new(view, U8(this->title()).c_str());
-  adw_navigation_page_set_tag(_page, _forum ? "forum" : _folder ? "archive" : "chats");
+  _page = ADW_NAVIGATION_PAGE(adw_navigation_page_new(view, titleText.c_str()));
+  adw_navigation_page_set_tag(_page, archive ? "archive" : "chats");
   g_object_ref_sink(_page);
-  g_object_set_data(G_OBJECT(_page), "contrail-title", title);
 }
 
 GtkWidget *ChatList::buildMenu() {
   auto *menu = g_menu_new();
   auto *section = g_menu_new();
-  g_menu_append(section, U8(tr::lng_saved_messages(tr::now)).c_str(), "contrail.saved");
-  g_menu_append(section, U8(tr::lng_contacts_header(tr::now)).c_str(), "contrail.contacts");
+  g_menu_append(section, Tr("lng_saved_messages").c_str(), "contrail.saved");
+  g_menu_append(section, Tr("lng_contacts_header").c_str(), "contrail.contacts");
   g_menu_append_section(menu, nullptr, G_MENU_MODEL(section));
   auto *section2 = g_menu_new();
-  g_menu_append(section2, U8(tr::lng_menu_settings(tr::now)).c_str(), "contrail.settings");
-  g_menu_append(section2, U8(tr::lng_menu_about(tr::now) + u" Contrail"_q).c_str(), "contrail.about");
+  g_menu_append(section2, Tr("lng_menu_settings").c_str(), "contrail.settings");
+  g_menu_append(section2, (Tr("lng_menu_about") + " Contrail").c_str(), "contrail.about");
   g_menu_append_section(menu, nullptr, G_MENU_MODEL(section2));
   auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
   g_object_unref(section);
@@ -365,80 +188,56 @@ GtkWidget *ChatList::buildMenu() {
   g_object_unref(menu);
 
   auto *group = g_simple_action_group_new();
-  const auto add = [&](const char *name, std::function<void()> fn) {
-    auto *action = g_simple_action_new(name, nullptr);
-    Connect<void(GSimpleAction *, GVariant *)>(action, "activate", [fn](GSimpleAction *, GVariant *) { fn(); });
-    g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
-    g_object_unref(action);
-  };
-  add("saved", [this] { _window->openPeer(_session->user()); });
-  add("contacts", [this] { _window->openContacts(); });
-  add("settings", [this] { _window->openSettings(); });
-  add("about", [this] { _window->showAbout(); });
+  auto *saved = g_simple_action_new("saved", nullptr);
+  _connections.connect<void(GSimpleAction *, GVariant *)>(saved, "activate", [this](GSimpleAction *, GVariant *) {
+    openSavedMessages();
+  });
+  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(saved));
+  g_object_unref(saved);
+  auto *contacts = g_simple_action_new("contacts", nullptr);
+  _connections.connect<void(GSimpleAction *, GVariant *)>(contacts, "activate", [this](GSimpleAction *, GVariant *) {
+    _window.openContacts();
+  });
+  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(contacts));
+  g_object_unref(contacts);
+  auto *settings = g_simple_action_new("settings", nullptr);
+  _connections.connect<void(GSimpleAction *, GVariant *)>(settings, "activate", [this](GSimpleAction *, GVariant *) {
+    _window.openSettings();
+  });
+  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(settings));
+  g_object_unref(settings);
+  auto *about = g_simple_action_new("about", nullptr);
+  _connections.connect<void(GSimpleAction *, GVariant *)>(about, "activate", [this](GSimpleAction *, GVariant *) {
+    _window.showAbout();
+  });
+  g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(about));
+  g_object_unref(about);
   gtk_widget_insert_action_group(popover, "contrail", G_ACTION_GROUP(group));
   g_object_unref(group);
   return popover;
 }
 
-void ChatList::scheduleRefresh() {
-  if (_refreshScheduled) {
-    return;
-  }
-  _refreshScheduled = true;
-  crl::on_main(this, [=] {
-    _refreshScheduled = false;
-    refreshRows();
-  });
-}
+void ChatList::setupRow(GtkListItem *item) {
+  auto owned = std::make_unique<Row>();
+  auto *row = owned.get();
+  // Not selectable by the user, so that hovering a row with single-click activation doesn't select it.
+  gtk_list_item_set_selectable(item, FALSE);
 
-void ChatList::refreshRows() {
-  const auto list = this->list();
-  std::unordered_map<Dialogs::Entry *, bool> present;
-  for (const auto &row : list->indexed()->all()) {
-    const auto entry = row->entry().get();
-    // In the main list the archive is a row of its own; topics are in a list of their own.
-    if (_forum ? !entry->asTopic() : (!entry->asHistory() && !entry->asFolder())) {
-      continue;
-    }
-    present[entry] = true;
-    if (!_rows.contains(entry)) {
-      createRow(entry);
-    }
-  }
-  for (auto i = _rows.begin(); i != _rows.end();) {
-    if (!present.contains(i->first)) {
-      gtk_list_box_remove(GTK_LIST_BOX(_list), i->second->row);
-      i = _rows.erase(i);
-    } else {
-      ++i;
-    }
-  }
-  gtk_list_box_invalidate_sort(GTK_LIST_BOX(_list));
-  if (_forum && g_getenv("CONTRAIL_DEBUG")) g_message("Topics: %d", int(_rows.size()));
-  const auto loaded = list->loaded() || !_rows.empty();
-  gtk_stack_set_visible_child_name(GTK_STACK(_stack), loaded ? "list" : "loading");
-}
+  row->root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+  row->header = gtk_label_new(Tr("lng_search_global_results").c_str());
+  gtk_widget_add_css_class(row->header, "heading");
+  gtk_widget_add_css_class(row->header, "dim-label");
+  gtk_label_set_xalign(GTK_LABEL(row->header), 0);
+  gtk_widget_set_margin_start(row->header, 6);
+  gtk_widget_set_margin_top(row->header, 12);
+  gtk_widget_set_margin_bottom(row->header, 6);
+  gtk_box_append(GTK_BOX(row->root), row->header);
 
-ChatList::Row &ChatList::createRow(not_null<Dialogs::Entry *> entry) {
-  auto row = std::make_unique<Row>();
-  row->entry = entry;
-  row->row = gtk_list_box_row_new();
-  g_object_set_data(G_OBJECT(row->row), kRowKey, entry.get());
-
-  auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-  gtk_widget_set_margin_top(box, 6);
-  gtk_widget_set_margin_bottom(box, 6);
-  if (const auto history = entry->asHistory()) {
-    row->avatar = MakeAvatar(history->peer, 48, true);
-  } else if (const auto topic = entry->asTopic()) {
-    // A topic has a colored letter (or "#" for General) instead of a picture.
-    row->avatar = adw_avatar_new(48, U8(topic->isGeneral() ? u"#"_q : topic->title()).c_str(), TRUE);
-  } else {
-    row->avatar = adw_avatar_new(48, nullptr, FALSE);
-    adw_avatar_set_icon_name(ADW_AVATAR(row->avatar), "folder-symbolic");
-    gtk_widget_add_css_class(row->avatar, "archive-avatar");
-  }
-  gtk_box_append(GTK_BOX(box), row->avatar);
+  row->box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+  gtk_widget_set_margin_top(row->box, 6);
+  gtk_widget_set_margin_bottom(row->box, 6);
+  row->avatar = adw_avatar_new(kAvatarSize, nullptr, TRUE);
+  gtk_box_append(GTK_BOX(row->box), row->avatar);
 
   auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
   gtk_widget_set_hexpand(column, TRUE);
@@ -485,338 +284,529 @@ ChatList::Row &ChatList::createRow(not_null<Dialogs::Entry *> entry) {
   gtk_box_append(GTK_BOX(bottom), row->badge);
   gtk_box_append(GTK_BOX(column), bottom);
 
-  gtk_box_append(GTK_BOX(box), column);
-  gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row->row), box);
+  gtk_box_append(GTK_BOX(row->box), column);
+  gtk_box_append(GTK_BOX(row->root), row->box);
 
-  // Long press (touch) or right click: the chat's menu.
-  auto *raw = row.get();
+  // Long press (touch) or right click: the chat's menu. The rows go before this object does, see the destructor.
+  const auto menu = [this, row](double x, double y) {
+    if (row->entry.kind == RowKind::Chat) showContextMenu(row->entry.id, row->root, x, y);
+  };
   auto *longPress = gtk_gesture_long_press_new();
   gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(longPress), TRUE);
-  Connect<void(GtkGestureLongPress *, double, double)>(longPress, "pressed", [this, raw](GtkGestureLongPress *g, double x, double y) {
-    gtk_gesture_set_state(GTK_GESTURE(g), GTK_EVENT_SEQUENCE_CLAIMED);
-    showContextMenu(*raw, x, y);
+  Connect<void(GtkGestureLongPress *, double, double)>(longPress, "pressed", [menu](GtkGestureLongPress *gesture, double x, double y) {
+    gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    menu(x, y);
   });
-  gtk_widget_add_controller(row->row, GTK_EVENT_CONTROLLER(longPress));
+  gtk_widget_add_controller(row->root, GTK_EVENT_CONTROLLER(longPress));
   auto *rightClick = gtk_gesture_click_new();
   gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(rightClick), GDK_BUTTON_SECONDARY);
-  Connect<void(GtkGestureClick *, int, double, double)>(rightClick, "pressed", [this, raw](GtkGestureClick *, int, double x, double y) {
-    showContextMenu(*raw, x, y);
+  Connect<void(GtkGestureClick *, int, double, double)>(rightClick, "pressed", [menu](GtkGestureClick *, int, double x, double y) {
+    menu(x, y);
   });
-  gtk_widget_add_controller(row->row, GTK_EVENT_CONTROLLER(rightClick));
+  gtk_widget_add_controller(row->root, GTK_EVENT_CONTROLLER(rightClick));
 
-  gtk_list_box_append(GTK_LIST_BOX(_list), row->row);
+  gtk_list_item_set_child(item, row->root);
+  AttachData(item, kRowKey, std::move(owned));
+}
+
+void ChatList::bindRow(GtkListItem *item) {
+  auto *row = static_cast<Row *>(g_object_get_data(G_OBJECT(item), kRowKey));
+  auto *entry = CONTRAIL_LIST_ENTRY(gtk_list_item_get_item(item));
+  row->entry = {RowKind(entry->kind), entry->id};
+  gtk_list_item_set_activatable(item, row->entry.kind != RowKind::Header);
+  if (row->entry.kind == RowKind::Archive) {
+    _archiveRow = row;
+  } else if (row->entry.kind != RowKind::Header) {
+    _bound[row->entry.id] = row;
+  }
   updateRow(*row);
-  auto &result = *row;
-  _rows.emplace(entry, std::move(row));
-  return result;
 }
 
-void ChatList::updateEntry(Dialogs::Entry *entry) {
-  if (!entry) {
-    return;
-  }
-  if (const auto i = _rows.find(entry); i != _rows.end()) {
-    updateRow(*i->second);
-    gtk_list_box_row_changed(GTK_LIST_BOX_ROW(i->second->row));
-  }
-}
-
-void ChatList::removeEntry(Dialogs::Entry *entry) {
-  if (const auto i = _rows.find(entry); i != _rows.end()) {
-    gtk_list_box_remove(GTK_LIST_BOX(_list), i->second->row);
-    _rows.erase(i);
-    if (_current == entry) {
-      _current = nullptr;
-    }
-  }
+void ChatList::unbindRow(GtkListItem *item) {
+  auto *row = static_cast<Row *>(g_object_get_data(G_OBJECT(item), kRowKey));
+  // In one change a chat can get a new row before its old one lets go.
+  if (const auto it = _bound.find(row->entry.id); it != _bound.end() && it->second == row) _bound.erase(it);
+  if (_archiveRow == row) _archiveRow = nullptr;
+  UnbindAvatar(ADW_AVATAR(row->avatar));
 }
 
 void ChatList::updateRow(Row &row) {
-  const auto entry = row.entry;
-  gtk_label_set_text(GTK_LABEL(row.name), U8(EntryName(entry)).c_str());
-  const auto thread = entry->asThread();
-  const auto history = thread ? thread->owningHistory().get() : nullptr;
-  gtk_widget_set_visible(row.muted, thread && thread->muted());
-  if (const auto topic = entry->asTopic(); topic && row.avatar) {
-    adw_avatar_set_text(ADW_AVATAR(row.avatar), U8(topic->isGeneral() ? u"#"_q : topic->title()).c_str());
+  const auto header = row.entry.kind == RowKind::Header;
+  gtk_widget_set_visible(row.header, header);
+  gtk_widget_set_visible(row.box, !header);
+  switch (row.entry.kind) {
+    case RowKind::Chat: updateChatRow(row); break;
+    case RowKind::Archive: updateArchiveRow(row); break;
+    case RowKind::Found: updateFoundRow(row); break;
+    case RowKind::Header: break;
   }
+}
 
-  const auto item = entry->chatListMessage();
-  const auto time = entry->chatListTimeId();
-  gtk_label_set_text(GTK_LABEL(row.date), time ? U8(FormatListDate(time)).c_str() : "");
+void ChatList::setPreview(Row &row, const std::string &markup) {
+  // Statuses and typing reach every row on the screen: a label not touched stays laid out.
+  if (row.previewMarkup == markup) return;
+  row.previewMarkup = markup;
+  gtk_label_set_markup(GTK_LABEL(row.preview), markup.c_str());
+}
+
+void ChatList::setBadge(Row &row, bool visible, const std::string &text, bool muted) {
+  gtk_widget_set_visible(row.badge, visible);
+  if (!visible) return;
+  gtk_label_set_text(GTK_LABEL(row.badge), text.c_str());
+  if (muted) {
+    gtk_widget_add_css_class(row.badge, "muted");
+  } else {
+    gtk_widget_remove_css_class(row.badge, "muted");
+  }
+}
+
+std::string ChatList::chatName(const Td::Chat &chat) const {
+  if (isSelf(chat)) return Tr("lng_saved_messages");
+  if (chat.id == _store.repliesChatId()) return Tr("lng_replies_messages");
+  return chat.title;
+}
+
+bool ChatList::isSelf(const Td::Chat &chat) const {
+  return chat.kind == Td::ChatKind::Private && chat.peerId == _store.selfId();
+}
+
+void ChatList::updateChatRow(Row &row) {
+  const auto chat = _store.chat(row.entry.id);
+  if (!chat) return;
+  gtk_widget_remove_css_class(row.avatar, "archive-avatar");
+  adw_avatar_set_size(ADW_AVATAR(row.avatar), kAvatarSize);
+  BindAvatar(ADW_AVATAR(row.avatar), _store, chat->id, true);
+  gtk_label_set_text(GTK_LABEL(row.name), chatName(*chat).c_str());
+  gtk_widget_set_visible(row.muted, chat->muted);
+
+  gtk_widget_set_visible(row.date, true);
+  gtk_label_set_text(GTK_LABEL(row.date), chat->lastDate ? Td::FormatListDate(chat->lastDate).c_str() : "");
 
   // Sent / read ticks for the last outgoing message.
-  const char *statusIcon = nullptr;
-  if (history && item && item->out() && !item->isService() && !history->peer->isSelf()) {
-    if (item->hasFailed()) {
-      statusIcon = "dialog-error-symbolic";
-    } else if (item->isSending()) {
-      statusIcon = "contrail-clock-symbolic";
-    } else if (item->unread(thread)) {
-      statusIcon = "contrail-check-symbolic";
-    } else {
-      statusIcon = "contrail-check-double-symbolic";
-    }
-  }
-  gtk_widget_set_visible(row.status, statusIcon != nullptr);
-  if (statusIcon) {
-    gtk_image_set_from_icon_name(GTK_IMAGE(row.status), statusIcon);
+  const auto icon = Td::ChatStatusIcon(*chat, _store.selfId());
+  gtk_widget_set_visible(row.status, icon != nullptr);
+  if (icon) gtk_image_set_from_icon_name(GTK_IMAGE(row.status), icon);
+
+  gtk_widget_set_visible(row.preview, true);
+  gtk_widget_remove_css_class(row.preview, "caption");
+  if (const auto typing = Td::TypingText(*chat, _store); !typing.empty()) {
+    setPreview(row, "<span color=\"#3584e4\">" + Escape(typing) + "</span>");
+  } else if (!chat->draft.empty()) {
+    setPreview(row, Lead(Tr("lng_from_draft")) + Escape(Td::OneLine(chat->draft)));
+  } else if (const auto sender = Td::PreviewSender(*chat, _store); !sender.empty()) {
+    setPreview(row, Lead(sender) + Escape(chat->preview));
+  } else {
+    setPreview(row, Escape(chat->preview));
   }
 
-  if (const auto action = thread ? thread->sendActionPainter()->actionText() : QString(); !action.isEmpty()) {
-    gtk_label_set_markup(GTK_LABEL(row.preview), ("<span color=\"#3584e4\">" + Escape(action) + "</span>").c_str());
-  } else {
-    gtk_label_set_markup(GTK_LABEL(row.preview), ToMarkup(OneLine(EntryPreview(entry)), false, false).c_str());
-  }
+  const auto badge = Td::ChatBadge(*chat);
+  const auto &position = _kind == Td::ListKind::Main ? chat->main : chat->archive;
+  setBadge(row, badge.visible, badge.text, badge.muted);
+  gtk_widget_set_visible(row.pinned, !badge.visible && position.pinned);
+}
 
-  const auto badges = entry->chatListBadgesState();
-  const auto pinned = entry->isPinnedDialog(FilterId());
-  if (badges.unread || badges.mention || badges.reaction) {
-    // A new reaction to the user's message: a heart, as in the phone apps.
-    auto text = badges.mention ? u"@"_q : badges.reaction ? QString::fromUtf8("\xE2\x9D\xA4") : QString();
-    if (badges.unreadCounter > 0) {
-      text = (text.isEmpty() ? QString() : text + ' ') + QString::number(badges.unreadCounter);
-    } else if (text.isEmpty()) {
-      text = u" "_q;
+void ChatList::updateArchiveRow(Row &row) {
+  UnbindAvatar(ADW_AVATAR(row.avatar));
+  adw_avatar_set_size(ADW_AVATAR(row.avatar), kAvatarSize);
+  adw_avatar_set_custom_image(ADW_AVATAR(row.avatar), nullptr);
+  adw_avatar_set_text(ADW_AVATAR(row.avatar), "");
+  adw_avatar_set_show_initials(ADW_AVATAR(row.avatar), FALSE);
+  adw_avatar_set_icon_name(ADW_AVATAR(row.avatar), "folder-symbolic");
+  gtk_widget_remove_css_class(row.avatar, "saved-messages");
+  gtk_widget_add_css_class(row.avatar, "archive-avatar");
+  gtk_label_set_text(GTK_LABEL(row.name), Tr("lng_archived_name").c_str());
+  gtk_widget_set_visible(row.muted, false);
+  gtk_widget_set_visible(row.status, false);
+  gtk_widget_set_visible(row.pinned, false);
+
+  // The names of the chats on top of it, and the time of the newest.
+  auto names = std::string();
+  auto count = 0;
+  auto date = 0;
+  for (const auto id : _store.list(Td::ListKind::Archive)) {
+    const auto chat = _store.chat(id);
+    if (!chat) continue;
+    date = std::max(date, chat->lastDate);
+    if (count < kArchiveNames) {
+      names += (count ? ", " : "") + chatName(*chat);
+      ++count;
+    } else if (!chat->archive.pinned) {
+      break;  // Past the pinned chats the newest has been seen, and an archive can be long.
     }
-    gtk_label_set_text(GTK_LABEL(row.badge), U8(text).c_str());
-    if (badges.unreadMuted && !badges.mention && !(badges.reaction && !badges.reactionMuted)) {
-      gtk_widget_add_css_class(row.badge, "muted");
-    } else {
-      gtk_widget_remove_css_class(row.badge, "muted");
-    }
-    gtk_widget_set_visible(row.badge, TRUE);
-    gtk_widget_set_visible(row.pinned, FALSE);
-  } else {
-    gtk_widget_set_visible(row.badge, FALSE);
-    gtk_widget_set_visible(row.pinned, pinned);
+  }
+  gtk_widget_set_visible(row.date, true);
+  gtk_label_set_text(GTK_LABEL(row.date), date ? Td::FormatListDate(date).c_str() : "");
+  gtk_widget_set_visible(row.preview, true);
+  gtk_widget_remove_css_class(row.preview, "caption");
+  setPreview(row, Escape(names));
+  const auto unread = _store.unreadChats(Td::ListKind::Archive);
+  setBadge(row, unread > 0, std::to_string(unread), true);
+}
+
+void ChatList::updateFoundRow(Row &row) {
+  const auto chat = _store.chat(row.entry.id);
+  if (!chat) return;
+  gtk_widget_remove_css_class(row.avatar, "archive-avatar");
+  adw_avatar_set_size(ADW_AVATAR(row.avatar), kFoundAvatarSize);
+  BindAvatar(ADW_AVATAR(row.avatar), _store, chat->id);
+  gtk_label_set_text(GTK_LABEL(row.name), chat->title.c_str());
+  gtk_widget_set_visible(row.muted, false);
+  gtk_widget_set_visible(row.status, false);
+  gtk_widget_set_visible(row.date, false);
+  gtk_widget_set_visible(row.pinned, false);
+  gtk_widget_set_visible(row.badge, false);
+  const auto username = _store.username(*chat);
+  gtk_widget_set_visible(row.preview, !username.empty());
+  gtk_widget_add_css_class(row.preview, "caption");
+  setPreview(row, Escape("@" + username));
+}
+
+void ChatList::chatChanged(Td::ChatId id) {
+  if (const auto it = _bound.find(id); it != _bound.end()) updateRow(*it->second);
+  if (_archiveRow) {
+    const auto chat = _store.chat(id);
+    if (chat && chat->archive.order) updateRow(*_archiveRow);
+  }
+  // A new title can bring a chat into the results or take it out.
+  if (!_query.empty()) scheduleRefresh();
+}
+
+void ChatList::userChanged(Td::UserId id) {
+  // A row shows a user's name in the preview or in the title; the list on the screen is short.
+  for (const auto &[chatId, row] : _bound) {
+    const auto chat = _store.chat(chatId);
+    if (!chat) continue;
+    if ((chat->kind == Td::ChatKind::Private && chat->peerId == id) || chat->lastSenderUser == id) updateRow(*row);
   }
 }
 
-void ChatList::setCurrent(Data::Thread *thread) {
-  // The main list marks the group of an open topic.
-  if (thread && !_forum && thread->asTopic()) {
-    thread = thread->owningHistory();
-  }
-  _current = thread;
-  if (thread) {
-    if (const auto i = _rows.find(thread); i != _rows.end()) {
-      gtk_list_box_select_row(GTK_LIST_BOX(_list), GTK_LIST_BOX_ROW(i->second->row));
-      return;
-    }
-  }
-  gtk_list_box_unselect_all(GTK_LIST_BOX(_list));
+void ChatList::connectionChanged() {
+  const auto state = _store.connection();
+  const auto id = state ? state->get_id() : 0;
+  const auto connecting = id == api::connectionStateWaitingForNetwork::ID || id == api::connectionStateConnecting::ID
+      || id == api::connectionStateConnectingToProxy::ID;
+  adw_window_title_set_subtitle(ADW_WINDOW_TITLE(_title), connecting ? Tr("lng_status_connecting").c_str() : "");
 }
 
-void ChatList::activated(GtkListBoxRow *row) {
-  auto *entry = static_cast<Dialogs::Entry *>(g_object_get_data(G_OBJECT(row), kRowKey));
-  if (!entry) {
-    return;
+std::vector<ChatList::Entry> ChatList::wantedEntries() {
+  auto result = std::vector<Entry>();
+  const auto &ids = _store.list(_kind);
+  result.reserve(ids.size() + _found.size() + 2);
+  const auto matches = [&](const std::string &name, const std::string &username) {
+    return _words.empty() || Td::MatchesSearch(name, username, _words);
+  };
+  // TDLib doesn't say where the archive stands among the chats: it goes on top, where the official apps show it.
+  if (_kind == Td::ListKind::Main && !_store.list(Td::ListKind::Archive).empty()
+      && matches(Tr("lng_archived_name"), {})) {
+    result.push_back({RowKind::Archive, 0});
   }
-  if (entry->asFolder()) {
-    _window->openArchive();
-  } else if (const auto topic = entry->asTopic()) {
-    _window->openThread(topic);
-  } else if (const auto history = entry->asHistory()) {
-    _window->openHistory(history);
+  for (const auto id : ids) {
+    const auto chat = _store.chat(id);
+    if (chat && matches(chatName(*chat), _store.username(*chat))) result.push_back({RowKind::Chat, id});
+  }
+  // Chats already shown above aren't repeated.
+  auto found = std::vector<Entry>();
+  for (const auto id : _found) {
+    const auto entry = Entry{RowKind::Found, id};
+    if (std::ranges::find(result, Entry{RowKind::Chat, id}) == result.end()
+        && std::ranges::find(found, entry) == found.end()) {
+      found.push_back(entry);
+    }
+  }
+  if (!found.empty()) {
+    result.push_back({RowKind::Header, 0});
+    result.insert(result.end(), found.begin(), found.end());
+  }
+  return result;
+}
+
+void ChatList::scheduleRefresh() {
+  if (_refreshSource) return;
+  // Updates come in bursts, and a change of the model must not happen in the middle of a layout.
+  _refreshSource = g_idle_add_once(+[](gpointer data) {
+    auto *self = static_cast<ChatList *>(data);
+    self->_refreshSource = 0;
+    self->refresh();
+  }, this);
+}
+
+void ChatList::refresh() {
+  auto wanted = wantedEntries();
+  const auto change = Td::DiffLists(_shown, wanted);
+  if (change.removed || change.added) {
+    auto *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
+    const auto atTop = gtk_adjustment_get_value(adjustment) <= 0.;
+    // Items that only moved stay the same objects: their rows keep their widgets and aren't drawn anew.
+    auto reused = std::map<std::pair<RowKind, Td::ChatId>, gpointer>();
+    for (auto i = std::size_t(0); i < change.removed; ++i) {
+      const auto &entry = _shown[change.first + i];
+      reused[{entry.kind, entry.id}] = g_list_model_get_item(G_LIST_MODEL(_model), guint(change.first + i));
+    }
+    auto added = std::vector<gpointer>();
+    added.reserve(change.added);
+    for (auto i = std::size_t(0); i < change.added; ++i) {
+      const auto &entry = wanted[change.first + i];
+      if (const auto it = reused.find({entry.kind, entry.id}); it != reused.end()) {
+        added.push_back(it->second);
+        reused.erase(it);
+      } else {
+        auto *item = CONTRAIL_LIST_ENTRY(g_object_new(contrail_list_entry_get_type(), nullptr));
+        item->kind = int(entry.kind);
+        item->id = entry.id;
+        added.push_back(item);
+      }
+    }
+    _shown = std::move(wanted);
+    g_list_store_splice(_model, guint(change.first), guint(change.removed), added.data(), guint(added.size()));
+    std::ranges::for_each(added, g_object_unref);
+    for (const auto &[key, item] : reused) g_object_unref(item);
+    // The view follows the row at its top. A list at its top stays there: a new message must come into view.
+    if (atTop && !_shown.empty()) gtk_list_view_scroll_to(GTK_LIST_VIEW(_list), 0, GTK_LIST_SCROLL_NONE, nullptr);
+  }
+  applySelection();
+  const auto ready = _store.listComplete(_kind) || !_store.list(_kind).empty();
+  gtk_stack_set_visible_child_name(GTK_STACK(_stack), ready ? "list" : "loading");
+}
+
+void ChatList::applySelection() {
+  auto position = guint(GTK_INVALID_LIST_POSITION);
+  if (_current) {
+    const auto found = std::ranges::find_if(_shown, [&](const Entry &entry) {
+      return entry.id == _current && (entry.kind == RowKind::Chat || entry.kind == RowKind::Found);
+    });
+    if (found != _shown.end()) position = guint(found - _shown.begin());
+  }
+  gtk_single_selection_set_selected(_selection, position);
+}
+
+void ChatList::setCurrent(Td::ChatId chat) {
+  _current = chat;
+  applySelection();
+}
+
+void ChatList::activate(const Entry &entry) {
+  switch (entry.kind) {
+    case RowKind::Archive: _window.openArchive(); break;
+    case RowKind::Chat:
+    case RowKind::Found: _window.openChat(entry.id); break;
+    case RowKind::Header: break;
   }
 }
 
 void ChatList::openRow(int index) {
-  if (auto *row = gtk_list_box_get_row_at_index(GTK_LIST_BOX(_list), index)) {
-    activated(row);
-  }
+  if (index >= 0 && std::size_t(index) < _shown.size()) activate(_shown[index]);
 }
 
-void ChatList::showContextMenu(Row &row, double x, double y) {
-  const auto thread = row.entry->asThread();
-  const auto topic = row.entry->asTopic();
-  const auto history = row.entry->asHistory();
-  if (!thread) {
-    return;
-  }
-  const auto peer = thread->peer();
+void ChatList::loadMoreIfNear() {
+  // A filtered list is short whatever the account has.
+  if (_loadSource || !_query.empty() || _store.listComplete(_kind)) return;
+  auto *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
+  const auto page = gtk_adjustment_get_page_size(adjustment);
+  if (page <= 0. || gtk_adjustment_get_value(adjustment) + 3 * page < gtk_adjustment_get_upper(adjustment)) return;
+  // This can run in the middle of a layout.
+  _loadSource = g_idle_add_once(+[](gpointer data) {
+    auto *self = static_cast<ChatList *>(data);
+    self->_loadSource = 0;
+    self->_store.loadMore(self->_kind);
+  }, this);
+}
+
+void ChatList::showContextMenu(Td::ChatId id, GtkWidget *parent, double x, double y) {
+  const auto chat = _store.chat(id);
+  if (!chat) return;
+  const auto self = isSelf(*chat);
+  const auto &position = _kind == Td::ListKind::Main ? chat->main : chat->archive;
   auto *menu = g_menu_new();
-  if (history) {
-    const auto pinned = history->isPinnedDialog(FilterId());
-    g_menu_append(menu, U8(pinned ? tr::lng_context_unpin_from_top(tr::now) : tr::lng_context_pin_to_top(tr::now)).c_str(),
-                  "row.pin");
+  g_menu_append(menu, Tr(position.pinned ? "lng_context_unpin_from_top" : "lng_context_pin_to_top").c_str(), "row.pin");
+  if (!self) g_menu_append(menu, Tr(chat->muted ? "lng_context_unmute" : "lng_context_mute").c_str(), "row.mute");
+  if (chat->unread > 0 || chat->markedUnread) g_menu_append(menu, Tr("lng_context_mark_read").c_str(), "row.read");
+  if (!self && chat->id != _store.repliesChatId()) {
+    g_menu_append(menu, Tr(chat->archive.order ? "lng_archived_remove" : "lng_archived_add").c_str(), "row.archive");
   }
-  if (!peer->isSelf()) {
-    g_menu_append(menu, U8(thread->muted() ? tr::lng_context_unmute(tr::now) : tr::lng_context_mute(tr::now)).c_str(),
-                  "row.mute");
-  }
-  if (thread->chatListBadgesState().unread) {
-    g_menu_append(menu, U8(tr::lng_context_mark_read(tr::now)).c_str(), "row.read");
-  }
-  if (topic) {
-    // Pinning, archiving and leaving are for the whole group.
-  } else if (!peer->isSelf() && !peer->isRepliesChat()) {
-    const auto archived = history->folder() != nullptr;
-    g_menu_append(menu, U8(archived ? tr::lng_archived_remove(tr::now) : tr::lng_archived_add(tr::now)).c_str(),
-                  "row.archive");
-  }
-  if (history) {
-    g_menu_append(menu,
-                  U8(peer->isChannel() ? (peer->isMegagroup() ? tr::lng_profile_leave_group(tr::now)
-                                                              : tr::lng_profile_leave_channel(tr::now))
-                                       : tr::lng_profile_delete_conversation(tr::now))
-                      .c_str(),
-                  "row.delete");
-  }
+  const auto leave = !chat->supergroup ? "lng_profile_delete_conversation"
+      : chat->kind == Td::ChatKind::Channel ? "lng_profile_leave_channel" : "lng_profile_leave_group";
+  g_menu_append(menu, Tr(leave).c_str(), "row.delete");
 
   auto *popover = gtk_popover_menu_new_from_model(G_MENU_MODEL(menu));
   g_object_unref(menu);
-  gtk_widget_set_parent(popover, row.row);
+  gtk_widget_set_parent(popover, parent);
   GdkRectangle rect = {int(x), int(y), 1, 1};
   gtk_popover_set_pointing_to(GTK_POPOVER(popover), &rect);
   gtk_popover_set_has_arrow(GTK_POPOVER(popover), FALSE);
   DestroyPopoverOnClose(popover);
 
   auto *group = g_simple_action_group_new();
-  const auto add = [&](const char *name, std::function<void()> fn) {
+  // The row may show another chat by the time an action runs, and this list may be gone with the session.
+  const auto token = _lifetime.token();
+  for (const auto *name : {"pin", "mute", "read", "archive", "delete"}) {
     auto *action = g_simple_action_new(name, nullptr);
-    Connect<void(GSimpleAction *, GVariant *)>(action, "activate", [fn](GSimpleAction *, GVariant *) { fn(); });
+    Connect<void(GSimpleAction *, GVariant *)>(action, "activate", [this, token, id, name = std::string(name)](GSimpleAction *, GVariant *) {
+      if (!token.expired()) rowAction(id, name);
+    });
     g_action_map_add_action(G_ACTION_MAP(group), G_ACTION(action));
     g_object_unref(action);
-  };
-  const auto session = _session;
-  add("pin", [=] {
-    const auto owner = &history->owner();
-    const auto pin = !history->isPinnedDialog(FilterId());
-    owner->setChatPinned(history, FilterId(), pin);
-    session->api()
-        .request(MTPmessages_ToggleDialogPin(MTP_flags(pin ? MTPmessages_ToggleDialogPin::Flag::f_pinned
-                                                           : MTPmessages_ToggleDialogPin::Flag(0)),
-                                             MTP_inputDialogPeer(history->peer->input())))
-        .done([=] { owner->notifyPinnedDialogsOrderUpdated(); })
-        .fail([=](const MTP::Error &error) {
-          owner->setChatPinned(history, FilterId(), !pin);
-          ShowToast(error.type());
-        })
-        .send();
-  });
-  add("mute", [=] {
-    auto value = Data::MuteValue();
-    if (thread->muted()) {
-      value.unmute = true;
-    } else {
-      value.forever = true;
-    }
-    session->data().notifySettings().update(thread, value);
-  });
-  add("read", [=] {
-    if (topic) {
-      topic->readTillEnd();
-    } else {
-      session->data().histories().readInbox(history);
-    }
-  });
-  add("archive", [=] {
-    const auto archive = (history->folder() == nullptr);
-    session->api().toggleHistoryArchived(history, archive, [=] {
-      ShowToast(archive ? tr::lng_archived_added(tr::now) : tr::lng_archived_removed(tr::now));
-    });
-  });
-  add("delete", [=] { _window->confirmDeleteChat(peer); });
+  }
   gtk_widget_insert_action_group(popover, "row", G_ACTION_GROUP(group));
   g_object_unref(group);
   gtk_popover_popup(GTK_POPOVER(popover));
 }
 
-void ChatList::loadMore() {
-  if (_forum) {
-    _forum->requestTopics();
-  } else if (_folder) {
-    _session->api().requestDialogs(_folder);
-  } else {
-    _session->api().requestMoreBlockedByDateDialogs();
+void ChatList::rowAction(Td::ChatId id, const std::string &action) {
+  const auto chat = _store.chat(id);
+  if (!chat) return;
+  const auto failed = [](api::error &error) { ShowToast(error.message_); };
+  if (action == "pin") {
+    const auto &position = _kind == Td::ListKind::Main ? chat->main : chat->archive;
+    send(api::make_object<api::toggleChatIsPinned>(MakeList(_kind), id, !position.pinned));
+  } else if (action == "mute") {
+    _store.setMuted(id, !chat->muted, failed);
+  } else if (action == "read") {
+    _store.markRead(id, failed);
+  } else if (action == "archive") {
+    toggleArchived(id);
+  } else if (action == "delete") {
+    confirmDelete(id);
+  } else if (action == "delete-now") {
+    deleteChat(id, false);
   }
 }
 
-void ChatList::startSearch(const QString &query) {
-  gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(_searchBar), TRUE);
-  if (!query.isEmpty()) {
-    gtk_editable_set_text(GTK_EDITABLE(_searchEntry), U8(query).c_str());
+void ChatList::send(Td::FunctionPtr function) {
+  _store.client().request<api::ok>(std::move(function), _lifetime, [](api::ok &) {},
+                                   [](api::error &error) { ShowToast(error.message_); });
+}
+
+void ChatList::toggleArchived(Td::ChatId id) {
+  const auto chat = _store.chat(id);
+  if (!chat) return;
+  const auto archive = !chat->archive.order;
+  _store.client().request<api::ok>(
+      api::make_object<api::addChatToList>(id, MakeList(archive ? Td::ListKind::Archive : Td::ListKind::Main)),
+      _lifetime, [archive](api::ok &) { ShowToast(Tr(archive ? "lng_archived_added" : "lng_archived_removed")); },
+      [](api::error &error) { ShowToast(error.message_); });
+}
+
+void ChatList::confirmDelete(Td::ChatId id) {
+  const auto chat = _store.chat(id);
+  if (!chat) return;
+  auto text = std::string();
+  auto button = Tr("lng_box_delete");
+  if (chat->supergroup) {
+    text = Tr(chat->kind == Td::ChatKind::Channel ? "lng_sure_leave_channel" : "lng_sure_leave_group");
+    button = Tr("lng_box_leave");
+  } else if (chat->kind == Td::ChatKind::Group) {
+    text = Tr("lng_sure_delete_and_exit", {{"group", chat->title}});
+  } else if (isSelf(*chat)) {
+    text = Tr("lng_sure_delete_saved_messages");
+  } else {
+    text = Tr("lng_sure_delete_history", {{"contact", chatName(*chat)}});
   }
+  std::ranges::replace(text, '\n', ' ');
+  auto *dialog = adw_alert_dialog_new(nullptr, text.c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(dialog), "cancel", Tr("lng_cancel").c_str(), "delete", button.c_str(),
+                                 nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog), "delete", ADW_RESPONSE_DESTRUCTIVE);
+  GtkWidget *revoke = nullptr;
+  if (const auto user = chat->kind == Td::ChatKind::Private ? _store.user(chat->peerId) : nullptr;
+      user && !isSelf(*chat) && !user->bot) {
+    const auto name = user->firstName.empty() ? Td::DisplayName(*user) : user->firstName;
+    revoke = gtk_check_button_new_with_label(Tr("lng_delete_for_other_check", {{"user", name}}).c_str());
+    adw_alert_dialog_set_extra_child(ADW_ALERT_DIALOG(dialog), revoke);
+  }
+  const auto token = _lifetime.token();
+  Connect<void(AdwAlertDialog *, const char *)>(dialog, "response", [=, this](AdwAlertDialog *, const char *response) {
+    if (token.expired() || g_strcmp0(response, "delete") != 0) return;
+    deleteChat(id, revoke && gtk_check_button_get_active(GTK_CHECK_BUTTON(revoke)));
+  });
+  adw_dialog_present(ADW_DIALOG(dialog), _window.widget());
+}
+
+void ChatList::deleteChat(Td::ChatId id, bool revoke) {
+  const auto chat = _store.chat(id);
+  if (!chat) return;
+  if (_window.currentChat() == id) _window.closeChat();
+  if (chat->supergroup) {
+    send(api::make_object<api::leaveChat>(id));
+  } else if (chat->kind == Td::ChatKind::Group) {
+    // A basic group is left first: its history can go from the list only after that. Already left is fine too.
+    _store.client().send(api::make_object<api::leaveChat>(id), [this, id](Td::ObjectPtr) {
+      send(api::make_object<api::deleteChatHistory>(id, true, false));
+    }, _lifetime);
+  } else {
+    send(api::make_object<api::deleteChatHistory>(id, true, revoke));
+  }
+}
+
+void ChatList::openSavedMessages() {
+  _store.client().request<api::chat>(api::make_object<api::createPrivateChat>(_store.selfId(), false), _lifetime,
+                                     [this](api::chat &chat) { _window.openChat(chat.id_); },
+                                     [](api::error &error) { ShowToast(error.message_); });
+}
+
+void ChatList::startSearch(const std::string &query) {
+  gtk_search_bar_set_search_mode(GTK_SEARCH_BAR(_searchBar), TRUE);
+  if (!query.empty()) gtk_editable_set_text(GTK_EDITABLE(_searchEntry), query.c_str());
   gtk_widget_grab_focus(_searchEntry);
 }
 
 void ChatList::applySearch() {
-  _query = Q(gtk_editable_get_text(GTK_EDITABLE(_searchEntry))).trimmed();
-  gtk_list_box_invalidate_filter(GTK_LIST_BOX(_list));
-  ClearBox(_globalList);
-  gtk_widget_set_visible(_globalHeader, FALSE);
-  gtk_widget_set_visible(_globalList, FALSE);
-  if (_globalRequest) {
-    _session->api().request(base::take(_globalRequest)).cancel();
+  _query = Trimmed(gtk_editable_get_text(GTK_EDITABLE(_searchEntry)));
+  _words = Td::SearchWords(_query);
+  _found.clear();
+  _searchLifetime.reset();
+  if (_searchTimer) g_source_remove(_searchTimer);
+  _searchTimer = 0;
+  if (_kind == Td::ListKind::Main && g_utf8_strlen(_query.c_str(), -1) >= kGlobalSearchMinLength) {
+    _searchTimer = g_timeout_add_once(kSearchDelayMs, +[](gpointer data) {
+      auto *self = static_cast<ChatList *>(data);
+      self->_searchTimer = 0;
+      self->searchGlobal();
+    }, this);
   }
-  if (_query.size() >= 3 && !_folder && !_forum) {
-    _searchTimer.callOnce(400);
-  } else {
-    _searchTimer.cancel();
-  }
+  refresh();
+  loadMoreIfNear();
 }
 
-void ChatList::searchGlobal(const QString &query) {
-  _globalRequest = _session->api()
-                       .request(MTPcontacts_Search(MTP_flags(0), MTP_string(query), MTP_int(30)))
-                       .done([=](const MTPcontacts_Found &result) {
-                         _globalRequest = 0;
-                         if (query != _query) {
-                           return;
-                         }
-                         const auto &data = result.data();
-                         _session->data().processUsers(data.vusers());
-                         _session->data().processChats(data.vchats());
-                         auto count = 0;
-                         const auto add = [&](const MTPPeer &mtpPeer) {
-                           const auto peer = _session->data().peerLoaded(peerFromMTP(mtpPeer));
-                           if (!peer) {
-                             return;
-                           }
-                           // Chats already in the list are shown there.
-                           if (const auto history = _session->data().historyLoaded(peer)) {
-                             if (_rows.contains(history)) {
-                               return;
-                             }
-                           }
-                           auto *row = gtk_list_box_row_new();
-                           g_object_set_data(G_OBJECT(row), "contrail-peer", peer);
-                           auto *box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-                           gtk_widget_set_margin_top(box, 6);
-                           gtk_widget_set_margin_bottom(box, 6);
-                           gtk_box_append(GTK_BOX(box), MakeAvatar(peer, 40));
-                           auto *column = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-                           gtk_widget_set_valign(column, GTK_ALIGN_CENTER);
-                           auto *name = gtk_label_new(U8(peer->name()).c_str());
-                           gtk_label_set_xalign(GTK_LABEL(name), 0);
-                           gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
-                           gtk_widget_add_css_class(name, "chat-name");
-                           gtk_box_append(GTK_BOX(column), name);
-                           if (const auto username = peer->username(); !username.isEmpty()) {
-                             auto *sub = gtk_label_new(("@" + U8(username)).c_str());
-                             gtk_label_set_xalign(GTK_LABEL(sub), 0);
-                             gtk_widget_add_css_class(sub, "dim-label");
-                             gtk_widget_add_css_class(sub, "caption");
-                             gtk_box_append(GTK_BOX(column), sub);
-                           }
-                           gtk_box_append(GTK_BOX(box), column);
-                           gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-                           gtk_list_box_append(GTK_LIST_BOX(_globalList), row);
-                           ++count;
-                         };
-                         for (const auto &peer : data.vmy_results().v) {
-                           add(peer);
-                         }
-                         for (const auto &peer : data.vresults().v) {
-                           add(peer);
-                         }
-                         gtk_widget_set_visible(_globalHeader, count > 0);
-                         gtk_widget_set_visible(_globalList, count > 0);
-                       })
-                       .fail([=] { _globalRequest = 0; })
-                       .send();
+void ChatList::searchGlobal() {
+  auto &client = _store.client();
+  // A failed search just finds nothing, as the query is usually still being typed.
+  const auto failed = [](api::error &) {};
+  // The chats and contacts of this account that aren't loaded yet, then everybody else's.
+  client.request<api::chats>(api::make_object<api::searchChatsOnServer>(_query, nullptr, kGlobalSearchLimit),
+                             _searchLifetime, [this](api::chats &chats) { addFound(chats, true); }, failed);
+  client.request<api::chats>(api::make_object<api::searchPublicChats>(_query, nullptr), _searchLifetime,
+                             [this](api::chats &chats) { addFound(chats, false); }, failed);
+}
+
+void ChatList::addFound(const api::chats &chats, bool own) {
+  _found.insert(own ? _found.begin() : _found.end(), chats.chat_ids_.begin(), chats.chat_ids_.end());
+  refresh();
+}
+
+void ChatList::debugMenu(int index) {
+  if (index < 0 || std::size_t(index) >= _shown.size()) return;
+  const auto id = _shown[index].id;
+  if (const auto it = _bound.find(id); it != _bound.end()) showContextMenu(id, it->second->root, 10, 10);
+}
+
+void ChatList::debugAction(int index, const std::string &action) {
+  if (action == "saved") openSavedMessages();
+  else if (index >= 0 && std::size_t(index) < _shown.size()) rowAction(_shown[index].id, action);
+}
+
+void ChatList::debugScroll(const std::string &where) {
+  auto *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
+  const auto end = gtk_adjustment_get_upper(adjustment) - gtk_adjustment_get_page_size(adjustment);
+  gtk_adjustment_set_value(adjustment, where == "bottom" ? end : where == "top" ? 0. : std::atof(where.c_str()));
+}
+
+void ChatList::debugState() {
+  auto *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(_scroll));
+  const auto selected = gtk_single_selection_get_selected(_selection);
+  g_message("list shown=%d model=%u bound=%d complete=%d selected=%d scroll=%.0f/%.0f",
+            int(_shown.size()), g_list_model_get_n_items(G_LIST_MODEL(_model)), int(_bound.size()),
+            int(_store.listComplete(_kind)), selected == GTK_INVALID_LIST_POSITION ? -1 : int(selected),
+            gtk_adjustment_get_value(adjustment), gtk_adjustment_get_upper(adjustment));
 }
 
 }  // namespace Contrail

@@ -1,316 +1,402 @@
 #pragma once
 
 #include "app.hpp"
+#include "attach_media.hpp"
+#include "td/store.hpp"
 
-#include "base/timer.h"
-#include "base/weak_ptr.h"
-#include "data/data_messages.h"
-
-#include <rpl/lifetime.h>
-
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <unordered_map>
-
-class History;
-class HistoryItem;
-class PeerData;
-class PhotoData;
-class DocumentData;
-
-namespace Data {
-class Thread;
-class ForumTopic;
-} // namespace Data
-
-namespace Ui {
-struct PreparedList;
-class SendFilesWay;
-} // namespace Ui
-
-namespace Api {
-struct SendAction;
-} // namespace Api
-
-namespace HistoryView {
-class PinnedTracker;
-} // namespace HistoryView
+#include <unordered_set>
+#include <vector>
 
 namespace Contrail {
 
+class ChatLiveBar;
+class AttachDialog;
+class AudioPlayer;
+class ClipboardReader;
+class VoiceRecordBar;
 class MainWindow;
 class MessageWidget;
-class AttachDialog;
-class ClipboardReader;
-class ChatLiveLocations;
+struct ForwardDraft;
+struct MessageItem;
+struct ReplyPreview;
 
-// An open chat: the messages (loaded page by page through the core, like Telegram Desktop's
-// HistoryWidget does) and the message field. A topic of a group with topics is a chat of its own:
-// its messages come from the core's list of the topic (Data::RepliesList), as in RepliesWidget.
-class ChatView final : public base::has_weak_ptr {
-public:
-  // `showAtY`: where on the screen to put the message `showAt` (the place it had before the window was
-  // closed); by default a third from the top, highlighted.
-  ChatView(not_null<Data::Thread *> thread, not_null<MainWindow *> window, MsgId showAt,
-           std::optional<double> showAtY = std::nullopt);
+// An open chat: its messages and the message field. Only the messages near the screen are held, each with its row:
+// the ones that go are in TDLib's database and come back from there. A topic of a group with topics is a chat of
+// its own: only its messages, sent into it, with its own draft and read mark.
+class ChatView final {
+ public:
+  ChatView(Td::Store &store, Td::ChatId chat, MainWindow &window, std::int64_t showAt = 0, std::int32_t topic = 0);
   ~ChatView();
 
   [[nodiscard]] GtkWidget *widget() const { return _root; }
-  [[nodiscard]] not_null<History *> history() const { return _history; }
-  [[nodiscard]] not_null<Data::Thread *> thread() const { return _thread; }
-  [[nodiscard]] not_null<MainWindow *> window() const { return _window; }
-
-  void showAt(MsgId id);
-  // The message at the top of the screen and its place there; none at the bottom of the chat.
-  [[nodiscard]] std::pair<MsgId, double> scrollState() const;
+  [[nodiscard]] Td::ChatId chat() const { return _chat; }
+  [[nodiscard]] std::int32_t topic() const { return _topic; }  // 0: the whole chat.
+  [[nodiscard]] Td::Store &store() const { return _store; }
+  [[nodiscard]] MainWindow &window() const { return _window; }
+  // Ends with the view: what is asked for it is dropped then.
+  [[nodiscard]] const Td::Lifetime &lifetime() const { return _lifetime; }
+  // A message held near the screen, null otherwise.
+  [[nodiscard]] const Td::api::message *heldMessage(std::int64_t id) const;
+  // A dialog about this chat's messages (who reacted, all the reactions): it goes when the chat does.
+  void holdDialog(AdwDialog *dialog);
+  void showAt(std::int64_t message);
+  // Cancels a reply, an edit or the messages to forward; false if there was nothing to cancel.
   bool handleEscape();
-  // Short of memory: only the rows near the screen stay.
-  void releaseMemory();  // Cancels a reply or an edit; false if there was nothing to cancel.
+  // Other messages wait here to be forwarded, or none any more (MainWindow::setForwardDraft).
+  void forwardChanged();
 
-  // Used by the messages.
-  void openPeer(not_null<PeerData *> peer);
-  void openPhoto(not_null<PhotoData *> photo, not_null<HistoryItem *> item);
-  void openDocument(not_null<DocumentData *> document, not_null<HistoryItem *> item);
-  // Downloading to be opened by itself once it is there (a video), not with another tap (a file).
-  [[nodiscard]] bool opensWhenLoaded(DocumentData *document) const { return _openWhenLoaded.contains(document); }
-  void openLocation(not_null<HistoryItem *> item);
-  void refreshMessage(FullMsgId id);
-  void showMessageMenu(not_null<HistoryItem *> item, GtkWidget *widget, double x, double y);
-  void replyTo(not_null<HistoryItem *> item);
-  void forward(not_null<HistoryItem *> item);
-  void sendText(const QString &text);  // Bot commands from links.
-  void debugScroll(bool top);
-  void debugCheckDraft();
-  void debugHistory(const QString &action);
-  void debugAttach(const QString &action);
+  // What the messages ask for.
+  void openChat(Td::ChatId chat);
+  // A photo opens in the viewer (photo_viewer.hpp); a picture that isn't one of a photo's sizes opens outside.
+  void openPhoto(const MessageItem &item, Td::FileId file);
+  // The viewer's Save: as the menu's, the photo copied to Pictures once it is downloaded.
+  void saveFromViewer(std::int64_t id) { saveFile(id); }
+  // A tap on a file: opens it if it is here, stops its download if it runs, starts one otherwise. Videos, GIFs,
+  // stickers and pictures open by themselves once downloaded, as in 0.3.1; other files with a second tap.
+  void openDocument(const MessageItem &item, Td::FileId file);
+  [[nodiscard]] bool opensWhenLoaded(Td::FileId file) const;
+  void showMessageMenu(const MessageItem &item, GtkWidget *widget, double x, double y);
+  // The menu open on a message inside `row` goes now: the row is being destroyed or built again.
+  void dropMessageMenu(GtkWidget *row);
+  void replyTo(const MessageItem &item);
+  [[nodiscard]] ReplyPreview replyPreview(const MessageItem &item) const;
+  void sendText(const std::string &text);  // Bot commands from links.
+  // The sponsored message's button, text or media was tapped (`media`): Telegram counts it.
+  void sponsoredClicked(const MessageItem &item, bool media);
+  // Locations: the picker sends to this chat (or topic), as a reply to the message chosen; a location's message
+  // opens on a map.
+  void chooseLocation();
+  void openLocation(const MessageItem &item);
+  void sendContent(Td::api::object_ptr<Td::api::InputMessageContent> content);
+  // Who shares a live location here, under the header (null in a channel).
+  [[nodiscard]] ChatLiveBar *liveBar() const { return _liveBar.get(); }
+  // The window's player, told what follows in this chat: after a voice message the next one, after a song the next
+  // song, as far as they are loaded. Null without an account.
+  [[nodiscard]] AudioPlayer *player();
+  // A voice message may be recorded here now: the field is there and nothing is being edited.
+  [[nodiscard]] bool canRecordVoice() const;
+  [[nodiscard]] std::int64_t replyToId() const { return _replyToId; }
+  // The voice message recorded here was sent (it took the reply along) or deleted.
+  void recordingEnded(bool sent);
+  [[nodiscard]] VoiceRecordBar *recordBar() const { return _recordBar.get(); }
+  // A tap on a file of a message still being sent: the upload stops and the message goes, as TDLib does it.
+  void cancelUpload(const MessageItem &item);
+  // paste (as Ctrl+V) | files PATH|PATH (as the file chooser) | copy-image PATH, copy-files PATH|PATH, copy-text TEXT
+  // (the clipboard as another program would fill it) | field (the field's text) | menu file|location (an item of the
+  // attach menu, as a tap on it) | anything else to the dialog (AttachDialog::debugAction).
+  void debugAttach(const std::string &action);
 
-private:
+  // tools/phone.sh td-cmd: what the list holds, and the actions of a finger.
+  void debugState() const;
+  void debugScroll(const std::string &where);
+  void debugSend(const std::string &text);
+  void debugType(const std::string &text);  // Into the field, not sent: a draft.
+  void debugReply();
+  void debugEdit(const std::string &text);
+  void debugDelete();
+  void debugEditLast();  // The up arrow in an empty field.
+  void debugForward();  // The newest message, to the chats to choose from.
+  void debugForwardMode(bool names);
+  void debugForwardCancel();
+  void debugForwardMenu();
+  void debugMessageMenu(std::int64_t number);  // Of message N (its server number), 0: the newest.
+  void debugPin(std::int64_t number, bool pin);  // As the menu's Pin or Unpin does: the question comes.
+  void debugPinnedBar(const std::string &what);  // tap | close | list | state
+  void debugPinnedList(const std::string &what);  // state | pick N | action
+  // Reactions of message N (its server number), 0: the newest. A key is the emoji, or "custom:ID".
+  void debugReact(const std::string &key, std::int64_t number);  // As a tap on its chip, or in the menu.
+  void debugUnreact(std::int64_t number);  // Takes back the user's own.
+  void debugReacted(std::int64_t number);  // Who reacted.
+  void debugReactQuick(std::int64_t number);  // A double tap.
+  void debugReactionsMore(std::int64_t number);  // The button with all of them in the open menu.
+  void debugReactionsState(std::int64_t number);
+  void debugMenuState() const;  // The items of the message menu open.
+  void debugMenuDo(const std::string &action);  // As a tap on an item of it: copy, save, delete, retry...
+  // Message N (its server number, 0: the newest, -1: the sponsored one): what its media show, a tap on its media
+  // (or the sponsored button) `index`, a tap on a link or a spoiler of its text with `part` in it.
+  void debugMedia(std::int64_t number);
+  void debugTap(std::int64_t number, int index);
+  void debugTapText(std::int64_t number, const std::string &part);
+
+  // Where the screen is, to come back to it when the window is built again after the background: the first message
+  // whose top is on the screen and how far down. Empty at the end of the chat, which it opens at anyway.
+  struct Place {
+    std::int64_t message = 0;
+    double y = 0.;
+  };
+  [[nodiscard]] Place place() const;
+  void restorePlace(Place place);
+  void debugSponsored() const;
+  // play N (message N's voice or song, as its button) | pause | seek FRACTION | drag FRACTION (along the bar,
+  // let go there) | stop.
+  void debugPlayer(const std::string &what);
+
+ private:
+  // One call of a function some time later. Started again, it waits from the start.
+  class Timer final {
+   public:
+    explicit Timer(std::function<void()> callback) : _callback(std::move(callback)) {}
+    ~Timer() { cancel(); }
+    void callOnce(guint ms);
+    void cancel();
+    [[nodiscard]] bool active() const { return _source != 0; }
+
+   private:
+    std::function<void()> _callback;
+    guint _source = 0;
+  };
+  enum class Page { Initial, Start, Older, Newer };
+  using Items = std::vector<MessageItem *>;
+
+  void start();
+  // The chat, or the topic: what is read, unread and drafted here.
+  [[nodiscard]] const Td::Chat *readState() const;
+  [[nodiscard]] bool belongs(const Td::api::message &message) const;
+  [[nodiscard]] Td::api::object_ptr<Td::api::MessageTopic> topicObject() const;
+  void topicChanged();
   void buildHeader();
   void buildList();
   void buildComposer();
+  void subscribe();
   void refreshHeader();
   void refreshComposerState();
 
   void loadInitial();
   void loadOlder();
   void loadNewer();
-  void requestHistory(MsgId offsetId, int addOffset, int limit, bool older, bool initial);
-  void viewTopic();
-  void applyTopicSlice(Data::MessagesSlice &&slice);
-  [[nodiscard]] bool loadedAtTop() const;
-  [[nodiscard]] bool loadedAtBottom() const;
-  // The loaded messages have rows only in a window around the screen (the rest go when the list stands still):
-  // a long scroll through a chat doesn't keep thousands of rows with their pictures. Coming back, the rows are
-  // made again from the loaded messages, before more are asked from the server.
-  [[nodiscard]] bool shownAtTop() const { return loadedAtTop() && !_windowMin; }
-  [[nodiscard]] bool shownAtBottom() const { return loadedAtBottom() && !_windowMax; }
-  [[nodiscard]] std::vector<not_null<HistoryItem *>> loadedItems() const;
-  [[nodiscard]] std::vector<not_null<HistoryItem *>> items() const;  // In the window.
-  void windowAround(MsgId id);  // Rows for the messages around this one, or the newest ones for 0.
-  void showWindowAround(MsgId id);
-  bool extendWindowUp();
-  bool extendWindowDown();
-  void trimRows(bool force = false, double keep = 0.);
-  void reload(MsgId showAt);
-  void unload();  // No rows, no requests: the chat starts loading again.
+  void requestHistory(std::int64_t from, int offset, int limit, Page page);
+  void applyPage(Td::api::messages &messages, Page page);
+  void pageFailed(const std::string &text);
+  void reload(std::int64_t showAt);
+  void unload();
   void jumpUp(double gap);
-  void jumpBack(int back);
+  void jumpToMessage(std::int64_t id, double y);
+  void jumpToStart();
+
+  // The messages, oldest first and the ones being sent last.
+  [[nodiscard]] MessageItem *find(std::int64_t id) const;
+  [[nodiscard]] std::int64_t oldestId() const;
+  [[nodiscard]] std::int64_t newestId() const;
+  MessageItem *insert(Td::api::object_ptr<Td::api::message> message);
+  void resort();
+  void remove(const std::vector<std::int64_t> &ids);
+  void updated(Td::api::Update &update);
+  void messageSent(Td::api::object_ptr<Td::api::message> message, std::int64_t oldId);
+
   void sync();
-  MessageWidget *addRow(std::vector<not_null<HistoryItem *>> items);
-  void setRowItems(MessageWidget *row, std::vector<not_null<HistoryItem *>> items);
+  MessageWidget *addRow(Items items);
+  void setRowItems(MessageWidget *row, Items items);
   void forgetRow(MessageWidget *row);
-  void removeRow(const HistoryItem *item);
-  MessageWidget *rowFor(const HistoryItem *item) const;
-  void refreshItem(const HistoryItem *item);
-  // The core says a message's data changed: only the reactions, if it was them.
-  void refreshItemData(const HistoryItem *item);
-  void buildTopBars();
-  void refreshLiveBar();
-  // The pinned message bar (HistoryWidget's PinnedTracker): the pinned message above the bottom of the screen;
-  // a tap shows it, and then the one pinned before it.
-  void setupPinned();
-  void refreshPinnedBar();
-  void updatePinnedViewer();
-  void pinnedBarClicked();
-  [[nodiscard]] bool pinnedHiddenByUser() const;
-  void showPinnedList();
-  void confirmPin(not_null<HistoryItem *> item);
-  void confirmUnpin(not_null<HistoryItem *> item);
-  void confirmUnpinAll();
-  void confirmHidePinned();
-  void readReactions();
-  void pollReactions();
-  void refreshTransfer(FullMsgId id);
-  // The rows on the screen, top to bottom, found by their place in the list: a chat scrolled far back has
-  // thousands, too many to go through at every step of the scrolling.
+  [[nodiscard]] MessageWidget *rowFor(const MessageItem *item) const;
+  void refreshItem(const MessageItem *item);
+  void refreshFooters();
+  void trimRows();
+  void repliedLoaded(std::int64_t id);
   [[nodiscard]] std::vector<MessageWidget *> visibleRows() const;
+  [[nodiscard]] static int compareRows(GtkListBoxRow *a, GtkListBoxRow *b, gpointer data);
+  static void updateRowHeader(GtkListBoxRow *row, GtkListBoxRow *before, gpointer data);
 
   void scrollToBottom();
-  void scrollToItem(not_null<const HistoryItem *> item, bool highlight);
-  bool scrollToLoaded(MsgId id);
+  void scrollToItem(const MessageItem *item, bool highlight);
+  bool scrollToLoaded(std::int64_t id);
   void scrolled();
   void scheduleViewportUpdate();
   void updateViewport();
   void preloadVisibleEdges();
+  void updateNearPictures();
   [[nodiscard]] int listHeight() const;
   void setTopReserve(int reserve, double shift);
   void maintainTopReserve();
   [[nodiscard]] bool scrollIdle() const;
   [[nodiscard]] bool scrollIdleIgnoringShift() const;
+  [[nodiscard]] bool atBottom() const;
   void markAsRead();
-  // Telegram's sponsored messages in channels (required by the Telegram API Terms of Service, 3.3).
-  void showSponsored();
-  void reportSponsoredViews();
 
   void send();
-  void edit(not_null<HistoryItem *> item);
+  void applyEdit(const std::string &text);
+  void edit(const MessageItem &item);
+  void editLast();
   void cancelReplyOrEdit();
-  void showReplyBar(const QString &title, const QString &text, const char *icon);
-  // The messages waiting to be forwarded here (the chat's forward draft) are shown in the reply bar.
-  [[nodiscard]] bool forwarding() const;
+  void showReplyBar(const std::string &title, const std::string &text, const char *icon);
+  void refreshSendButton();
+  void setComposerText(const std::string &text);
+  [[nodiscard]] std::string composerText() const;
+  void composerChanged();
+  void saveDraft();
+  void draftChanged();
+  void confirmDelete(std::int64_t id, bool forAll, bool onlyForSelf);
+  // The menu's Save: the file (or the photo) copied to Downloads (Pictures), once it is downloaded.
+  void saveFile(std::int64_t id);
+  [[nodiscard]] MessageItem *debugItem(std::int64_t number) const;
+
+  // Telegram's sponsored messages in channels and bots (required by the Telegram API Terms of Service, 3.3): asked
+  // for once the end of the chat is shown, put after the newest message once their media is downloaded (TDLib asks
+  // for that), and told to TDLib once seen whole.
+  void showSponsored();
+  void placeSponsored();
+  void reportSponsoredView();
+
+  [[nodiscard]] const ForwardDraft *forwardDraft() const;
+  [[nodiscard]] bool forwarding() const { return forwardDraft() != nullptr; }
+  void forward(const MessageItem &item);
   void refreshForwardBar();
   void cancelForward();
   void showForwardMenu();
-  void refreshSendButton();
-  void chooseFiles();
-  void chooseLocation();
-  // The files from the chooser or a pasted picture, shown before sending (AttachDialog).
-  void openAttach(const QStringList &paths, QImage image = QImage(), const QString &textOnCancel = QString());
-  bool sendAttachments(Ui::PreparedList &list, const Ui::SendFilesWay &way, const QString &caption,
-                       const Api::SendAction &action);
-  void paste();
-  void pasteText(const QString &text);
-  void setupRecordGesture();
-  void startRecording();
-  void attachRecording();
-  void lockRecording();
-  void showRecordState();
-  void dragRecording(double dx, double dy);
-  void finishRecording(bool send);
-  void confirmDelete(not_null<HistoryItem *> item);
-  [[nodiscard]] QString composerText() const;
-  void setComposerText(const QString &text);
+  void setForwardNames(bool names);
+  void sendForward();
 
-  const not_null<Data::Thread *> _thread;
-  const not_null<History *> _history;
-  Data::ForumTopic *const _topic = nullptr;
-  const not_null<MainWindow *> _window;
+  // The pinned message bar under the header (Telegram Desktop's PinnedTracker): the newest message pinned above the
+  // bottom of the screen; a tap shows it, and then the one pinned before it. Only the ids of the pinned messages are
+  // held, and the one the bar shows.
+  void buildPinnedBar();
+  void loadPinned();
+  void pinnedPage(Td::api::foundChatMessages &found, bool first);
+  void pinnedChanged(std::int64_t id, bool pinned);
+  void updatePinnedViewer();
+  void setPinnedAround(std::int64_t around);
+  void fetchPinnedMessage();
+  void refreshPinnedBar();
+  void setPinnedPreview();
+  void showPinnedPicture(const std::string &path);
+  void pinnedBarClicked();
+  void pinnedCloseClicked();
+  [[nodiscard]] bool canPinMessages() const;
+  [[nodiscard]] bool pinnedHiddenByUser() const;
+  [[nodiscard]] int pinnedIndex() const;
+  void showPinnedList();
+  void confirmPin(std::int64_t id);
+  void confirmUnpin(std::int64_t id);
+  void confirmUnpinAll();
+  void confirmHidePinned();
+
+  Td::Store &_store;
+  const Td::ChatId _chat;
+  const std::int32_t _topic;
+  std::shared_ptr<void> _topicHold;  // The store keeps the group's topics while this is open.
+  bool _topicKnown = false;
+  MainWindow &_window;
+  Td::Lifetime _lifetime;
+  Td::Lifetime _pageLifetime;  // Ends with what the running requests for pages were for.
 
   GtkWidget *_root = nullptr;
   GtkWidget *_title = nullptr;
-  GtkWidget *_liveBar = nullptr;
-  GtkWidget *_liveText = nullptr;
-  GtkWidget *_liveStop = nullptr;
-  std::unique_ptr<ChatLiveLocations> _liveLocations;
-  GtkWidget *_pinnedBar = nullptr;
-  GtkWidget *_pinnedTitle = nullptr;
-  GtkWidget *_pinnedText = nullptr;
-  GtkWidget *_pinnedPreview = nullptr;
-  GtkWidget *_pinnedList = nullptr;
-  GtkWidget *_pinnedClose = nullptr;
-  std::unique_ptr<HistoryView::PinnedTracker> _pinnedTracker;
-  QString _pinnedTitleText;
-  QString _pinnedTextText;
-  QImage _pinnedImage;
-  int _pinnedCount = 0;
-  FullMsgId _pinnedClicked;              // Shown with a tap on the bar: the bar goes on to the one before it.
-  std::optional<FullMsgId> _minPinned;   // The oldest pinned message, once asked while going through them.
-  double _lastScrollValue = 0.;
   GtkWidget *_list = nullptr;
+  GtkWidget *_topSpacer = nullptr;
   GtkWidget *_scroll = nullptr;
-  GtkAdjustment *_adjustment = nullptr;
   GtkWidget *_toBottom = nullptr;
   GtkWidget *_loading = nullptr;
   GtkWidget *_retry = nullptr;
-  GtkWidget *_topSpacer = nullptr;
-  GtkWidget *_lockHint = nullptr;
-
-  GtkWidget *_composer = nullptr;
+  GtkAdjustment *_adjustment = nullptr;
   GtkWidget *_composerStack = nullptr;
+  GtkWidget *_input = nullptr;
+  GtkWidget *_sendButton = nullptr;
+  GtkWidget *_joinButton = nullptr;
   GtkWidget *_replyBar = nullptr;
   GtkWidget *_replyIcon = nullptr;
   GtkWidget *_replyTitle = nullptr;
   GtkWidget *_replyText = nullptr;
-  GtkWidget *_input = nullptr;
-  GtkWidget *_sendButton = nullptr;
-  GtkWidget *_sendStack = nullptr;
-  GtkWidget *_mic = nullptr;
-  GtkWidget *_recordTime = nullptr;
-  GtkWidget *_recordDot = nullptr;
-  GtkWidget *_recordHint = nullptr;
-  GtkWidget *_recordCancel = nullptr;
-  GtkWidget *_recordSend = nullptr;
-  GtkWidget *_recordMicIndicator = nullptr;
-  bool _recording = false;
-  bool _recordHolding = false;  // The finger is on the microphone button.
-  bool _recordLocked = false;   // Slid up: recording goes on without holding.
-  crl::time _recordStarted = 0;
-  rpl::lifetime _recordLifetime;
-  GtkWidget *_joinButton = nullptr;
+  GtkWidget *_pinnedBar = nullptr;
+  GtkWidget *_pinnedTitle = nullptr;
+  GtkWidget *_pinnedText = nullptr;
+  GtkWidget *_pinnedPreview = nullptr;
+  GtkWidget *_pinnedListButton = nullptr;
+  GtkWidget *_pinnedClose = nullptr;
+  GtkWidget *_pinnedDialog = nullptr;  // The list of them while it is open.
+  std::vector<GtkWidget *> _dialogs;  // holdDialog()
+  std::unique_ptr<ChatLiveBar> _liveBar;
+  SignalConnections _signals;
 
-  // A row is a message, or an album (the messages of a group): every message maps to its row.
+  std::vector<std::unique_ptr<MessageItem>> _items;
   std::unordered_map<MessageWidget *, std::unique_ptr<MessageWidget>> _rows;
-  std::unordered_map<const HistoryItem *, MessageWidget *> _itemRows;
-  std::set<MessageWidget *> _waitingMedia;
-  std::set<DocumentData *> _openWhenLoaded;
-  // Sponsored messages are sorted after the regular message they follow in the history.
-  std::unordered_map<const HistoryItem *, MsgId> _sponsoredAfter;
-  std::set<const HistoryItem *> _sponsoredViewed;
-  bool _sponsoredMediaLoading = false;
+  std::unordered_map<const MessageItem *, MessageWidget *> _itemRows;
+  std::unordered_set<MessageWidget *> _nearRows;  // Those with their pictures decoded (updateNearPictures).
+  // The messages replies point to, when they aren't near the screen. Null: there is no such message any more.
+  std::unordered_map<std::int64_t, Td::api::object_ptr<Td::api::message>> _replied;
+  mutable std::set<std::int64_t> _repliedAsked;
+  std::set<std::int64_t> _viewed;
 
-  MsgId _windowMin = 0;  // The oldest message with a row; 0: from the oldest loaded.
-  MsgId _windowMax = 0;  // The newest one; 0: up to the newest loaded, with the messages being sent.
-  int _olderRequest = 0;
-  int _newerRequest = 0;
-  // The part of a topic shown: a slice of its messages around a position, growing as it scrolls.
-  Data::MessagePosition _topicAround;
-  int _topicLimitBefore = 0;
-  int _topicLimitAfter = 0;
-  bool _topicOlderWaiting = false;
-  bool _topicNewerWaiting = false;
-  std::vector<FullMsgId> _topicIds;
-  std::optional<int> _topicSkippedBefore;
-  std::optional<int> _topicSkippedAfter;
-  rpl::lifetime _topicViewer;
+  std::int64_t _unreadAfter = 0;  // The last message read when the chat opened.
+  MessageWidget *_unreadRow = nullptr;  // The bar goes before it.
+  std::int64_t _pendingShowAt = 0;
+  std::int64_t _scrollTarget = 0;
+  std::optional<double> _scrollTargetY;
+  bool _scrollTargetHighlight = false;
+  bool _reachedTop = false;
+  bool _reachedBottom = false;
   bool _initialLoaded = false;
+  bool _loadFailed = false;
+  bool _loadingOlder = false;
+  bool _loadingNewer = false;
+  bool _applyingPage = false;
   bool _stickToBottom = true;
   bool _adjustingScroll = false;
-  bool _applyingPage = false;
-  bool _loadFailed = false;
-  bool _emptyReloadTried = false;
-  int _loadEpoch = 0;
-  guint _viewportSource = 0;
-  FullMsgId _scrollTarget;
-  bool _scrollTargetHighlight = false;
-  std::optional<double> _scrollTargetY;  // Where the target goes on the screen, by default a third from the top.
-  int _topReserve = 0;        // Empty room above the messages, filled by older pages (setTopReserve).
-  double _pendingShift = 0;   // Applied to the scroll position when the content height changes.
-  double _shiftBase = 0;
+  // A position set while GTK allocated the list: the list is placed again in the next frame.
+  bool _placeAgain = false;
   bool _touchActive = false;
-  MsgId _pendingShowAt = 0;
-  // A jump far back being loaded: so many messages before the oldest one loaded before, -1 for the chat's start.
-  std::optional<int> _jumpBack;
-  MsgId _unreadAfter = 0;  // The "Unread messages" bar goes before the first message after this one.
-  FullMsgId _replyTo;
-  FullMsgId _editing;
-  FullMsgId _loadedReplyTo;
-  FullMsgId _beforeEditReplyTo;
-  QString _loadedDraft;
-  QString _beforeEditText;
-  bool _editPending = false;
-  bool _forwardShown = false;
-  bool _settingComposerText = false;
-  int _editGeneration = 0;
-  bool _syncScheduled = false;
-  bool _pollScheduled = false;
-  base::weak_ptr<AttachDialog> _attach;
+  int _topReserve = 0;
+  double _pendingShift = 0.;
+  double _shiftBase = 0.;
+  guint _viewportSource = 0;
+  guint _closeSource = 0;
+
+  std::int64_t _replyToId = 0;
+  std::unique_ptr<VoiceRecordBar> _recordBar;
+  // Files to send: chosen, or pasted (a paste is read in the background first).
+  void chooseFiles();
+  void paste();
+  void pasteText(const std::string &text);
+  void openAttach(const std::vector<std::string> &paths, GdkTexture *image = nullptr, const std::string &textOnCancel = {});
+  bool sendAttachments(const std::vector<AttachFile> &files, bool compress, bool group, const std::string &caption,
+                       std::int64_t replyTo);
   std::unique_ptr<ClipboardReader> _pasteReader;
-  SignalConnections _signals;
-  base::Timer _readTimer;
-  base::Timer _statusTimer;
-  base::Timer _reserveTimer;
-  base::Timer _jumpTimer;  // Looks again whether the list stopped far above the rows.
-  rpl::lifetime _lifetime;
+  std::weak_ptr<AttachDialog> _attach;
+  bool _forwardShown = false;  // The bar shows the messages to forward.
+  std::int64_t _editing = 0;
+  bool _editPending = false;
+  std::string _beforeEditText;
+  std::int64_t _beforeEditReplyTo = 0;
+  bool _settingComposerText = false;
+  std::string _savedDraft;
+  std::int64_t _savedDraftReply = 0;
+  gint64 _lastTyping = 0;
+
+  Td::Lifetime _pinnedLifetime;         // Ends with the search of the pinned messages it was for.
+  std::vector<std::int64_t> _pinnedIds;  // Oldest first.
+  int _pinnedTotal = 0;
+  bool _pinnedLoaded = false;
+  std::int64_t _pinnedAround = std::numeric_limits<std::int64_t>::max();  // The bar shows the last one before it.
+  std::int64_t _pinnedCurrent = 0;
+  std::int64_t _pinnedClicked = 0;  // Shown with a tap on the bar: the bar goes on to the one before it.
+  Td::api::object_ptr<Td::api::message> _pinnedMessage;  // The one the bar shows, once it came.
+  Td::FileId _pinnedFile = 0;  // Its picture, being downloaded.
+  double _lastScrollValue = 0.;
+  std::uint64_t _interactionUpdates = 0;  // Of held messages, for the debug state.
+  GtkWidget *_messageMenu = nullptr;  // Open on a message (a weak pointer).
+
+  // True: opens by itself once downloaded (a video); false: only if the answer finds it here already.
+  std::unordered_map<Td::FileId, bool> _openWhenLoaded;
+
+  std::unique_ptr<MessageItem> _sponsored;
+  std::set<Td::FileId> _sponsoredWaiting;  // Its media, being downloaded before it is shown.
+  bool _sponsoredAsked = false;
+  bool _sponsoredPlaced = false;
+  bool _sponsoredViewed = false;
+  int _sponsoredClicks = 0;
+
+  Timer _readTimer;
+  Timer _statusTimer;
+  Timer _reserveTimer;
+  Timer _jumpTimer;
+  Timer _draftTimer;
+  Timer _pinnedTimer;  // Pins changed in a group with topics: which of them are this topic's is asked again.
 };
 
 }  // namespace Contrail

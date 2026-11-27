@@ -1,22 +1,13 @@
 #include "app.hpp"
 
-#include "debug.hpp"
-#include "main_window.hpp"
-#include "qt_integration.hpp"
 #include "css_split.hpp"
+#include "main_window.hpp"
 #include "style_css.h"
 
-#include "core/application.h"
-#include "core/sandbox.h"
-#include "window/main_window.h"
-#include "window/window_controller.h"
-#include "lang/lang_instance.h"
-
-#include <QtCore/QCoreApplication>
-#include <QtWidgets/QApplication>
-
-#include <glib-unix.h>
+#include <cerrno>
 #include <malloc.h>
+#include <sys/prctl.h>
+#include <utility>
 
 
 namespace Contrail {
@@ -26,9 +17,16 @@ namespace {
 // its mmap threshold as large blocks are freed, after which they come from the heap and stay with the
 // process when freed. A fixed threshold keeps every large block in its own mapping, given back to the
 // system as soon as it is freed; fewer arenas keep the threads' freed memory from piling up. Set before
-// main(), so the core's threads get these too.
+// main(), so TDLib's threads get these too. 64 KiB, not 256: blocks in between left holes in the heap that
+// nothing reused. A chat with photos scrolled through and closed, by tools/mem-scenario.sh: 77 MiB at the peak
+// instead of 91, 61 after it instead of 69; 32 KiB gave no more.
+//
+// Transparent huge pages off: with them on "always" (as FuriOS has them) the first touch of a
+// thread's stack, a malloc arena or the end of the heap takes 2 MiB where a few KiB are used. On the FLX1s
+// 30 MiB of the process were huge pages right after the start. Programs it starts inherit this.
 [[maybe_unused]] const auto kMallocTuning = [] {
-  mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+  if (prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0) != 0) g_debug("Memory: huge pages stay on: %s", g_strerror(errno));
+  mallopt(M_MMAP_THRESHOLD, 64 * 1024);
   mallopt(M_TRIM_THRESHOLD, 4 * 1024 * 1024);
   mallopt(M_ARENA_MAX, 4);
   return 0;
@@ -41,24 +39,11 @@ App &GetApp() {
   return app;
 }
 
-std::string Escape(const QString &s) {
-  auto *escaped = g_markup_escape_text(s.toUtf8().constData(), -1);
+std::string Escape(const std::string &s) {
+  auto *escaped = g_markup_escape_text(s.c_str(), -1);
   std::string result = escaped;
   g_free(escaped);
   return result;
-}
-
-GdkTexture *ToTexture(const QImage &image) {
-  if (image.isNull()) {
-    return nullptr;
-  }
-  // ARGB32 premultiplied is BGRA in memory on little-endian machines.
-  auto converted = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-  auto *bytes = g_bytes_new(converted.constBits(), converted.sizeInBytes());
-  auto *texture = gdk_memory_texture_new(converted.width(), converted.height(), GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
-                                         bytes, converted.bytesPerLine());
-  g_bytes_unref(bytes);
-  return texture;
 }
 
 GtkWidget *MakeIconButton(const char *iconName, const char *tooltip, const char *cssClass) {
@@ -85,21 +70,24 @@ void ClearBox(GtkWidget *box) {
   }
 }
 
-void ShowToast(const QString &text) {
+void ShowToast(const std::string &text) {
   if (auto *w = GetApp().window) {
     w->showToast(text);
   }
 }
 
 void OpenUri(const std::string &uri) {
+  if (g_getenv("CONTRAIL_DEBUG")) g_message("open: %s", uri.c_str());
+  // The scenario has no account and no network: what would open is only told.
+  if (g_getenv("CONTRAIL_SCENARIO")) return;
   auto *launcher = gtk_uri_launcher_new(uri.c_str());
   auto *parent = GetApp().window ? GTK_WINDOW(GetApp().window->widget()) : nullptr;
   gtk_uri_launcher_launch(launcher, parent, nullptr, nullptr, nullptr);
   g_object_unref(launcher);
 }
 
-void CopyToClipboard(const QString &text) {
-  gdk_clipboard_set_text(gdk_display_get_clipboard(gdk_display_get_default()), text.toUtf8().constData());
+void CopyToClipboard(const std::string &text) {
+  gdk_clipboard_set_text(gdk_display_get_clipboard(gdk_display_get_default()), text.c_str());
 }
 
 void TriggerFeedback(const char *event) {
@@ -174,59 +162,40 @@ void LoadStyle() {
 
 }  // namespace
 
-void HideCoreWindow() {
-  // The Qt call panel is another top-level window. Keep it from painting or consuming shared video
-  // frames behind GTK, just like the core's main window.
-  for (auto *window : QApplication::topLevelWidgets()) {
-    if (window->isVisible()) window->hide();
-  }
+namespace {
+
+bool SurfaceRealized = false;
+
+}  // namespace
+
+void WatchSurfaces() {
+  static auto watching = false;
+  if (std::exchange(watching, true)) return;
+  // A widget is realized only inside a realized window, popover or dialog: the first one is enough. The signal is
+  // there once the class is, which may be before any widget was made.
+  auto *widgetClass = g_type_class_ref(GTK_TYPE_WIDGET);
+  const auto realize = g_signal_lookup("realize", GTK_TYPE_WIDGET);
+  g_type_class_unref(widgetClass);
+  g_signal_add_emission_hook(realize, 0,
+                             +[](GSignalInvocationHint *, guint, const GValue *, gpointer) -> gboolean {
+                               SurfaceRealized = true;
+                               return FALSE;
+                             },
+                             nullptr, nullptr);
 }
 
-// Called by the core when the app should come to the front: launched again, a link opened...
-void Activate() {
-  if (auto *w = GetApp().window) {
-    w->present();
-  }
+bool SurfacesUsed() {
+  return SurfaceRealized;
 }
 
-// Called by Core::Application::run() once Telegram Desktop's core is up (see patches/).
-void Start() {
-  KeepGtkApplicationRunning();
-  coreEventDispatcher = [](const std::function<void()> &fn) {
-    Core::Sandbox::Instance().customEnterFromEventLoop(fn);
-  };
-  auto &app = GetApp();
-  g_set_prgname(kAppId);
-  g_set_application_name("Contrail");
-  adw_init();
+void LoadApplicationStyle() {
+  LoadStyle();
+  gtk_window_set_default_icon_name(kAppId);
   // Icons the system theme doesn't have (installed next to the program).
   if (const auto dir = g_getenv("CONTRAIL_DIR")) {
     gtk_icon_theme_add_search_path(gtk_icon_theme_get_for_display(gdk_display_get_default()),
                                    (std::string(dir) + "/icons").c_str());
   }
-
-  // The GApplication is only registered, never run(): the main loop is the one Qt already runs.
-  // No GtkApplication: the core's own GApplication owns the application ID on D-Bus (see CONTRAIL_APP_ID in
-  // the launcher) and handles activation and tg:// links. The window gets the ID from the program name.
-  LoadStyle();
-  gtk_window_set_default_icon_name(kAppId);
-
-  app.window = new MainWindow();
-  app.window->present();
-  HideCoreWindow();
-  if (g_getenv("CONTRAIL_DEBUG")) {
-    RegisterDebugActions(*app.window);
-  }
-
-  // Ctrl+C / SIGTERM: quit cleanly so the core saves its state.
-  g_unix_signal_add(SIGTERM, +[](gpointer) -> gboolean {
-    RunCoreEvent([] { Core::Quit(); });
-    return G_SOURCE_REMOVE;
-  }, nullptr);
-  g_unix_signal_add(SIGINT, +[](gpointer) -> gboolean {
-    RunCoreEvent([] { Core::Quit(); });
-    return G_SOURCE_REMOVE;
-  }, nullptr);
 }
 
 }  // namespace Contrail

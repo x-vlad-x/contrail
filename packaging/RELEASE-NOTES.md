@@ -1,12 +1,13 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.3.1
+# Contrail 0.4.0
 
-**Contrail**, a native GNOME (GTK4 + libadwaita) interface for Telegram on Linux phones and desktops, no longer
-freezes while scrolling groups and channels with reactions, lets you play voice messages and music from any point,
-shows clear progress for downloads, jumps far back in a chat at once, plays calls without clicks on the FLX1s and
-takes about 105 MB less memory. It is built on the Telegram Desktop 7.3.3 core. Contrail is an unofficial client
-that uses the Telegram API; it is not affiliated with or endorsed by Telegram.
+**Contrail**, a native GNOME (GTK4 + libadwaita) Telegram client for Linux phones, is now built on
+[TDLib](https://github.com/tdlib/td), Telegram's library for clients, instead of the Telegram Desktop core. It
+starts faster, takes about a third of the memory with the window closed, and its packages are a third of the
+size or less. Everything 0.3.1 did is still there. Contrail is made for FuriOS on the FuriPhone FLX1s and now comes
+for ARM64 only, as a Flatpak and a DEB. Contrail is an unofficial client that uses the Telegram API; it is not
+affiliated with or endorsed by Telegram.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation with reactions and a pinned message">
@@ -19,8 +20,8 @@ that uses the Telegram API; it is not affiliated with or endorsed by Telegram.
 ## Downloads
 
 **With updates**: Contrail's own signed Flatpak repository, [flatpak.xvlad.com](https://flatpak.xvlad.com), for
-x86_64 and ARM64. Open [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in
-GNOME Software, Discover or another app store, or add it in a terminal:
+ARM64. Open [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in
+GNOME Software or another app store, or add it in a terminal:
 
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -29,31 +30,63 @@ flatpak install --user xvlad io.github.x_vlad_x.Contrail
 ```
 
 Updates then come through the app store or `flatpak update`. If you installed a downloaded `.flatpak` before,
-`flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail` moves it to the repository and keeps the
-account and the chats.
+`flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail` moves it to the repository.
 
 **The files** below need no repository:
 
-| Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
-| --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.3.1-1_amd64.deb` | `contrail_0.3.1-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.3.1-1.x86_64.rpm` | `contrail-0.3.1-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.3.1-x86_64.flatpak` | `Contrail-0.3.1-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.3.1-x86_64.AppImage` | `Contrail-0.3.1-aarch64.AppImage` |
+| Your system | File (ARM64) |
+| --- | --- |
+| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.0-1_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-0.4.0-aarch64.flatpak` |
 
 ```sh
-sudo apt install ./contrail_0.3.1-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.3.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
-flatpak install --user ./Contrail-0.3.1-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.3.1-x86_64.AppImage && ./Contrail-0.3.1-x86_64.AppImage
+sudo apt install ./contrail_0.4.0-1_arm64.deb              # DEB
+flatpak install --user ./Contrail-0.4.0-aarch64.flatpak    # Flatpak
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
-needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.3.0 or older, install the new DEB, RPM or Flatpak file the same way,
-or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
+needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`).
 
-## What's new since 0.3.0
+## Updating from 0.3
+
+- **Sign in once.** TDLib keeps its own session and database, and the session of Telegram Desktop's core can't be
+  carried over. Contrail explains this on its sign-in page. As with any new sign-in, Telegram asks you to confirm
+  it on another device where you are signed in.
+- **Your settings come along**: the language, notifications, the sound, the message preview and running in the
+  background are read from 0.3's settings on the first start.
+- Your cloud chats are loaded again. Files downloaded by 0.3, uploads that never finished and live locations
+  shared from 0.3 stay with 0.3: stop a live location before updating, and share it again afterwards.
+- 0.3's data (`contrail-data/tdata`) is left where it is, so you can go back to 0.3.1. Once 0.4.0 works for you,
+  you can delete that folder to free the space.
+- **x86_64 computers stay on 0.3.1**, as do the RPM and the AppImage: from 0.4.0 Contrail comes for ARM64 only.
+  0.3.1's files stay on [its release page](https://github.com/x-vlad-x/contrail/releases/tag/v0.3.1).
+
+## What's new in 0.4.0
+
+- **Built on TDLib**: the connection to Telegram, the message database and the files are TDLib's; the interface is
+  the same GTK4 and libadwaita one, now without Qt and without Telegram Desktop's core. Contrail keeps only the
+  messages near the screen, and TDLib keeps the history on disk.
+- **Less memory, a faster start.** Measured on the FLX1s, both as Flatpaks, in one session of the phone:
+
+  | | 0.3.1 | 0.4.0 |
+  | --- | --- | --- |
+  | Cold start, until the CPU settles | 5.1–8.7 s, 3.6–4.3 s of CPU | 2.9–3.3 s, 2.3–2.4 s of CPU |
+  | Window closed, memory (PSS) | 232 MiB | 70 MiB |
+  | Window closed, the app's own memory | 89 MiB | 20 MiB |
+  | Window closed, threads | 33 | 10 |
+  | Flatpak, download | 74 MiB | 13 MiB |
+  | DEB, download | 99 MiB | 37 MiB |
+
+  In a day in the background the app's own memory grew by 10 MiB.
+- **The graphics driver is let go in the background**: GTK keeps the GPU's driver, with its threads and memory, as
+  long as a process lives once it has shown a window. A minute after the window closes, when no call, recording,
+  playback or file transfer is running, Contrail starts itself again without a window. Notifications on the screen
+  keep working, and opening Contrail comes back to the same chat and place.
+- **Proxies** in the settings: SOCKS5, HTTP and MTProto proxies added, edited, checked and switched, and
+  `tg://socks` and `tg://proxy` links, which ask first.
+- **ARM64 only**, as a Flatpak and a DEB: see Updating above.
+
+## Earlier, in 0.3.1
 
 - **No more freezes while scrolling groups and channels with reactions**: Contrail asked for the reactions of the
   messages on the screen while Telegram Desktop's core was still going through its own list of them, which made
@@ -173,10 +206,9 @@ or run the new AppImage: the account and chats stay. The DEB also installs over 
   files, videos, voice messages (hold to record), link previews, polls, editing and deleting; sending files and
   pasted pictures with a caption; a photo viewer with pinch zoom.
 - Reactions, pinned messages, forwarding; locations and live locations, with a map of everyone sharing one.
-- One-to-one audio and video calls; notifications; `tg://` and `t.me` links; every Telegram language.
+- One-to-one audio and video calls; notifications; `tg://` and `t.me` links; proxies; every Telegram language.
 - Sponsored messages in channels, as the Telegram API terms require of clients that show channels.
-- An adaptive layout: one column on a phone, the chat list and the chat side by side on a wider window, with a
-  normal header and window buttons on desktops.
+- An adaptive layout: one column on a phone, the chat list and the chat side by side on a wider window.
 
 ## Known limitations
 
@@ -184,44 +216,47 @@ or run the new AppImage: the account and chats stay. The DEB also installs over 
   a preview.
 - Ogg Opus audio files chosen together with other music are sent each on its own: Telegram doesn't take them in
   an album of music.
-- The energy use in the background was not measured on battery yet: the wakeups and CPU time went down, the
-  battery saving is not confirmed (see [the measurements](https://github.com/x-vlad-x/contrail/blob/main/docs/measurements-0.2.0.md)).
-- The Flatpak keeps its own account and chats, apart from the other packages (see the installation guide). A
-  downloaded `.flatpak` file doesn't update by itself: the repository does.
+- In the background Contrail wakes up the phone about once a second, more often than 0.3.1: TDLib's threads
+  handle each update from Telegram's servers. It uses 0.04 s of CPU in two minutes. Battery use in the background
+  wasn't measured on battery yet.
+- The Flatpak keeps its own account and chats, apart from the DEB. A downloaded `.flatpak` file doesn't update by
+  itself: the repository does.
+- On a locked phone the Flatpak takes calls through Phosh's notification (Accept, Decline, End Call): the
+  full-screen call controls need Wayland layer shell, which FuriOS gives only to programs outside a sandbox.
 - The maps need the network: they come from OpenStreetMap's servers and aren't kept for offline use beyond
   libshumate's cache.
-- The RPM isn't signed.
 - Emoji in messages need a color emoji font on the system (the DEB recommends Noto Color Emoji).
 
 ## Not there yet
 
-Group calls, screen sharing, stories, voting in polls, selecting several messages, sticker and emoji panels, recording video messages, folders, multiple accounts. Secret chats aren't planned: Telegram
-Desktop doesn't have them either.
+Group calls, screen sharing, stories, voting in polls, selecting several messages, sticker and emoji panels,
+recording video messages, folders, multiple accounts. Secret chats aren't planned.
 
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- Each x86_64 package was installed the way users do and started in a clean container with an offline, made-up
-  demo account (`tools/smoke-test.sh`, on X11), including pasting a picture from the X11 clipboard (and files,
-  outside the Flatpak) into the attach dialog: the DEB with `apt` on Debian 13 and Ubuntu 24.04, the RPM with
-  `dnf` on Fedora 44 and `zypper` on openSUSE Tumbleweed, the AppImage on Debian 13, Ubuntu 24.04, Fedora 44 and
-  Arch Linux, the Flatpak with `flatpak` on Fedora 44. The About dialog shows 0.3.1; in the Flatpak (GTK 4.24) the
-  messages stay inside their bubbles and a voice message has its full-width bar.
-- On the FuriLabs FLX1s (FuriOS 14, Phosh), with a real account, in test builds of the same code before the
-  release: scrolling groups and channels with reactions for two days of everyday use without a hang, calls
-  without clicks (and a test of the call's sound output with a tone, without a gap in 20 seconds), and the memory
-  of an account in the background (heaptrack).
-- The ARM64 packages weren't installed in containers or on the phone for this release; they are built the same way
-  as the x86_64 ones, from the same sources. 0.2.0's packages were, and nothing in the packaging changed since.
-- Not checked with these files: seeking and download progress on the phone, calls with another person,
-  notifications and calls on a locked phone, writing in a group with topics, pasting files through Flatpak's
-  portal, Wayland desktops. Battery use in the background wasn't measured.
+- The DEB and the Flatpak of this release were installed on the FuriPhone FLX1s (FuriOS 14, Phosh) and started
+  on an offline, made-up account (`tools/smoke-test.sh`): the chats, a chat, the settings and About.
+- On the FLX1s with a real account, in test builds of the same code (as a Flatpak, next to 0.3.1): signing in,
+  signing out and staying signed in after a restart; sending, editing and deleting messages and a photo's caption;
+  notifications with the window closed opening their chat; an incoming video call with the window closed and the
+  phone locked, accepted from Phosh's notification, with video both ways; an outgoing voice call of 30 minutes with
+  the microphone muted and unmuted; a day in the background (the memory above); the restart without the window
+  and coming back to the chat; the update from 0.3.1's settings; removing the test version without touching
+  0.3.1.
+- Every screen and action on the scripted account in a virtual display (`tools/td-ui-test.sh`): the chat list,
+  reading and writing, topics, forwarding, pinned messages, reactions, places and live locations, the photo
+  viewer, voice messages and music, recording, sending files and pasting, links, settings, notifications, the
+  background, proxies and calls.
+- Not checked on the phone with these builds: switching cameras in a call and the screen going dark at the ear,
+  Bluetooth and wired headsets, moving between Wi-Fi and mobile data, a real live location, Mobian and PureOS.
 
 ## Sources and licenses
 
-GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. The packages
-contain libraries under their own licenses; see `LICENSES.md`. `Contrail-0.3.1-sources.tar.gz` holds Contrail's
-sources; the `Contrail-0.3.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the
-packages are built from. Checksums: `SHA256SUMS`.
+GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. TDLib is under
+the Boost Software License 1.0, and the packages contain other libraries under their own licenses; see
+`LICENSES.md`. `Contrail-0.4.0-sources.tar.gz` holds Contrail's sources; the
+`Contrail-0.4.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the packages are
+built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.

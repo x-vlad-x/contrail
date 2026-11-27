@@ -4,12 +4,13 @@
 
 #include "geo.hpp"
 
-#include "base/basic_types.h"
-
 #include <glib.h>
 
+#include <functional>
 #include <list>
+#include <memory>
 #include <optional>
+#include <string>
 
 namespace Contrail {
 
@@ -38,21 +39,21 @@ public:
   LocationService();
   ~LocationService();
 
-  [[nodiscard]] std::unique_ptr<Watch> watch(Fn<void(const GeoFix &)> fix, Fn<void(Failure)> failed);
+  [[nodiscard]] std::unique_ptr<Watch> watch(std::function<void(const GeoFix &)> fix, std::function<void(Failure)> failed);
   // The last position, if it was measured within `maxAge` seconds.
   [[nodiscard]] std::optional<GeoFix> recent(int maxAge) const;
   // Whether a service is running for the watches now.
   [[nodiscard]] bool running() const;
 
   // For the debug actions.
-  [[nodiscard]] QString debugState() const;
+  [[nodiscard]] std::string debugState() const;
   void debugFix(double lat, double lon, double accuracy);
 
 private:
   struct Watcher {
     int id = 0;
-    Fn<void(const GeoFix &)> fix;
-    Fn<void(Failure)> failed;
+    std::function<void(const GeoFix &)> fix;
+    std::function<void(Failure)> failed;
   };
   class Backend;
   class GeoClue;
@@ -70,7 +71,9 @@ private:
   int _lastId = 0;
   std::unique_ptr<Backend> _backend;
   bool _triedPortal = false;
+  bool _scripted = false;  // The scenario transport: no backend, fixes from loc-fix.
   std::optional<GeoFix> _last;
+  const std::shared_ptr<char> _alive = std::make_shared<char>();
 };
 
 [[nodiscard]] LocationService &Location();
