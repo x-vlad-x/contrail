@@ -198,7 +198,10 @@ Run the AppImage from the phone's graphical session. It uses `~/.local/share/con
 The GTK interface sends requests to TDLib. A receive thread forwards responses and updates to the GLib
 main loop. The interface holds the messages around the visible part of a chat, and TDLib keeps its
 history on disk. Closing the window in background mode releases the interface while TDLib, notifications,
-downloads and calls keep running. TDLib handles call signaling and tgcalls handles audio and video.
+downloads and calls keep running. GTK keeps the GPU driver loaded once a window has been shown. A minute after
+the window closes, when no call, recording, playback or file transfer is running, the process restarts itself
+without a window, so the driver's threads and memory are gone too. Notifications on the screen keep working, and
+opening the app returns to the same chat. TDLib handles call signaling and tgcalls handles audio and video.
 
 ### Project layout
 

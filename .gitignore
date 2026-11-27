@@ -19,3 +19,4 @@ __pycache__/
 /build-td/
 /deps-td-pkg/
 /build-td-pkg/
+/build-tdjson/
