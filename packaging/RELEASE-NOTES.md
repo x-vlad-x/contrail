@@ -19,7 +19,7 @@ that uses the Telegram API; it is not affiliated with or endorsed by Telegram.
 ## Downloads
 
 **With updates**: Contrail's own signed Flatpak repository, [flatpak.xvlad.com](https://flatpak.xvlad.com), for
-x86_64 and ARM64. Open [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in
+ARM64. Open [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in
 GNOME Software, Discover or another app store, or add it in a terminal:
 
 ```sh
@@ -34,24 +34,29 @@ account and the chats.
 
 **The files** below need no repository:
 
-| Your system | x86_64 (most computers) | ARM64 (Linux phones, ARM computers) |
-| --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_0.3.1-1_amd64.deb` | `contrail_0.3.1-1_arm64.deb` |
-| Fedora, openSUSE | `contrail-0.3.1-1.x86_64.rpm` | `contrail-0.3.1-1.aarch64.rpm` |
-| Any distribution with Flatpak | `Contrail-0.3.1-x86_64.flatpak` | `Contrail-0.3.1-aarch64.flatpak` |
-| Any distribution, without installing | `Contrail-0.3.1-x86_64.AppImage` | `Contrail-0.3.1-aarch64.AppImage` |
+| Your system | File (ARM64) |
+| --- | --- |
+| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.3.1-1_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-0.3.1-aarch64.flatpak` |
 
 ```sh
 sudo apt install ./contrail_0.3.1-1_arm64.deb              # DEB
-sudo dnf install ./contrail-0.3.1-1.x86_64.rpm             # RPM (openSUSE: zypper install --allow-unsigned-rpm)
 flatpak install --user ./Contrail-0.3.1-aarch64.flatpak    # Flatpak
-chmod +x Contrail-0.3.1-x86_64.AppImage && ./Contrail-0.3.1-x86_64.AppImage
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
 needs, where your account is kept, and the move from the earlier SSH install (`contrail-migrate-launcher`, which
-keeps your account and chats). To update from 0.3.0 or older, install the new DEB, RPM or Flatpak file the same way,
-or run the new AppImage: the account and chats stay. The DEB also installs over the 0.1.0-preview1 package.
+keeps your account and chats). To update, install the new DEB or Flatpak file the same way. The DEB also installs
+over the 0.1.0-preview1 package.
+
+## Coming in 0.4.0
+
+- **ARM64 only, as a Flatpak and a DEB**: Contrail is made for FuriOS on the FuriPhone FLX1s and tested there
+  before each release. It may also work on Mobian, PureOS and other Debian-based Phosh systems; this isn't
+  verified. There are no more packages for x86_64, no RPM and no AppImage. Contrail 0.3.1 remains the last release
+  for x86_64 and the last one as an RPM or an AppImage; its files stay on its release page.
+- **Built on TDLib**: after the update from 0.3, sign in once. Contrail carries over the language, notification
+  and background settings and retrieves your cloud chats again. The data of 0.3 stays in `contrail-data/tdata`.
 
 ## What's new since 0.3.0
 
@@ -190,7 +195,6 @@ or run the new AppImage: the account and chats stay. The DEB also installs over 
   downloaded `.flatpak` file doesn't update by itself: the repository does.
 - The maps need the network: they come from OpenStreetMap's servers and aren't kept for offline use beyond
   libshumate's cache.
-- The RPM isn't signed.
 - Emoji in messages need a color emoji font on the system (the DEB recommends Noto Color Emoji).
 
 ## Not there yet

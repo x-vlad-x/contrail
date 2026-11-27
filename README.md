@@ -32,8 +32,20 @@ Contrail uses TDLib for the Telegram connection, message database and files. Its
 GTK4/libadwaita interface uses a single column on a phone and shows the chat list and the chat side by
 side on a wider screen. It supports touch gestures and follows the system's style and accent color.
 
-Contrail now has its own [Flatpak repository](#from-the-flatpak-repository) for x86_64 and ARM64: add it once, and
-new versions come through your app store or `flatpak update`.
+Contrail has its own [Flatpak repository](#from-the-flatpak-repository): add it once, and new versions come
+through your app store or `flatpak update`.
+
+## Supported systems
+
+| Tier | Systems | Meaning |
+| --- | --- | --- |
+| Supported | FuriOS on the FuriPhone FLX1s | Tested before each release |
+| May work | Mobian, PureOS and other Debian-based Phosh systems on ARM64 | Flatpak or DEB for ARM64; not verified, fixes are best effort |
+| Not supported | Desktop PCs, x86_64 (`amd64`) and other systems | No packages |
+
+Packages come for ARM64 (`arm64`, `aarch64`) only, as a Flatpak and a DEB. Contrail 0.3.1 remains the last
+release for x86_64 and the last one as an RPM or an AppImage. Its files stay on the
+[releases page](https://github.com/x-vlad-x/contrail/releases/tag/v0.3.1).
 
 ## Features
 
@@ -105,7 +117,7 @@ planned: Telegram Desktop doesn't have them either.
 ### From the Flatpak repository
 
 The easiest way, with updates through your app store or `flatpak update`: Contrail's own signed Flatpak repository,
-[flatpak.xvlad.com](https://flatpak.xvlad.com), for x86_64 and ARM64 (Linux phones). Open
+[flatpak.xvlad.com](https://flatpak.xvlad.com), for ARM64. Open
 [Contrail.flatpakref](https://flatpak.xvlad.com/io.github.x_vlad_x.Contrail.flatpakref) in GNOME Software, Discover
 or another app store, or:
 
@@ -121,19 +133,17 @@ repository, which takes every release from this project's releases page. Coming 
 
 ### Packages
 
-Download the package for your system from the [releases page](https://github.com/x-vlad-x/contrail/releases).
-Every package comes for x86_64 (`amd64`) and ARM64 (`aarch64`, Linux phones):
+Download the package from the [releases page](https://github.com/x-vlad-x/contrail/releases). Both are for
+ARM64:
 
 | System | Package | Install |
 | --- | --- | --- |
-| Debian, Ubuntu, Linux Mint, FuriOS, Mobian | `contrail_<version>-1_<arm64\|amd64>.deb` | `sudo apt install ./contrail_*.deb` |
-| Fedora, openSUSE | `contrail-<version>-1.<aarch64\|x86_64>.rpm` | `sudo dnf install ./contrail-*.rpm` |
-| Any distribution with Flatpak | `Contrail-<version>-<arch>.flatpak` | `flatpak install --user ./Contrail-*.flatpak` |
-| Any distribution | `Contrail-<version>-<arch>.AppImage` | `chmod +x` it and run it |
+| FuriOS, Mobian, PureOS | `contrail_<version>-1_arm64.deb` | `sudo apt install ./contrail_*_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-<version>-aarch64.flatpak` | `flatpak install --user ./Contrail-*-aarch64.flatpak` |
 
-The packages are ready to use: no building and no Telegram API keys needed. The DEB, RPM and AppImage carry the
-libraries Contrail needs and run on systems with glibc 2.39 or newer (Debian 13, Ubuntu 24.04, Fedora 40, openSUSE
-Leap 16 or newer); the Flatpak uses the GNOME runtime from Flathub. The account and the cache are kept in
+The packages are ready to use: no building and no Telegram API keys needed. The DEB carries the libraries
+Contrail needs and needs glibc 2.39 or newer (FuriOS 14, Debian 13 or newer); the Flatpak uses the GNOME runtime
+from Flathub. The account and the cache are kept in
 `~/.local/share/contrail-data/td` (the Flatpak's in `~/.var/app/io.github.x_vlad_x.Contrail/data/contrail-data/td`), separate from the
 official Telegram Desktop. The installation guide that comes with each release (`README.md` among its files) has
 the details, including moving from the earlier SSH install to a package (`contrail-migrate-launcher`).
@@ -165,15 +175,14 @@ TELEGRAM_API_HASH=0123456789abcdef0123456789abcdef
 ### Packages
 
 ```bash
-tools/build-packages.sh aarch64    # ARM64: DEB, RPM, AppImage and Flatpak in out/packages/
-tools/build-packages.sh x86_64     # x86_64: the same four
-tools/smoke-test.sh all-amd64      # install and start each package in clean containers (all-arm64, all)
+tools/build-packages.sh aarch64    # ARM64: DEB and Flatpak in out/packages/
+tools/smoke-test.sh all            # install and check both on the phone over SSH
 ```
 
-This needs git, patch, python3 and podman (or docker); everything else happens in containers. Both architectures
-are built against Debian 13 (ARM64 cross-compiled), once each, and packaged four ways by `tools/package.py`: the
-DEB, RPM and AppImage carry every library the program needs except the system's base ones
-(`tools/bundle.py`, `packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. FFmpeg
+This needs git, patch, python3 and podman (or docker); everything else happens in containers. The program is
+cross-compiled for ARM64 against Debian 13, once, and packaged two ways by `tools/package.py`: the DEB carries
+every library the program needs except the system's base ones (`tools/bundle.py`,
+`packaging/bundle-host-libraries.txt`), the Flatpak what its GNOME runtime doesn't have. FFmpeg
 is built by `build-env/build-deps.sh` from Debian's source package with the codecs Contrail uses.
 The build pins TDLib and uses the tgcalls sources and WebRTC dependencies specified in
 `tools/build-packages.sh`. The first build takes a few hours, later ones minutes. Packages are built locally.
@@ -183,15 +192,17 @@ sources, checksums) in `out/release/`, see [packaging/LICENSES.md](packaging/LIC
 
 ### Development install over SSH
 
-The default package build produces Contrail TDLib, which can run alongside Contrail 0.3. Build the
-ARM64 AppImage and copy it to a phone that accepts SSH logins with a key.
+The default package build produces Contrail TDLib, which can run alongside Contrail 0.3. Build its DEB
+and install it on a phone that accepts SSH logins with a key.
 
 ```bash
-CONTRAIL_FORMATS=appimage tools/build-packages.sh aarch64
-scp out/packages/Contrail-TDLib-*-aarch64.AppImage furios:
+CONTRAIL_FORMATS=deb tools/build-packages.sh aarch64
+scp out/packages/contrail-td_*_arm64.deb furios:
+ssh -t furios 'sudo apt install ./contrail-td_*_arm64.deb'
 ```
 
-Run the AppImage from the phone's graphical session. It uses `~/.local/share/contrail-td/app`.
+It appears as "Contrail TDLib" in the app list, the command is `contrail-td`. It uses
+`~/.local/share/contrail-td/app`.
 
 ## How it works
 
@@ -211,8 +222,8 @@ opening the app returns to the same chat. TDLib handles call signaling and tgcal
 | `gtk-ui/td/` | TDLib session, transport, chat state and scripted transport for tests |
 | `gtk-ui/media/` | Audio playback and recording, call audio and video |
 | `patches/tg_owt/` | WebRTC patches used by `build-deps.sh` |
-| `build-env/` | The build containers (release builds for ARM64 and x86_64 on Debian 13, the phone's FuriOS build for the SSH install), the RPM and Flatpak packaging containers, CMake toolchains, the build of the extra libraries |
-| `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, AppImage entry point, the libraries left to the system, release documents |
+| `build-env/` | The build containers (the ARM64 release build on Debian 13, the x86_64 build for development and tests, the phone's FuriOS build), the Flatpak packaging container, CMake toolchains, the build of the extra libraries |
+| `packaging/` | Launcher, desktop entry, metainfo, icon, install rules, the libraries left to the system, release documents |
 | `tools/` | Package and release scripts, testing helpers |
 | `tests/` | TDLib, interface and packaging regression tests |
 
@@ -220,7 +231,7 @@ opening the app returns to the same chat. TDLib handles call signaling and tgcal
 
 ### Testing on the phone
 
-Start the development AppImage with `CONTRAIL_DEBUG=1` from a terminal on the phone.
+Start the development build with `CONTRAIL_DEBUG=1 contrail-td` from a terminal on the phone.
 On the build machine, `tools/phone.sh` sends commands to it over D-Bus.
 
 ```bash

@@ -9,8 +9,8 @@ Telegram. Telegram is a trademark of Telegram FZ-LLC.
 
 ## What the program is made of
 
-The program (`libexec/contrail/contrail` in each package: under `/usr/lib/<package>` in the DEB and RPM, `usr` in
-the AppImage, `/app` in the Flatpak) is Contrail's GTK interface (`gtk-ui/`) with TDLib compiled in. Inside the
+The program (`libexec/contrail/contrail` in each package: under `/usr/lib/<package>` in the DEB, `/app` in the
+Flatpak) is Contrail's GTK interface (`gtk-ui/`) with TDLib compiled in. Inside the
 packages, `share/doc/<package>/build-info.json` names the exact Contrail source commit, the TDLib commit and
 whether calls carry sound and video.
 
@@ -23,13 +23,13 @@ Compiled into the program from source:
   tg_owt (WebRTC, with Contrail's fix in `patches/tg_owt/`) and rnnoise (with its neural network model). Their
   license texts are in `share/doc/<package>/static-libraries`; `sources.json` there lists the source archives
   with their SHA-256.
-- **Debian packages** used at build time (Debian 13 for both architectures):
+- **Debian packages** used at build time (Debian 13, ARM64):
   `share/doc/<package>/build-inputs.json` lists every Debian package whose headers, static archives or shared
   libraries the build used, with the source package and version.
 
-## The DEB, RPM and AppImage
+## The DEB
 
-These packages carry the shared libraries, plugins, icons and schemas the program needs, from Debian 13 (GTK,
+The DEB carries the shared libraries, plugins, icons and schemas the program needs, from Debian 13 (GTK,
 libadwaita, libshumate, OpenSSL and others). The libraries are Debian's files, unmodified, except that a run-time
 library search path pointing into the system is replaced with the library's own folder.
 
@@ -45,21 +45,15 @@ file to its Debian binary and source package and version, and `origins.json`, wh
 `host-libraries.txt` lists what is taken from the system instead (glibc, graphics drivers, fontconfig, the X11
 and Wayland client libraries, ALSA).
 
-The AppImage runtime (the small program at the start of the file that mounts it) is AppImage's type2-runtime
-under the MIT license, with statically linked libfuse (LGPL-2.1), squashfuse, musl, zstd, zlib and mimalloc;
-see `share/doc/<package>/appimage-runtime`.
-
-Replacing a bundled library: in the DEB and RPM, replace it in `/usr/lib/<package>/lib`; for the AppImage, extract
-it with `--appimage-extract`, replace the library in `squashfs-root/usr/lib` and start `squashfs-root/AppRun`.
-Contrail adds no restriction on modifying the libraries or on the reverse engineering needed to debug such
-modifications.
+Replacing a bundled library: replace it in `/usr/lib/<package>/lib`. Contrail adds no restriction on modifying
+the libraries or on the reverse engineering needed to debug such modifications.
 
 ## The Flatpak
 
 The Flatpak runs on the GNOME runtime from Flathub (`share/doc/<package>/flatpak-runtime.txt` names the version it
 was made for), which Flatpak installs from there; the runtime is not part of Contrail's files. The Flatpak carries
 the libraries the runtime doesn't have (libshumate and others) and PulseAudio's `pactl`, from Debian 13, and the same
-FFmpeg 7.1 libraries as the other packages (never the runtime's own FFmpeg), documented the same way in
+FFmpeg 7.1 libraries as the DEB (never the runtime's own FFmpeg), documented the same way in
 `share/doc/<package>/bundled`. Inside the installed Flatpak they are in
 `/app/lib`; `flatpak run --command=sh io.github.x_vlad_x.Contrail` opens a shell in the sandbox.
 
@@ -74,7 +68,7 @@ Each release offers, next to the packages:
   `build-deps.sh` (tg_owt with its patch applied),
   the exact Debian source packages of everything the packages carry (FFmpeg's included, with the build options in
   `build-env/build-deps.sh`) and of the Debian libraries compiled into the programs (verified
-  against the signed APT indexes and each `.dsc`), and the AppImage runtime sources.
+  against the signed APT indexes and each `.dsc`).
 
 To build the packages yourself, follow "Building" in `README.md`: `tools/build-packages.sh` needs podman (or
 docker) and your own Telegram API credentials (`api_id`/`api_hash` from <https://my.telegram.org>). The build
