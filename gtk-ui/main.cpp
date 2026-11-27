@@ -160,7 +160,10 @@ int main(int argc, char **argv) {
     // TDLib has closed its database and the D-Bus name is free. Without the arguments: a link given to the first
     // start would open again, and with it the window.
     char *const arguments[] = {argv[0], nullptr};
-    execv("/proc/self/exe", arguments);
+    // By its own path: started through /proc/self/exe its threads would all be named "exe".
+    auto *path = g_file_read_link("/proc/self/exe", nullptr);
+    execv(path ? path : "/proc/self/exe", arguments);
+    g_free(path);
     g_warning("background: starting again failed: %s", g_strerror(errno));
   }
   return result;
