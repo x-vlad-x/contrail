@@ -44,9 +44,18 @@ std::string SystemVersion() {
 
 }  // namespace
 
+// CONTRAIL_TEST_DC=1: Telegram's test servers, for checking the app with accounts made for it (99966XYYYY,
+// the code is X five times), never the real one.
+bool TestServers() {
+  const auto value = g_getenv("CONTRAIL_TEST_DC");
+  return value && *value && std::string(value) != "0";
+}
+
 std::string DataDirectory() {
   if (const auto custom = g_getenv("CONTRAIL_TD_DIR")) return custom;
-  auto *path = g_build_filename(g_get_user_data_dir(), kDataName, nullptr);
+  // An account of Telegram's test servers never shares the database of the real one.
+  const auto name = std::string(kDataName) + (TestServers() ? "-test-dc" : "");
+  auto *path = g_build_filename(g_get_user_data_dir(), name.c_str(), nullptr);
   auto result = std::string(path);
   g_free(path);
   return result;
@@ -118,6 +127,7 @@ void Session::sendParameters() {
   request->use_chat_info_database_ = true;
   request->use_message_database_ = true;
   request->use_secret_chats_ = false;
+  request->use_test_dc_ = TestServers();
   request->api_id_ = kApiId;
   request->api_hash_ = kApiHash;
   request->system_language_code_ = _config.language;

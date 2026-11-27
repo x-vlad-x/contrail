@@ -2,6 +2,7 @@
 // module of gtk-ui/media. The stopping point of the move to TDLib: run it on the FLX1s, talk to a person.
 //
 //   call-probe [DATA_DIRECTORY]      default ~/.local/share/contrail-td/probe
+//   CONTRAIL_TEST_DC=1 call-probe DIR  an account of Telegram's test servers
 //
 // Commands, one per line:
 //   contacts                  list the contacts with their ids
@@ -267,6 +268,8 @@ class Probe {
         request->use_chat_info_database_ = true;
         request->use_message_database_ = true;
         request->use_secret_chats_ = false;
+        // CONTRAIL_TEST_DC=1: Telegram's test servers, as the app has them (gtk-ui/td/session.cpp).
+        if (const auto test = std::getenv("CONTRAIL_TEST_DC")) request->use_test_dc_ = *test && std::string(test) != "0";
         request->api_id_ = kApiId;
         request->api_hash_ = kApiHash;
         request->system_language_code_ = "en";

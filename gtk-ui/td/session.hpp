@@ -50,5 +50,7 @@ void SetUpLog(const std::string &directory);
 
 // Where this program keeps its data: separate from the stable Contrail, which keeps working next to it.
 [[nodiscard]] std::string DataDirectory();
+// CONTRAIL_TEST_DC=1: Telegram's test servers (DataDirectory() is then a folder of their own).
+[[nodiscard]] bool TestServers();
 
 }  // namespace Contrail::Td
