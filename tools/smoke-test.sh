@@ -7,8 +7,10 @@
 #
 #   tools/smoke-test.sh deb       installed with apt (sudo) with the dependencies it declares, checked, then removed
 #                                 with what it brought in, unless it was installed before
-#   tools/smoke-test.sh flatpak   installed into the user's Flatpak installation (it stays: the version on the phone
-#                                 is the one checked); started with the command of its exported desktop entry
+#   tools/smoke-test.sh flatpak   the test version: installed into the user's Flatpak installation (it stays: the
+#                                 version on the phone is the one checked); the release (CONTRAIL_FLAVOUR=stable): into
+#                                 an installation of its own, removed afterwards, so the user's Contrail stays as it
+#                                 is; started with the command of its exported desktop entry
 #   tools/smoke-test.sh all       both
 #
 # Needs passwordless sudo on the phone for apt (xvfb, the test's only tool, is installed with it when missing).
@@ -73,15 +75,30 @@ smoke_flatpak() {
   [[ -f out/packages/$file ]] || { echo "No out/packages/$file: run tools/build-packages.sh" >&2; return 1; }
   echo "==> $file on $PHONE"
   scp -q "out/packages/$file" "$PHONE:$REMOTE/"
-  # Again if the same build is there already: its files are the ones checked.
-  rsh "set -e; export LC_ALL=C; flatpak install --user -y --noninteractive --reinstall --bundle $REMOTE/$file > /dev/null
-    flatpak info --user $APP_ID | sed -n '/Version\\|Runtime\\|Arch\\|Commit/p'"
-  # As the menu starts it. The run-demo home is a new one: Flatpak's user installation is named for it.
-  local launcher
+  # The test version goes into the user's installation and stays: it is the one on the phone. The release would
+  # replace the user's own Contrail there (and its account would need a new sign-in): it goes into an installation
+  # of its own, which takes the runtime from the system's, and is removed afterwards.
+  local installation='$HOME/.local/share/flatpak' isolated=
+  if [[ $FLAVOUR == stable ]]; then
+    installation=\$HOME/$REMOTE/flatpak-user isolated=1
+    rsh "rm -rf $REMOTE/flatpak-user && mkdir -p $REMOTE/flatpak-user"
+  fi
+  local fp="env FLATPAK_USER_DIR=$installation flatpak"
+  rsh "set -e; export LC_ALL=C; $fp install --user -y --noninteractive --reinstall --no-deps --no-related \
+      --bundle $REMOTE/$file > /dev/null
+    $fp info --user $APP_ID | sed -n '/Version\\|Runtime\\|Arch\\|Commit\\|Installation/p'"
+  # As the menu starts it.
+  local launcher status=0
   launcher=$(rsh "sed -n 's/^Exec=.* --command=\\([^ ]*\\) .*/\\1/p' \
-    \$(flatpak info --user --show-location $APP_ID)/export/share/applications/$APP_ID.desktop")
-  [[ -n $launcher ]] || { echo "No launcher in the exported desktop entry" >&2; return 1; }
-  demo "$out" "env FLATPAK_USER_DIR=\$HOME/.local/share/flatpak flatpak run --socket=x11 --command=$launcher $APP_ID"
+    \$($fp info --user --show-location $APP_ID)/export/share/applications/$APP_ID.desktop")
+  if [[ -z $launcher ]]; then
+    echo "No launcher in the exported desktop entry" >&2
+    status=1
+  else
+    demo "$out" "$fp run --socket=x11 --command=$launcher $APP_ID" || status=$?
+  fi
+  [[ -z $isolated ]] || rsh "rm -rf $REMOTE/flatpak-user"
+  return $status
 }
 
 [[ $# -gt 0 ]] || { sed -n '2,16p' "$0"; exit 2; }
