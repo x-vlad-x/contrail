@@ -1,4 +1,4 @@
-"""The launcher in its three layouts, without a real program or a real account."""
+"""The launcher in the DEB, the Flatpak and a development install, without a real program or a real account."""
 from pathlib import Path
 import os
 import shutil
@@ -36,8 +36,7 @@ class LauncherTest(unittest.TestCase):
                               capture_output=True, text=True).stdout.splitlines()
 
     def test_package_layout_under_any_prefix(self):
-        for prefix in (self.root / "usr/lib/contrail", self.root / "usr/lib/contrail-td",
-                       self.root / "Contrail.AppDir/usr", self.root / "app"):
+        for prefix in (self.root / "usr/lib/contrail", self.root / "usr/lib/contrail-td", self.root / "app"):
             with self.subTest(prefix=prefix):
                 launcher = prefix / "bin/contrail"
                 self.install(launcher, prefix / "libexec/contrail/contrail")
@@ -63,7 +62,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(options.read_text(), '{"custom": 1}')
 
     def test_bundled_gtk_resources(self):
-        # DEB, RPM and AppImage: GTK, GIO and gdk-pixbuf use the resources that come with the bundled GTK.
+        # DEB: GTK, GIO and gdk-pixbuf use the resources that come with the bundled GTK.
         prefix = self.root / "usr/lib/contrail"
         self.install(prefix / "bin/contrail", prefix / "libexec/contrail/contrail")
         (prefix / "libexec/contrail/contrail").write_text(

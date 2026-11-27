@@ -1,4 +1,4 @@
-# Libraries the self-contained packages (DEB, RPM, AppImage) take from the system instead of carrying them:
+# Libraries the self-contained DEB takes from the system instead of carrying them:
 # glibc, the C++ runtime, graphics drivers, the X11/Wayland client libraries and the font stack, which must match
 # the system. This is the AppImage project's list (https://github.com/AppImageCommunity/pkg2appimage, file
 # "excludelist" at commit 15a64c20dc23a0154622ba25829364323903b6b5), which linuxdeploy also uses, plus the ARM64

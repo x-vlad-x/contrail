@@ -1,7 +1,7 @@
 # Installs Contrail as the "Contrail" component (included by gtk-ui/CMakeLists.txt):
 #   cmake --install <build> --component Contrail --prefix /usr
 #
-#   bin/contrail                      launcher (works under any prefix, also inside an AppImage)
+#   bin/contrail                      launcher (works under any prefix)
 #   bin/contrail-migrate-launcher     replaces a user launcher left by the SSH install (run by the user; only
 #                                     under the stable application ID)
 #   libexec/contrail/contrail         the program: the GTK interface with TDLib compiled in
@@ -10,7 +10,7 @@
 #
 # The desktop entry, the AppStream file and the icon carry CONTRAIL_APP_ID: the test version (".Devel") gets its
 # own name in the menu and leaves tg:// links to the stable Contrail. CONTRAIL_COMMAND is the command the desktop
-# entry starts (the DEB and RPM of the test version link it as /usr/bin/contrail-td).
+# entry starts (the DEB of the test version links it as /usr/bin/contrail-td).
 set(CONTRAIL_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 set(CONTRAIL_COMPONENT Contrail)
 set(CONTRAIL_STABLE_ID io.github.x_vlad_x.Contrail)

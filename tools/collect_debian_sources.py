@@ -4,7 +4,7 @@ signed APT indexes. Never changes the host's APT configuration (a disposable bui
 
   collect_debian_sources.py --container IMAGE [--snapshot 20260615T140756Z] --output DIR INVENTORY.json...
 
-INVENTORY files are an AppImage's bundled-packages.json (every package it carries) and build-inputs.json
+INVENTORY files are a package's bundled-packages.json (every package it carries) and build-inputs.json
 (packages compiled in: static archives and header-only libraries; see needed_sources()). With --snapshot,
 sources come from snapshot.debian.org at that time (the FuriOS mirror has no sources); otherwise from the
 container's own repositories.

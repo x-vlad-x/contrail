@@ -119,7 +119,7 @@ gboolean Quit(gpointer) {
 void RestartWithoutWindow(const std::string &chat, const std::string &notifications) {
   auto &program = Instance();
   if (program.quitting || program.restart) return;
-  // The same program, wherever it is: inside a Flatpak, an AppImage's mount or a package.
+  // The same program, wherever it is: inside a Flatpak or a package.
   if (access("/proc/self/exe", X_OK) != 0) {
     g_message("background: no restart, the program can't be started again: %s", g_strerror(errno));
     return;

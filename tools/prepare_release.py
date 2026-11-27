@@ -4,7 +4,7 @@ Never tags, pushes or publishes anything.
 
   python3 tools/prepare_release.py [--validation]
 
-Before this: tools/build-packages.sh all (with your own API credentials), tools/smoke-test.sh, then the Debian
+Before this: tools/build-packages.sh aarch64 (with your own API credentials), tools/smoke-test.sh, then the Debian
 sources:
   python3 tools/prepare_release.py --collect-sources
 --validation accepts packages built with the public test API credentials and writes the kit to
@@ -19,17 +19,16 @@ import shutil
 import subprocess
 import tarfile
 
-from collect_debian_sources import verify_dsc, fetch_file
+from collect_debian_sources import verify_dsc
 from package import ARCHES, FORMATS
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ROOT / "out/packages"
 SOURCES = ROOT / "out/corresponding-sources"
 PART_SIZE = 64 * 1024 * 1024
-# Both architectures are built against Debian 13 (see tools/build-packages.sh).
+# The packages are for ARM64 only, built against Debian 13 (see tools/build-packages.sh).
 TARGETS = {
     "arm64": dict(arch="aarch64", container="localhost/contrail-arm64"),
-    "amd64": dict(arch="x86_64", container="localhost/contrail-desktop"),
 }
 
 
@@ -47,7 +46,7 @@ def workspace(deb_arch):
 
 
 def records(deb_arch):
-    """The inventories of a build: what it compiled in, what the DEB/RPM/AppImage carry, what the Flatpak carries."""
+    """The inventories of a build: what it compiled in, what the DEB carries, what the Flatpak carries."""
     space = workspace(deb_arch)
     return {
         "build-inputs": space / "stage/usr/share/doc/contrail/build-inputs.json",
@@ -256,7 +255,7 @@ def main():
         available = {(s["package"], s["version"]) for s in metadata["sources"]}
         if missing := wanted - available:
             raise RuntimeError(f"Debian sources missing for {deb_arch}: {sorted(missing)}")
-        # Source packages are the same for both architectures: each file goes in once.
+        # Each file goes in once.
         for source in metadata["sources"]:
             for record in source["files"]:
                 path = debian / record["name"]
@@ -270,25 +269,6 @@ def main():
                     files[path] = name
             verify_dsc(source, debian)
         files[debian / "sources.json"] = f"debian/sources-{deb_arch}.json"
-    runtime = json.loads((ROOT / "packaging/runtime-sources.json").read_text())
-    tools = json.loads((ROOT / "packaging/appimage-tools.json").read_text())
-    if any(tools[f"runtime-{target['arch']}"]["source_commit"] != runtime["runtime_commit"]
-           for target in TARGETS.values()):
-        raise RuntimeError("The AppImage runtime binaries and source pins disagree")
-    runtime_dir = SOURCES / "appimage-runtime"
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    unavailable = []
-    for record in runtime["files"]:
-        try:
-            fetch_file(record, runtime_dir)
-        except (RuntimeError, OSError):
-            # A check of the tooling may run where some hosts are blocked; a release may not.
-            if not args.validation:
-                raise
-            unavailable.append(record["url"])
-            continue
-        files[runtime_dir / record["name"]] = f"appimage-runtime/{record['name']}"
-    files[ROOT / "packaging/runtime-sources.json"] = "appimage-runtime/runtime-sources.json"
     files[ROOT / "packaging/LICENSES.md"] = "README.md"
 
     sources_tar = destination / f"Contrail-{version}-corresponding-sources.tar"
@@ -307,8 +287,8 @@ def main():
         "# Corresponding sources\n\n"
         "These files are not needed to install Contrail. They hold the complete sources of what the packages "
         "contain besides Contrail's own code (which is in "
-        f"`Contrail-{version}-sources.tar.gz`): TDLib, tgcalls, the libraries built for the packages, the "
-        "Debian source packages of the Debian parts, and the AppImage runtime. (The "
+        f"`Contrail-{version}-sources.tar.gz`): TDLib, tgcalls, the libraries built for the packages and the "
+        "Debian source packages of the Debian parts. (The "
         "Flatpak's runtime is not part of it: Flatpak installs it from Flathub, which publishes its sources.)\n\n"
         f"Download all {len(parts)} files `{sources_tar.name}.part*` and `SHA256SUMS` into one folder, then:\n\n"
         "```sh\nsha256sum --check --ignore-missing SHA256SUMS\n"
@@ -338,9 +318,7 @@ def main():
         uses_test_api = any(info["api_credentials"] == "test" for info in infos.values())
         warning.write_text("Local validation build for checking the release tooling.\n"
                            + ("Includes packages built with Telegram's public test API credentials.\n"
-                              if uses_test_api else "")
-                           + "".join(f"Not downloaded here (the release run fetches it): {url}\n"
-                                     for url in unavailable))
+                              if uses_test_api else ""))
         assets.append(warning)
     (destination / "SHA256SUMS").write_text("".join(f"{digest(p)}  {p.name}\n" for p in sorted(assets)))
     shutil.rmtree(bundle)

@@ -1,5 +1,0 @@
-#!/bin/sh
-# AppImage entry point: the launcher (usr/bin/contrail) sets up the bundled GTK, GIO and Qt.
-set -eu
-APPDIR="$(CDPATH= cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd)"
-exec "$APPDIR/usr/bin/contrail" "$@"

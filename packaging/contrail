@@ -1,20 +1,19 @@
 #!/bin/sh
 # Contrail launcher: PREFIX/bin/contrail starts PREFIX/libexec/contrail/contrail. PREFIX is /usr/lib/contrail (or
-# /usr/lib/contrail-td for the test version) in the DEB and RPM, reached through a link in /usr/bin; AppDir/usr in
-# the AppImage; /app in the Flatpak.
+# /usr/lib/contrail-td for the test version) in the DEB, reached through a link in /usr/bin; /app in the Flatpak.
 HERE="$(dirname "$(readlink -f "$0")")"
 PREFIX="$(dirname "$HERE")"
 PROGRAM="$PREFIX/libexec/contrail/contrail"
 RESOURCES="$PREFIX/share/contrail"
 INFO="$RESOURCES/version"
-# The DEB, RPM and AppImage also carry GTK: point it, GIO and gdk-pixbuf at the resources that come with it
+# The DEB also carries GTK: point it, GIO and gdk-pixbuf at the resources that come with it
 # (the system's ones are built for the system's GTK). The bundled libraries are found through their RPATH.
 if [ -d "$PREFIX/lib/gio/modules" ]; then
   export XDG_DATA_DIRS="$PREFIX/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
   export GSETTINGS_SCHEMA_DIR="$PREFIX/share/glib-2.0/schemas"
   export GIO_MODULE_DIR="$PREFIX/lib/gio/modules"
   export GDK_PIXBUF_MODULEDIR="$PREFIX/lib/gdk-pixbuf-2.0/2.10.0/loaders"
-  # The loader cache lists absolute paths, which change with every mount of an AppImage.
+  # The loader cache lists absolute paths, which depend on where the package is.
   cache="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/contrail-$(id -u)"
   if mkdir -p "$cache" 2>/dev/null && chmod 700 "$cache" && \
       LD_LIBRARY_PATH="$PREFIX/lib" "$PREFIX/lib/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" \

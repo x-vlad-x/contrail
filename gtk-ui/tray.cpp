@@ -87,7 +87,7 @@ GDBusNodeInfo *Introspection() {
   return info;
 }
 
-// The app's icon, drawn by the app: an AppImage's icon theme isn't visible to the panel.
+// The app's icon, drawn by the app: the icon theme the app sees (bundled or in a sandbox) may not be the panel's.
 std::string IconFile() {
   auto *display = gdk_display_get_default();
   if (!display) return {};
