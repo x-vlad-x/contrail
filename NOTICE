@@ -8,13 +8,18 @@ Contrail is an unofficial Telegram client and is not affiliated with or endorsed
 or the Telegram Desktop project. Telegram is a trademark of Telegram FZ-LLC. It uses the Telegram API
 with its own api_id, which every build must supply (see README.md).
 
-It is built on Telegram Desktop (https://github.com/telegramdesktop/tdesktop):
+It is built on TDLib (https://github.com/tdlib/td), Telegram's library for clients:
+  Copyright Aliaksei Levin, Arseny Smirnov
+  Licensed under the Boost Software License 1.0.
+The build downloads TDLib at the commit pinned in build-env/build-tdlib.sh and compiles it in.
+
+It uses parts of Telegram Desktop (https://github.com/telegramdesktop/tdesktop):
   Copyright John Preston and Telegram Desktop contributors
   Licensed under the GNU General Public License, version 3, with the OpenSSL exception.
-The Telegram Desktop sources are not part of this repository; the build script downloads them from
-https://github.com/telegramdesktop/tdesktop. The patch in patches/ modifies those sources. The build
-also downloads the libraries Telegram Desktop needs that Debian doesn't package (tg_owt, tde2e from
-TDLib, tlottie, wallet-engine), at the versions the official Telegram Desktop build uses.
+These are the English interface strings, the call tones, the sound device module for calls and, from Telegram
+Desktop's sources at its release tag, tgcalls (LGPL-3.0). For sound and video in calls the build also compiles
+tg_owt (WebRTC, with the patch in patches/tg_owt/) and rnnoise at the versions the official Telegram Desktop
+build uses.
 
-The interface strings come from Telegram's translations, loaded by the Telegram Desktop core.
+The interface strings in other languages come from Telegram's translations, loaded through TDLib.
 The application icon and the icons in gtk-ui/icons/ were made for Contrail.
