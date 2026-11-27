@@ -19,11 +19,15 @@ bool RunBackgroundCommand(MainWindow &window, const std::string &name, const std
   if (name == "bg-state") {
     const auto *tray = window.tray();
     const auto place = window.chatView() ? window.chatView()->place() : ChatView::Place();
-    g_message("bg: window=%d visible=%d background=%d tray=%s unread=%d place=%lld/%.0f chat=%lld",
+    const auto *blocker = window.restartBlocker();
+    g_message("bg: window=%d visible=%d background=%d tray=%s unread=%d place=%lld/%.0f chat=%lld gpu=%d restart=%s",
               int(window.widget() != nullptr), window.widget() ? int(gtk_widget_get_visible(window.widget())) : 0,
               int(Settings().background), tray ? (tray->shown() ? "registered" : "waiting") : "none",
               tray ? tray->unread() : -1, static_cast<long long>(place.message), place.y,
-              static_cast<long long>(window.currentChat()));
+              static_cast<long long>(window.currentChat()), int(SurfacesUsed()), blocker ? blocker : "ready");
+  } else if (name == "bg-restart") {
+    // The restart without the window, without waiting for its minute.
+    window.debugRestart();
   } else if (name == "bg-close") {
     // As the close button does.
     if (window.widget()) gtk_window_close(GTK_WINDOW(window.widget()));

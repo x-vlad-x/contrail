@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <malloc.h>
 #include <sys/prctl.h>
+#include <utility>
 
 
 namespace Contrail {
@@ -160,6 +161,32 @@ void LoadStyle() {
 }
 
 }  // namespace
+
+namespace {
+
+bool SurfaceRealized = false;
+
+}  // namespace
+
+void WatchSurfaces() {
+  static auto watching = false;
+  if (std::exchange(watching, true)) return;
+  // A widget is realized only inside a realized window, popover or dialog: the first one is enough. The signal is
+  // there once the class is, which may be before any widget was made.
+  auto *widgetClass = g_type_class_ref(GTK_TYPE_WIDGET);
+  const auto realize = g_signal_lookup("realize", GTK_TYPE_WIDGET);
+  g_type_class_unref(widgetClass);
+  g_signal_add_emission_hook(realize, 0,
+                             +[](GSignalInvocationHint *, guint, const GValue *, gpointer) -> gboolean {
+                               SurfaceRealized = true;
+                               return FALSE;
+                             },
+                             nullptr, nullptr);
+}
+
+bool SurfacesUsed() {
+  return SurfaceRealized;
+}
 
 void LoadApplicationStyle() {
   LoadStyle();

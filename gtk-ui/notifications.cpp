@@ -6,6 +6,8 @@
 #include "td/strings.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <utility>
 
 namespace Contrail {
 namespace {
@@ -29,16 +31,19 @@ const Type *Cast(const api::Object *object) {
 }  // namespace
 
 Notifier::Notifier(Td::Store &store, MainWindow &window) : _store(store), _window(window) {
+  _bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
+  if (_bus) listen();
   auto &client = _store.client();
+  // Before asking: what is still active comes as soon as notifications are asked for.
+  client.subscribe([this](api::Update &update) { updated(update); }, _lifetime);
   // Without these TDLib sends no notifications at all.
   client.send(api::make_object<api::setOption>("notification_group_count_max",
                                                api::make_object<api::optionValueInteger>(kGroupsMax)));
   client.send(api::make_object<api::setOption>("notification_group_size_max",
                                                api::make_object<api::optionValueInteger>(kGroupSizeMax)));
-  client.subscribe([this](api::Update &update) { updated(update); }, _lifetime);
+}
 
-  _bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, nullptr);
-  if (!_bus) return;
+void Notifier::listen() {
   _cancellable = g_cancellable_new();
   _subscription = g_dbus_connection_signal_subscribe(
       _bus, kService, kService, nullptr, kPath, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -104,8 +109,10 @@ Notifier::Note Notifier::makeNote(const api::notification &notification) const {
 void Notifier::groupUpdated(api::updateNotificationGroup &update) {
   const auto type = update.type_ ? update.type_->get_id() : 0;
   if (type != api::notificationGroupTypeMessages::ID && type != api::notificationGroupTypeMentions::ID) return;
+  const auto known = _groups.contains(update.notification_group_id_);
   auto &group = _groups[update.notification_group_id_];
   group.id = update.notification_group_id_;
+  if (!known) takeHandedOver(group);
   group.chat = update.chat_id_;
   group.sound = update.notification_sound_id_;
   const auto &removed = update.removed_notification_ids_;
@@ -140,7 +147,8 @@ void Notifier::noteUpdated(api::updateNotification &update) {
 }
 
 // What was there when the app quit last time. Telegram Desktop doesn't show those again after a start; they are kept
-// so that a new message in the chat shows the others with it.
+// so that a new message in the chat shows the others with it. After a restart in the background the notifications
+// still on the screen are this process's now: a tap opens their chat, reading elsewhere takes them away.
 void Notifier::adopt(api::updateActiveNotifications &update) {
   for (const auto &source : update.groups_) {
     if (!source || !source->type_) continue;
@@ -151,7 +159,76 @@ void Notifier::adopt(api::updateActiveNotifications &update) {
     for (const auto &notification : source->notifications_) {
       if (notification) group.notes.push_back(makeNote(*notification));
     }
+    takeHandedOver(group);
   }
+  // Read or gone in the meantime: TDLib has nothing active for them.
+  for (const auto &[groupId, handed] : std::exchange(HandedOver(), {})) {
+    if (_bus) {
+      g_dbus_connection_call(_bus, kService, kPath, kService, "CloseNotification", g_variant_new("(u)", handed.shown),
+                             nullptr, G_DBUS_CALL_FLAGS_NONE, -1, nullptr, nullptr, nullptr);
+    }
+  }
+}
+
+std::map<std::int32_t, Notifier::Handed> &Notifier::HandedOver() {
+  static auto result = std::map<std::int32_t, Handed>();
+  return result;
+}
+
+void Notifier::takeHandedOver(Group &group) {
+  auto &handed = HandedOver();
+  const auto it = handed.find(group.id);
+  if (it == handed.end()) return;
+  group.shown = it->second.shown;
+  handed.erase(it);
+}
+
+void Notifier::TakeOver(const std::string &list) {
+  auto &handed = HandedOver();
+  handed.clear();
+  auto *parts = g_strsplit(list.c_str(), ",", -1);
+  for (auto **part = parts; *part; ++part) {
+    auto group = 0LL;
+    auto shown = 0ULL;
+    auto chat = 0LL;
+    auto topic = 0LL;
+    auto message = 0LL;
+    if (std::sscanf(*part, "%lld:%llu:%lld:%lld:%lld", &group, &shown, &chat, &topic, &message) == 5 && shown) {
+      handed[static_cast<std::int32_t>(group)] = Handed{.shown = static_cast<std::uint32_t>(shown), .chat = chat,
+                                                        .topic = static_cast<std::int32_t>(topic), .message = message};
+    }
+  }
+  g_strfreev(parts);
+}
+
+std::string Notifier::handOver() {
+  auto result = std::string();
+  for (const auto &[id, group] : _groups) {
+    if (!group.shown || group.notes.empty()) continue;
+    if (!result.empty()) result += ',';
+    const auto &newest = group.notes.back();
+    result += std::to_string(id) + ':' + std::to_string(group.shown) + ':' + std::to_string(group.chat) + ':'
+        + std::to_string(newest.topic) + ':' + std::to_string(newest.message);
+  }
+  // Forgotten without closing them: the destructor leaves them on the screen.
+  _groups.clear();
+  return result;
+}
+
+// A notification from the process before this one that TDLib hasn't told about (yet): as much of its group as a tap
+// needs.
+std::optional<Notifier::Group> Notifier::handedGroup(std::uint32_t id) const {
+  for (const auto &[groupId, handed] : HandedOver()) {
+    if (handed.shown != id) continue;
+    auto group = Group{.id = groupId, .chat = handed.chat, .shown = handed.shown, .adopted = true};
+    group.notes.push_back(Note{.message = handed.message, .topic = handed.topic});
+    return group;
+  }
+  return std::nullopt;
+}
+
+bool Notifier::busy() const {
+  return std::ranges::any_of(_groups, [](const auto &entry) { return entry.second.pending; });
 }
 
 // Nothing while the user reads the chat already, or doesn't want notifications at all.
@@ -298,10 +375,11 @@ void Notifier::signal(const char *name, GVariant *parameters) {
     const char *text = nullptr;
     g_variant_get(parameters, "(u&s)", &id, &text);
     if (const auto *group = byShown(id)) reply(*group, text);
+    else if (const auto handed = handedGroup(id)) reply(*handed, text);
   } else if (g_str_equal(name, "ActivationToken") && g_variant_is_of_type(parameters, G_VARIANT_TYPE("(us)"))) {
     const char *token = nullptr;
     g_variant_get(parameters, "(u&s)", &id, &token);
-    if (byShown(id)) _activationToken = token;
+    if (byShown(id) || handedGroup(id)) _activationToken = token;
   } else if (g_str_equal(name, "NotificationClosed") && g_variant_is_of_type(parameters, G_VARIANT_TYPE("(uu)"))) {
     auto reason = guint32();
     g_variant_get(parameters, "(uu)", &id, &reason);
@@ -318,8 +396,9 @@ void Notifier::signal(const char *name, GVariant *parameters) {
 
 void Notifier::activated(std::uint32_t id, const std::string &action) {
   const auto *found = byShown(id);
-  if (!found) return;
-  const auto group = *found;
+  const auto handed = found ? std::nullopt : handedGroup(id);
+  if (!found && !handed) return;
+  const auto group = found ? *found : *handed;
   if (action == "default") open(group);
   else if (action == "mark-read") markRead(group);
 }

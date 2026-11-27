@@ -30,7 +30,7 @@
 //   live-locations (what is shared from here) | live-update (a fix taken and sent now) | live-bar | live-bar-tap
 //   live-map (of the open chat) | on the shared map: live-state, live-share (its button), live-row N
 //   Background and settings (background_debug.cpp): bg-state | bg-close (as the close button) | bg-open (as the
-//   launcher) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
+//   launcher) | bg-restart (the restart without the window, if nothing keeps it, without its minute) | settings (opens them) | settings-state | settings-set KEY 0|1 | settings-about | settings-logout
 //   mem-guard (its state) | mem-simulate low|critical | notify-state | notify-do CHAT open|read|reply TEXT (as its
 //   buttons) | proxy (opens the list, over the settings) | proxy-state | proxy-add TYPE SERVER PORT [SECRET | USER
 //   PASSWORD] (through the dialog; TYPE socks5, http or mtproto) | proxy-edit N TYPE ... | proxy-use 0|1

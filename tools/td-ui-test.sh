@@ -650,10 +650,10 @@ section_background() {
     --method org.kde.StatusNotifierItem.Activate 0 0 > /dev/null
   sleep 2
   line=$(bg)
-  [[ $line == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the tray icon didn't bring the chat back: $line"
+  [[ $line == *"window=1 visible=1 "*"place=$place chat=$chat "* ]] || fail "the tray icon didn't bring the chat back: $line"
   c bg-close 2
   c bg-open 2
-  [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat" ]] || fail "the launcher didn't bring the chat back: $(bg)"
+  [[ $(bg) == *"window=1 visible=1 "*"place=$place chat=$chat "* ]] || fail "the launcher didn't bring the chat back: $(bg)"
   # A topic comes back where it was too, not at its reading place further down: its message on top is shown again.
   c 'chat 40' 2
   c 'topic 2' 2
@@ -676,7 +676,8 @@ section_background() {
   (( $(grep -c 'scenario: network' "$WORK/log.txt") == 2 )) || fail "the network changes weren't told once each"
   # The settings stay for the next start.
   kill "$P"; wait "$P" 2>/dev/null || true; P=
-  start 120
+  # The restart in the background is off on the scenario unless asked for: its account would start from scratch.
+  CONTRAIL_BACKGROUND_RESTART=1 start 120
   [[ $(bg) == *'background=1 tray=registered'* ]] || fail "the background setting was lost: $(bg)"
   [[ $(asked 'mem-guard:' mem-guard) == *'level=normal'* ]] || fail "no memory guard"
   c 'mem-simulate low' 0.5
@@ -684,7 +685,7 @@ section_background() {
   # Notifications: two messages to a chat that isn't open, the window closed; one notification for both.
   notes() { grep -c "^$1" "$desktop" || true; }
   c 'chat 0' 2
-  [[ $(bg) != *' chat=5' ]] || fail "the chat that gets messages is open"
+  [[ $(bg) != *' chat=5 '* ]] || fail "the chat that gets messages is open"
   c 'send /notify2' 0.3
   c bg-close 3
   line=$(grep '^notify ' "$desktop" | tail -1)
@@ -716,7 +717,27 @@ section_background() {
   gdbus call --session --dest org.contrail.FakeDesktop --object-path /org/freedesktop/Notifications \
     --method org.contrail.FakeDesktop.Invoke "$id" default > /dev/null
   sleep 2
-  [[ $(bg) == *'window=1 visible=1 '*' chat=5' ]] || fail "a tap didn't open the chat: $(bg)"
+  [[ $(bg) == *'window=1 visible=1 '*' chat=5 '* ]] || fail "a tap didn't open the chat: $(bg)"
+  # Started again without the window, so without the GPU's driver: the same process, a notification from before taken
+  # over (gone in the new start, it is closed), the window back on the same chat.
+  c 'chat 0' 2
+  chat=$(bg | sed -n 's/.* chat=\([-0-9]*\) .*/\1/p')
+  c 'send /notify' 0.3
+  c bg-close 3
+  line=$(grep '^notify ' "$desktop" | tail -1)
+  id=$(sed -n 's/^notify id=\([0-9]*\) .*/\1/p' <<< "$line")
+  line=$(bg)
+  [[ $line == *'window=0 '*' gpu=1 restart=ready' ]] || fail "not ready to start again: $line"
+  c bg-restart 0
+  for _ in $(seq 100); do grep -q 'background: started again without the window' "$WORK/log.txt" && break; sleep 0.1; done
+  grep -q 'background: started again without the window' "$WORK/log.txt" || fail "it didn't start again: $(tail -3 "$WORK/log.txt")"
+  kill -0 "$P" || fail "the process is gone"
+  sleep 2
+  line=$(bg)
+  [[ $line == *'window=0 '*' gpu=0 restart=no-gpu' ]] || fail "started again with a window or the driver: $line"
+  grep -q "^close id=$id" "$desktop" || fail "the notification from before wasn't taken over"
+  c bg-open 3
+  [[ $(bg) == *"window=1 visible=1 "*" chat=$chat gpu=1 "* ]] || fail "the chat didn't come back after the restart: $(bg)"
   # Turned off: nothing comes.
   c settings 1
   c 'settings-set preview 1' 0.3

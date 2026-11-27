@@ -35,6 +35,10 @@ namespace api = Td::api;
 constexpr auto kStringsTimeoutMs = 4000;
 // Gives memory back once the start is over (see showChats).
 constexpr auto kTrimAfterStartMs = 8000;
+// The window closed this long ago, the process starts again without the GPU's driver (scheduleRestart); while
+// something keeps it from that, it looks again this often.
+constexpr auto kRestartAfterSeconds = 60;
+constexpr auto kRestartRetrySeconds = 60;
 
 GtkWidget *MakeLoadingPage() {
   auto *page = adw_toolbar_view_new();
@@ -171,6 +175,7 @@ void MainWindow::buildChats() {
 
 MainWindow::~MainWindow() {
   if (_stringsTimeout) g_source_remove(_stringsTimeout);
+  if (_restartTimer) g_source_remove(_restartTimer);
   _tray = nullptr;
   clearChats();
   if (_callBar) g_object_remove_weak_pointer(G_OBJECT(_callBar), reinterpret_cast<gpointer *>(&_callBar));
@@ -226,6 +231,10 @@ AudioPlayer *MainWindow::player() {
 }
 
 void MainWindow::present() {
+  if (_restartTimer) {
+    g_source_remove(_restartTimer);
+    _restartTimer = 0;
+  }
   if (!_window) {
     buildWindow();
     // Otherwise the window waits for the next state: a session that ended in the background starts again.
@@ -323,6 +332,10 @@ void MainWindow::authorization(api::AuthorizationState &state) {
   _authorized = state.get_id() == api::authorizationStateReady::ID;
   if (_authorized && !_notifier) _notifier = std::make_unique<Notifier>(*_store, *this);
   if (!_authorized) _notifier = nullptr;
+  // Started again in the background: the chat the window comes back to is known before the chats are loaded.
+  if (_authorized && !_window && _saved && _saved->chat && !_store->chat(_saved->chat)) {
+    _session->client().send(api::make_object<api::getChat>(_saved->chat));
+  }
   if (!_window) {
     // Without the window only signing in again needs it back: Telegram ended the session in the background.
     if (_authorized || state.get_id() == api::authorizationStateLoggingOut::ID
@@ -740,6 +753,78 @@ void MainWindow::releaseWindow() {
   ReleaseAvatars();
   TrimMemorySoon(3000);
   g_message("background: the window is released");
+  scheduleRestart(kRestartAfterSeconds);
+}
+
+// GTK keeps the GPU's driver from the first window on until the process ends: on the FLX1s eleven of its 22 threads
+// in the background were the driver's (mali-*, ged-swd), with its libraries and memory. Nothing in GTK lets it go, so
+// a minute after the window has gone, when nothing runs that a restart would cut, the process closes TDLib and
+// starts itself again without the window. Opening the app then builds it as after any closing.
+void MainWindow::scheduleRestart(int seconds) {
+  if (_restartTimer) g_source_remove(_restartTimer);
+  _restartTimer = g_timeout_add_seconds_once(seconds, +[](gpointer data) {
+    auto *self = static_cast<MainWindow *>(data);
+    self->_restartTimer = 0;
+    self->restartIfIdle();
+  }, this);
+}
+
+const char *MainWindow::restartBlocker() const {
+  const auto chosen = g_getenv("CONTRAIL_BACKGROUND_RESTART");
+  // The scenario's account lives in the process: it would start from the beginning.
+  if (chosen ? std::string(chosen) == "0" : g_getenv("CONTRAIL_SCENARIO") != nullptr) return "off";
+  if (_window) return "window";
+  if (!Settings().background) return "foreground";
+  if (!SurfacesUsed()) return "no-gpu";
+  if (!_authorized || !_store) return "signing-in";
+  if (_call && _call->active()) return "call";
+  if (_recorder && _recorder->active()) return "recording";
+  if (_player) {
+    const auto status = _player->state().status;
+    if (status == AudioPlayer::Status::Playing || status == AudioPlayer::Status::Loading) return "playing";
+  }
+  if (_store->transferring()) return "files";
+  if (_notifier && _notifier->busy()) return "notifying";
+  return nullptr;
+}
+
+void MainWindow::restartIfIdle() {
+  const auto blocker = restartBlocker();
+  if (!blocker) {
+    auto chat = std::string();
+    if (_saved) {
+      chat = std::to_string(_saved->chat) + ' ' + std::to_string(_saved->topic) + ' ' + std::to_string(_saved->message)
+          + ' ' + std::to_string(_saved->y);
+    }
+    RestartWithoutWindow(chat, _notifier ? _notifier->handOver() : std::string());
+    return;
+  }
+  const auto blocking = std::string(blocker);
+  // These don't change by themselves: the next closing of the window checks again.
+  if (blocking == "off" || blocking == "window" || blocking == "foreground" || blocking == "no-gpu") return;
+  scheduleRestart(kRestartRetrySeconds);
+}
+
+void MainWindow::startWithoutWindow(const std::string &chat) {
+  auto saved = SavedChat();
+  auto topic = 0;
+  auto message = 0LL;
+  auto id = 0LL;
+  if (std::sscanf(chat.c_str(), "%lld %d %lld %lf", &id, &topic, &message, &saved.y) == 4) {
+    saved.chat = id;
+    saved.topic = topic;
+    saved.message = message;
+  }
+  // Before anything was shown: the chats come with TDLib and wait for the window.
+  releaseWindow();
+  _saved = saved.chat ? std::optional(saved) : std::nullopt;
+  g_message("background: started again without the window");
+}
+
+void MainWindow::debugRestart() {
+  const auto blocker = restartBlocker();
+  g_message("bg: restart=%s", blocker ? blocker : "now");
+  if (!blocker) restartIfIdle();
 }
 
 // Opening the app again comes back to the chat it had, as after closing the window in 0.3.1.

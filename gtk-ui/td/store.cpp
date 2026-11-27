@@ -286,6 +286,10 @@ void Store::loadMore(ListKind kind, int limit) {
                _lifetime);
 }
 
+bool Store::transferring() const {
+  return std::ranges::any_of(_files, [](const auto &entry) { return entry.second.downloading || entry.second.uploading; });
+}
+
 void Store::download(FileId id, int priority) {
   if (const auto known = file(id); known && known->complete) return;
   // A file already on disk gets no update: the answer is all there is.

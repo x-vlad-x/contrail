@@ -182,6 +182,8 @@ class Store final {
   void loadMore(ListKind kind, int limit = 50);
   // Asks for a file; progress comes through onFile. Priority 1 to 32, higher goes first.
   void download(FileId id, int priority = 1);
+  // A file is being downloaded or uploaded.
+  [[nodiscard]] bool transferring() const;
   // Downloads from `offset` on (TDLib then moves its download there): what a player needs next.
   void downloadFrom(FileId id, int priority, std::int64_t offset);
   void cancelDownload(FileId id);

@@ -3091,6 +3091,10 @@ class ScenarioTransport final : public Transport {
         if (request.name_ == "notification_group_count_max") {
           const auto value = As<api::optionValueInteger>(request.value_.get());
           _notificationsOn = value && value->value_ > 0;
+          // As TDLib: what is still to be seen, once notifications are asked for. Nothing here after a start.
+          if (_notificationsOn) {
+            update(api::make_object<api::updateActiveNotifications>(std::vector<api::object_ptr<api::notificationGroup>>()));
+          }
         }
         return false;
       }

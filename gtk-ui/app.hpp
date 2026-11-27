@@ -44,6 +44,14 @@ void TriggerFeedback(const char *event);
 // The stylesheet and icons, once a display exists.
 void LoadApplicationStyle();
 
+// GTK sets up the GPU's driver for the first window, popover or dialog put on the screen, and keeps it, with its
+// threads and memory, until the process ends. WatchSurfaces() notes when that happens (once a display exists).
+void WatchSurfaces();
+[[nodiscard]] bool SurfacesUsed();
+// The process closes TDLib and starts itself again, without the window and so without the driver. `chat`: the
+// place the window comes back to, `notifications`: those on the screen (Notifier::handOver).
+void RestartWithoutWindow(const std::string &chat, const std::string &notifications);
+
 // Connects a lambda to a GObject signal with no extra arguments besides the instance.
 template <typename Fn>
 void OnClicked(GtkWidget *button, Fn &&fn) {

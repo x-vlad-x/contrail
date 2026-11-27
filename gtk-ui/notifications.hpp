@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,13 @@ class Notifier final {
 
   // The settings changed: turned off, the notifications shown go.
   void settingsChanged();
+
+  // The process starts again in the background: the notifications on the screen stay there, and this tells the next
+  // one which they are ("group:id,..."). Nothing is shown any more. TakeOver() gives the list to the next Notifier.
+  [[nodiscard]] std::string handOver();
+  static void TakeOver(const std::string &list);
+  // A notification waits for the server's answer: it would be left without an owner.
+  [[nodiscard]] bool busy() const;
 
   // "notify: group=1 chat=5 shown=12 count=2 ..." into the log.
   void debugState() const;
@@ -55,6 +63,7 @@ class Notifier final {
     bool adopted = false;  // From before this start: not shown until something new comes.
   };
 
+  void listen();  // The server's signals and what it can do.
   void updated(Td::api::Update &update);
   void groupUpdated(Td::api::updateNotificationGroup &update);
   void noteUpdated(Td::api::updateNotification &update);
@@ -71,6 +80,16 @@ class Notifier final {
   void markRead(const Group &group);
   void reply(const Group &group, const std::string &text);
   [[nodiscard]] Group *byShown(std::uint32_t id);
+  // A notification of the process before this one (TakeOver), by its group's id.
+  struct Handed {
+    std::uint32_t shown = 0;
+    Td::ChatId chat = 0;
+    std::int32_t topic = 0;
+    std::int64_t message = 0;  // The newest.
+  };
+  static std::map<std::int32_t, Handed> &HandedOver();
+  void takeHandedOver(Group &group);
+  [[nodiscard]] std::optional<Group> handedGroup(std::uint32_t id) const;
 
   Td::Store &_store;
   MainWindow &_window;

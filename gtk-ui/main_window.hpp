@@ -98,6 +98,12 @@ class MainWindow final {
   // The window goes and its interface with it; TDLib, notifications and calls stay. Opening the app builds it
   // again on the same chat. While signing in the window is only hidden: what was typed there would be lost.
   void closeToBackground();
+  // This process was started again by the one before it (RestartWithoutWindow): no window until it is opened.
+  // `chat`: the place it comes back to, as SavedChat writes it.
+  void startWithoutWindow(const std::string &chat);
+  // bg-restart: the check of the restart in the background, at once. "bg: restart=..." into the log.
+  void debugRestart();
+  [[nodiscard]] const char *restartBlocker() const;  // Null when nothing keeps the process from starting again.
   [[nodiscard]] bool isActive() const;
   [[nodiscard]] TrayIcon *tray() const { return _tray.get(); }
   [[nodiscard]] Notifier *notifier() const { return _notifier.get(); }
@@ -126,6 +132,8 @@ class MainWindow final {
   void releaseWindow();
   void restoreChat();
   void updateTray();
+  void scheduleRestart(int seconds);
+  void restartIfIdle();
 
   GtkWidget *_window = nullptr;
   AdwToastOverlay *_toasts = nullptr;
@@ -175,6 +183,7 @@ class MainWindow final {
   int _unreadUnmuted = 0;  // Chats with unread messages that notify: the tray icon's badge.
   bool _authorized = false;  // The chats can be shown: the window built again shows them at once.
   bool _held = false;  // The app holds itself without a window (g_application_hold).
+  guint _restartTimer = 0;  // The process starts again without the GPU's driver once idle in the background.
 
  public:
   // A tg:// or t.me link given to the program (the desktop entry, another app): opened once the chats are there.
