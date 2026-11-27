@@ -20,9 +20,17 @@ mkdir -m 700 "$XDG_RUNTIME_DIR"
 "$@" --version | tee "$OUT/version.txt"
 [ -s "$OUT/version.txt" ]
 
-Xvfb :77 -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 &
+# A free display, told once the server takes connections: on the phone it starts in a few seconds.
+Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3> "$HOME/display" >/dev/null 2>&1 &
 XVFB=$!
-export DISPLAY=:77 GDK_BACKEND=x11
+i=0
+until [ -s "$HOME/display" ]; do
+  i=$((i + 1))
+  if [ $i -gt 300 ] || ! kill -0 $XVFB 2>/dev/null; then echo "Xvfb did not start" >&2; exit 1; fi
+  sleep 0.1
+done
+export DISPLAY=:$(cat "$HOME/display") GDK_BACKEND=x11
+trap 'kill $XVFB 2>/dev/null || true' EXIT
 
 # The X server's view of the screen, when xwd and netpbm are available.
 shot() {

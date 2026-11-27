@@ -267,8 +267,9 @@ swap, PSS and thread count separately. Check that the same process stays running
 
 ### Screenshots
 
-The screenshots use made-up chats. Package smoke tests run the scripted transport in a clean
-container and save screenshots to `out/smoke/`. Set `SMOKE_DARK=1` for the dark style.
+The screenshots use made-up chats. Package smoke tests install the packages on the FLX1s and run the
+scripted transport on a virtual display, with a home and a session bus of their own. Logs and screenshots go
+to `out/smoke/`. Set `SMOKE_DARK=1` for the dark style.
 
 ## License
 
