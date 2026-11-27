@@ -1,4 +1,4 @@
-# Installing Contrail 0.3.1
+# Installing Contrail 0.4.0
 
 Contrail is an unofficial Telegram client that uses the Telegram API. It is not affiliated with or endorsed
 by Telegram. You don't need to build anything or get Telegram API keys to use these packages.
@@ -28,8 +28,8 @@ repository.
 
 | Your system | File (ARM64) |
 | --- | --- |
-| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.3.1-1_arm64.deb` |
-| Any Phosh system with Flatpak | `Contrail-0.3.1-aarch64.flatpak` |
+| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.0-1_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-0.4.0-aarch64.flatpak` |
 
 `uname -m` prints `aarch64` on these phones. The DEB carries the libraries Contrail needs (GTK 4.18, libadwaita
 1.7 from Debian 13, and FFmpeg 7.1 built from Debian 13's source with what Contrail uses) and takes only the base
@@ -41,7 +41,7 @@ sound libraries. The Flatpak runs on the GNOME 51 runtime, which Flatpak downloa
 Open a terminal in the folder with the file and run:
 
 ```sh
-sudo apt install ./contrail_0.3.1-1_arm64.deb
+sudo apt install ./contrail_0.4.0-1_arm64.deb
 ```
 
 `apt` installs what the package needs from your system's repositories. If it reports dependencies that can't be
@@ -51,7 +51,7 @@ way, also over the 0.1.0-preview1 package. `sudo apt remove contrail` removes th
 ## Flatpak
 
 ```sh
-flatpak install --user ./Contrail-0.3.1-aarch64.flatpak
+flatpak install --user ./Contrail-0.4.0-aarch64.flatpak
 flatpak run io.github.x_vlad_x.Contrail
 ```
 
@@ -67,7 +67,8 @@ flatpak install --user --reinstall xvlad io.github.x_vlad_x.Contrail
 
 The sandbox allows what Contrail uses: the network, sound, the camera and microphone (all devices), the Downloads
 and Pictures folders, notifications, the tray icon, and on phones feedbackd (the ringtone), the session's lock
-state and the proximity sensor. Your location goes through the desktop portal, which asks you first. Files you attach are picked through the system's file chooser.
+state and the proximity sensor. Your location goes through the desktop portal, which asks you first. Files you
+attach are picked through the system's file chooser.
 
 ## Your account and chats
 
@@ -91,10 +92,9 @@ installing the DEB, run this once, as yourself (**without** `sudo`):
 contrail-migrate-launcher
 ```
 
-It moves only that old launcher into a backup folder. Your account, chats, cache and settings
-(`~/.local/share/contrail-data`) are kept and the package uses them as they are. The old program files in
-`~/.local/share/contrail` stay too; when the package works for you, you can delete that folder (not
-`contrail-data`).
+It moves only that old launcher into a backup folder. The settings in `~/.local/share/contrail-data` are carried
+over, and you sign in once, as after any update from 0.3. The old program files in `~/.local/share/contrail` stay
+too; when the package works for you, you can delete that folder (not `contrail-data`).
 
 ## On a phone
 
