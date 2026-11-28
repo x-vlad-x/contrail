@@ -385,6 +385,10 @@ avatar.archive-avatar {
   min-width: 42px;
   min-height: 42px;
 }
+.jump-glyph {
+  font-weight: bold;
+  font-size: 17px;
+}
 
 /* --- photo viewer --- */
 .photo-viewer {

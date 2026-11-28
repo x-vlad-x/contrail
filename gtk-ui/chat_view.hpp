@@ -125,6 +125,10 @@ class ChatView final {
   void debugMedia(std::int64_t number);
   void debugTap(std::int64_t number, int index);
   void debugTapText(std::int64_t number, const std::string &part);
+  // A tap on the round buttons over the messages: mentions | reactions (the next unread one) | bottom; and the long
+  // press on the first two, which reads them all.
+  void debugJump(const std::string &what);
+  void debugReadAll(const std::string &what);
 
   // Where the screen is, to come back to it when the window is built again after the background: the first message
   // whose top is on the screen and how far down. Empty at the end of the chat, which it opens at anyway.
@@ -220,6 +224,16 @@ class ChatView final {
   [[nodiscard]] bool atBottom() const;
   void markAsRead();
 
+  // Telegram's round buttons over the messages, above the one to the end of the chat: "@" with the unread mentions
+  // and a heart with the unread reactions, each a tap away from the oldest of them (seen, it is read, and the
+  // buttons count down), read all with a long press. The one to the end carries the unread count.
+  enum class Unread { Mentions, Reactions };
+  void buildJumpButtons(GtkWidget *overlay);
+  GtkWidget *makeJumpButton(const char *glyph, const char *tooltip, Unread kind, GtkWidget **badge);
+  void refreshJumpButtons();
+  void jumpToUnread(Unread kind);
+  void readAllUnread(Unread kind);
+
   void send();
   void applyEdit(const std::string &text);
   void edit(const MessageItem &item);
@@ -292,6 +306,13 @@ class ChatView final {
   GtkWidget *_topSpacer = nullptr;
   GtkWidget *_scroll = nullptr;
   GtkWidget *_toBottom = nullptr;
+  GtkWidget *_toBottomBadge = nullptr;  // The unread count on it.
+  GtkWidget *_jumpBox = nullptr;  // The buttons to the unread mentions and reactions, above _toBottom.
+  GtkWidget *_toMentions = nullptr;
+  GtkWidget *_toMentionsBadge = nullptr;
+  GtkWidget *_toReactions = nullptr;
+  GtkWidget *_toReactionsBadge = nullptr;
+  bool _jumping = false;  // The next unread mention or reaction is being asked for.
   GtkWidget *_loading = nullptr;
   GtkWidget *_retry = nullptr;
   GtkAdjustment *_adjustment = nullptr;

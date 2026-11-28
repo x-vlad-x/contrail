@@ -21,6 +21,8 @@
 //   reply, forward, edit, pin...) | media [N] (what message N shows: its media and downloads, the sizes of its bubble
 //   and texts; N -1: the sponsored message) | tap N [K] (a tap on its media or button K, 0 without it)
 //   tap-text N TEXT (a tap on the link or spoiler of its text with TEXT in it) | sponsored (the sponsored message)
+//   jump mentions|reactions|bottom (a tap on the round button: the oldest unread mention or reaction, the end)
+//   read-all mentions|reactions (the long press on it)
 //   edit-last (the up arrow in the empty field)
 //   loc-picker (sending a location to the open chat) | loc-fix LAT LON [ACCURACY] (a position, as from the device)
 //   loc-service | in the picker: loc-send, loc-venue N, loc-search TEXT, loc-move LAT LON, loc-mine, loc-state |
@@ -293,6 +295,10 @@ void Run(MainWindow &window, const std::string &command) {
   } else if (name == "tap-text" && window.chatView()) {
     const auto gap = rest.find(' ');
     if (gap != std::string::npos) window.chatView()->debugTapText(std::atoll(rest.c_str()), rest.substr(gap + 1));
+  } else if (name == "jump" && window.chatView()) {
+    window.chatView()->debugJump(rest);
+  } else if (name == "read-all" && window.chatView()) {
+    window.chatView()->debugReadAll(rest);
   } else if (name == "sponsored" && window.chatView()) {
     window.chatView()->debugSponsored();
   } else if (name == "dialog" || name == "dialog-check" || name == "dialog-answer") {
