@@ -64,13 +64,6 @@ constexpr auto kPinnedPreviewSize = 36;
 constexpr auto kPinnedPage = 100;
 constexpr auto kNoMessage = std::numeric_limits<std::int64_t>::max();
 
-void OpenPath(const std::string &path) {
-  if (auto *uri = g_filename_to_uri(path.c_str(), nullptr, nullptr)) {
-    OpenUri(uri);
-    g_free(uri);
-  }
-}
-
 template <typename Type>
 [[nodiscard]] const Type *Cast(const api::Object *object) {
   return (object && object->get_id() == Type::ID) ? static_cast<const Type *>(object) : nullptr;

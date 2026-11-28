@@ -37,7 +37,9 @@ GtkWidget *MakeIconButton(const char *iconName, const char *tooltip, const char 
 void SetMarginAll(GtkWidget *w, int margin);
 void ClearBox(GtkWidget *box);
 void ShowToast(const std::string &text);
+// A link (http, tg, geo...) in the program for it; a file on disk in the program for its kind.
 void OpenUri(const std::string &uri);
+void OpenPath(const std::string &path);
 void CopyToClipboard(const std::string &text);
 // Haptic/sound feedback through feedbackd (Phosh), if it runs: "button-pressed" and the like.
 void TriggerFeedback(const char *event);

@@ -23,7 +23,7 @@ ENV='export XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 DBUS_SE
 case "${1:-}" in
   run) rsh "$ENV; pkill -f '[b]in/contrail'; sleep 1; CONTRAIL_DEBUG=1 nohup ~/.local/share/contrail/contrail > /tmp/contrail.log 2>&1 &" ;;
   stop) rsh "pkill -f '[b]in/contrail'; true" ;;
-  cmd) rsh "$ENV; gdbus call --session --dest $APP_ID --object-path /io/github/x_vlad_x/Contrail/Debug --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
+  cmd) rsh "$ENV; gdbus call --session --dest $APP_ID --object-path /io/github/x_vlad_x/Contrail --method org.gtk.Actions.Activate debug \"[<'$2'>]\" '{}'" ;;
   shot) rsh "$ENV; ~/.cache/contrail-tools/root/usr/bin/grim -s 1 /tmp/contrail-shot.png" && scp -q "$PHONE:/tmp/contrail-shot.png" "${2:-shot.png}" ;;
   get-grim) rsh 'set -e; mkdir -p ~/.cache/contrail-tools && cd ~/.cache/contrail-tools && apt-get download grim >/dev/null && dpkg-deb -x grim_*.deb root' ;;
   log) rsh "tail -n ${2:-40} /tmp/contrail.log" ;;

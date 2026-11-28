@@ -3,6 +3,7 @@
 #include "css_split.hpp"
 #include "main_window.hpp"
 #include "style_css.h"
+#include "td/strings.hpp"
 
 #include <cerrno>
 #include <malloc.h>
@@ -76,13 +77,57 @@ void ShowToast(const std::string &text) {
   }
 }
 
+namespace {
+
+[[nodiscard]] GtkWindow *LaunchParent() {
+  return GetApp().window ? GTK_WINDOW(GetApp().window->widget()) : nullptr;
+}
+
+// Nothing opened: the log says why, and the user hears of it, unless the user closed the chooser.
+void LaunchFailed(GError *error) {
+  if (!error) return;
+  if (!g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED)
+      && !g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_CANCELLED)) {
+    g_warning("open: %s", error->message);
+    ShowToast(Translated("Nothing could open this", "Открыть нечем", "Відкрити нічим"));
+  }
+  g_error_free(error);
+}
+
+}  // namespace
+
 void OpenUri(const std::string &uri) {
   if (g_getenv("CONTRAIL_DEBUG")) g_message("open: %s", uri.c_str());
   // The scenario has no account and no network: what would open is only told.
   if (g_getenv("CONTRAIL_SCENARIO")) return;
   auto *launcher = gtk_uri_launcher_new(uri.c_str());
-  auto *parent = GetApp().window ? GTK_WINDOW(GetApp().window->widget()) : nullptr;
-  gtk_uri_launcher_launch(launcher, parent, nullptr, nullptr, nullptr);
+  gtk_uri_launcher_launch(launcher, LaunchParent(), nullptr, +[](GObject *source, GAsyncResult *result, gpointer) {
+    GError *error = nullptr;
+    gtk_uri_launcher_launch_finish(GTK_URI_LAUNCHER(source), result, &error);
+    LaunchFailed(error);
+  }, nullptr);
+  g_object_unref(launcher);
+}
+
+// A file goes as a file, not as a file:// URI: in a Flatpak GTK gives a URI to the OpenURI portal as it is, and the
+// portal doesn't take file: URIs from a sandbox (nothing opened, nothing said), while a file goes through OpenFile
+// with its descriptor, which the portal hands to the program that opens it.
+void OpenPath(const std::string &path) {
+  if (g_getenv("CONTRAIL_DEBUG")) {
+    if (auto *uri = g_filename_to_uri(path.c_str(), nullptr, nullptr)) {
+      g_message("open: %s", uri);
+      g_free(uri);
+    }
+  }
+  if (g_getenv("CONTRAIL_SCENARIO")) return;
+  auto *file = g_file_new_for_path(path.c_str());
+  auto *launcher = gtk_file_launcher_new(file);
+  g_object_unref(file);
+  gtk_file_launcher_launch(launcher, LaunchParent(), nullptr, +[](GObject *source, GAsyncResult *result, gpointer) {
+    GError *error = nullptr;
+    gtk_file_launcher_launch_finish(GTK_FILE_LAUNCHER(source), result, &error);
+    LaunchFailed(error);
+  }, nullptr);
   g_object_unref(launcher);
 }
 
