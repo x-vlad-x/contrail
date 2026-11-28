@@ -342,6 +342,34 @@ line=$(react 120)
 [[ $line == *'[ 🔥=1 ] '*' unread=0 chatUnread=0 '* ]] || fail "not read: $line"
 c back 1
 (( $(hearts) == 0 )) || fail "the heart stays"
+# Friend 6: two mentions and a reaction screens above the end, and the round buttons to them. A tap goes to the
+# oldest, which is read once seen; a long press reads them all; the "@" in the list goes with them.
+c 'chat 5' 3
+line=$(asked 'chat state:' state)
+[[ $line == *' toBottom=0 toBottomCount=- mentions=2 mentionsButton=1 reactions=1 reactionsButton=1 '* ]] \
+  || fail "the buttons to the unread: $line"
+c 'jump mentions' 3
+grep -q 'chat jump: mentions found=2 of 2 oldest=20' "$WORK/log.txt" || fail "the oldest mention wasn't asked for"
+line=$(asked 'chat state:' state)
+[[ $line == *' toBottom=1 toBottomCount=- mentions=1 mentionsButton=1 reactions=1 reactionsButton=1 '* ]] \
+  || fail "the mention jumped to wasn't read: $line"
+c 'read-all mentions' 1
+line=$(asked 'chat state:' state)
+[[ $line == *' mentions=0 mentionsButton=0 reactions=1 reactionsButton=1 '* ]] || fail "not all mentions read: $line"
+c 'jump reactions' 3
+grep -q 'chat jump: reactions found=1 of 1 oldest=30' "$WORK/log.txt" || fail "the unread reaction wasn't asked for"
+line=$(asked 'chat state:' state)
+[[ $line == *' mentions=0 mentionsButton=0 reactions=0 reactionsButton=0 '* ]] || fail "the reaction jumped to wasn't read: $line"
+c back 1
+c tree 1
+awk '/Message: .* tree$/ { n = NR } { line[NR] = $0 } END { for (i = n; i <= NR; ++i) print line[i] }' "$WORK/log.txt" \
+  | grep -q 'GtkLabel "@" ' && fail 'the "@" stays in the list'
+# The unread count on the button to the end.
+c 'chat 3' 3
+c 'scroll -3000' 1
+line=$(asked 'chat state:' state)
+[[ $line == *' toBottom=1 toBottomCount=4 '* ]] || fail "the unread count on the way down: $line"
+c back 1
 # Who reacted, in a group.
 c 'chat 40' 2
 c 'topic 0' 2

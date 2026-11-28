@@ -63,6 +63,9 @@ constexpr auto kCustomStillFile = 2000001;
 constexpr auto kCustomThumbnailFile = 2000002;
 constexpr auto kCustomAnimatedFile = 2000003;
 constexpr auto kUnreadReactionChat = std::int64_t(2);
+// Friend 6: two unread mentions and an unread reaction far above the end of the chat, for the buttons that jump to
+// them (FarMentionIndexes, FarReactionIndex).
+constexpr auto kUnreadFarChat = std::int64_t(6);
 constexpr auto kReactionBurstMs = 150u;
 // A channel below the reactions one with a post of every kind the chat shows: text with entities among emoji, a
 // video, a GIF, a sticker, polls, a contact, a link preview with a picture, a file, a photo, service messages; and a
@@ -117,6 +120,10 @@ int MessagesInChat() {
   }();
   return result;
 }
+
+// The messages of Friend 6 that mention the user, and the one with the unread reaction: screens above the end.
+std::vector<int> FarMentionIndexes() { return {MessagesInChat() / 6, MessagesInChat() / 2}; }
+int FarReactionIndex() { return MessagesInChat() / 4; }
 
 int Count(std::int64_t chat) {
   if (chat == kMediaId) return kMediaMessages;
@@ -548,16 +555,23 @@ class ScenarioTransport final : public Transport {
         remove(static_cast<api::leaveChat &>(*function).chat_id_);
         answer(id, api::make_object<api::ok>());
         break;
-      case api::readAllChatMentions::ID:
-        update(api::make_object<api::updateChatUnreadMentionCount>(
-            static_cast<api::readAllChatMentions &>(*function).chat_id_, 0));
+      case api::readAllChatMentions::ID: {
+        const auto chat = static_cast<api::readAllChatMentions &>(*function).chat_id_;
+        if (chat == kUnreadFarChat) {
+          for (const auto index : FarMentionIndexes()) _farMentionsRead.insert(index);
+        }
+        update(api::make_object<api::updateChatUnreadMentionCount>(chat, 0));
         answer(id, api::make_object<api::ok>());
         break;
-      case api::readAllChatReactions::ID:
-        update(api::make_object<api::updateChatUnreadReactionCount>(
-            static_cast<api::readAllChatReactions &>(*function).chat_id_, 0));
+      }
+      case api::readAllChatReactions::ID: {
+        const auto chat = static_cast<api::readAllChatReactions &>(*function).chat_id_;
+        if (chat == kUnreadFarChat) _farReactionRead = true;
+        if (chat == kUnreadReactionChat) _reactionRead = true;
+        update(api::make_object<api::updateChatUnreadReactionCount>(chat, 0));
         answer(id, api::make_object<api::ok>());
         break;
+      }
       case api::toggleChatIsMarkedAsUnread::ID: {
         auto &request = static_cast<api::toggleChatIsMarkedAsUnread &>(*function);
         update(api::make_object<api::updateChatIsMarkedAsUnread>(request.chat_id_, request.is_marked_as_unread_));
@@ -686,6 +700,10 @@ class ScenarioTransport final : public Transport {
       chat->notification_settings_ = api::make_object<api::chatNotificationSettings>();
       chat->last_message_ = messageAt(id, MessagesInChat());
       if (id == kUnreadReactionChat) chat->unread_reaction_count_ = 1;
+      if (id == kUnreadFarChat) {
+        chat->unread_mention_count_ = int(FarMentionIndexes().size());
+        chat->unread_reaction_count_ = 1;
+      }
       chat->positions_.push_back(api::make_object<api::chatPosition>(
           api::make_object<api::chatListMain>(), std::int64_t(kChatCount - i + 1) << 32, i == 1, nullptr));
       if (_fullList) decorate(*chat, i);
@@ -896,6 +914,7 @@ class ScenarioTransport final : public Transport {
     applyEntry(*message);
     message->is_pinned_ = isPinned(chatId, message->id_);
     applyReactions(*message);
+    message->contains_unread_mention_ = unreadMention(chatId, message->id_);
     return message;
   }
 
@@ -1283,6 +1302,7 @@ class ScenarioTransport final : public Transport {
     if (chat == 1 && index == MessagesInChat() - 4) result.push_back({"custom:" + std::to_string(kCustomAnimated), 1, false, {chat}});
     if (chat == 1 && index == MessagesInChat() - 5) result.push_back({"custom:" + std::to_string(kCustomNoStill), 1, false, {chat}});
     if (chat == kUnreadReactionChat && index == MessagesInChat()) result.push_back({fire, 1, false, {chat}});
+    if (chat == kUnreadFarChat && index == FarReactionIndex()) result.push_back({fire, 1, false, {chat}});
     return result;
   }
 
@@ -1314,7 +1334,59 @@ class ScenarioTransport final : public Transport {
   }
 
   bool unreadReaction(std::int64_t chat, std::int64_t id) const {
+    if (chat == kUnreadFarChat) return id == FarReactionIndex() * kIdStep && !_farReactionRead;
     return !_reactionRead && chat == kUnreadReactionChat && id == MessagesInChat() * kIdStep;
+  }
+
+  bool unreadMention(std::int64_t chat, std::int64_t id) const {
+    const auto index = int(id / kIdStep);
+    const auto far = FarMentionIndexes();
+    return chat == kUnreadFarChat && std::ranges::find(far, index) != far.end() && !_farMentionsRead.contains(index);
+  }
+
+  int unreadMentionsLeft() const {
+    return int(std::ranges::count_if(FarMentionIndexes(), [&](int index) { return !_farMentionsRead.contains(index); }));
+  }
+
+  // Seen on the screen (viewMessages), or all of them read: TDLib tells the chat's counts by the message.
+  void readMention(std::int64_t chat, std::int64_t id) {
+    if (!unreadMention(chat, id)) return;
+    _farMentionsRead.insert(int(id / kIdStep));
+    update(api::make_object<api::updateMessageMentionRead>(chat, id, unreadMentionsLeft()));
+  }
+
+  void readReaction(std::int64_t chat, std::int64_t id) {
+    if (!unreadReaction(chat, id)) return;
+    (chat == kUnreadFarChat ? _farReactionRead : _reactionRead) = true;
+    update(api::make_object<api::updateMessageUnreadReactions>(
+        chat, id, std::vector<api::object_ptr<api::unreadReaction>>(), 0));
+  }
+
+  // Newest first, as TDLib answers; from_message_id itself is left out.
+  ObjectPtr searchUnread(const api::searchChatMessages &request, bool mentions) {
+    auto ids = std::vector<std::int64_t>();
+    const auto chat = request.chat_id_;
+    if (mentions) {
+      for (const auto index : FarMentionIndexes()) {
+        if (unreadMention(chat, index * kIdStep)) ids.push_back(index * kIdStep);
+      }
+    } else {
+      for (const auto id : {FarReactionIndex() * kIdStep, MessagesInChat() * kIdStep}) {
+        if (unreadReaction(chat, id)) ids.push_back(id);
+      }
+    }
+    std::ranges::sort(ids, std::greater<>());
+    auto result = api::make_object<api::foundChatMessages>();
+    result->total_count_ = int(ids.size());
+    for (const auto id : ids) {
+      if (request.from_message_id_ && id >= request.from_message_id_) continue;
+      if (int(result->messages_.size()) == request.limit_) {
+        result->next_from_message_id_ = result->messages_.back()->id_;
+        break;
+      }
+      result->messages_.push_back(anyMessage(chat, id));
+    }
+    return result;
   }
 
   void applyReactions(api::message &message) {
@@ -1497,15 +1569,23 @@ class ScenarioTransport final : public Transport {
         return true;
       }
       case api::viewMessages::ID: {
-        // Seen on the screen: its new reaction is read, as TDLib tells of a message it holds.
+        // Seen on the screen: its new reaction and its mention are read, as TDLib tells of a message it holds.
         const auto &request = static_cast<api::viewMessages &>(function);
         for (const auto message : request.message_ids_) {
-          if (!unreadReaction(request.chat_id_, message)) continue;
-          _reactionRead = true;
-          update(api::make_object<api::updateMessageUnreadReactions>(
-              request.chat_id_, message, std::vector<api::object_ptr<api::unreadReaction>>(), 0));
+          readReaction(request.chat_id_, message);
+          readMention(request.chat_id_, message);
         }
         return false;
+      }
+      case api::searchChatMessages::ID: {
+        const auto &request = static_cast<api::searchChatMessages &>(function);
+        const auto filter = request.filter_ ? request.filter_->get_id() : 0;
+        if (filter != api::searchMessagesFilterUnreadMention::ID
+            && filter != api::searchMessagesFilterUnreadReaction::ID) {
+          return false;
+        }
+        answer(id, searchUnread(request, filter == api::searchMessagesFilterUnreadMention::ID));
+        return true;
       }
       case api::openChat::ID:
         if (static_cast<api::openChat &>(function).chat_id_ == kReactionsChannelId && !_burst) {
@@ -3376,7 +3456,9 @@ class ScenarioTransport final : public Transport {
   };
   bool _selfAdded = false;
   std::map<std::pair<std::int64_t, std::int64_t>, Reactions> _reactions;  // By chat and message id, once asked.
-  bool _reactionRead = false;
+  bool _reactionRead = false;  // Friend 2's newest message was seen.
+  bool _farReactionRead = false;  // Friend 6's message with the reaction far up was seen.
+  std::set<int> _farMentionsRead;  // Indexes of Friend 6's mentions seen.
   bool _customDownloaded = false;
   struct Download {
     std::int64_t downloaded = 0;

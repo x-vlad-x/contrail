@@ -19,6 +19,7 @@
 #include "td/dates.hpp"
 #include "td/message_text.hpp"
 #include "td/strings.hpp"
+#include "text.hpp"
 #include "userpics.hpp"
 
 #include <algorithm>
@@ -63,6 +64,12 @@ constexpr auto kFirstMessageId = std::int64_t(1) << 20;
 constexpr auto kPinnedPreviewSize = 36;
 constexpr auto kPinnedPage = 100;
 constexpr auto kNoMessage = std::numeric_limits<std::int64_t>::max();
+// The round buttons over the messages: their size and distance from the edges, and how many unread mentions or
+// reactions are asked for at once (the oldest of them is jumped to).
+constexpr auto kJumpButtonSize = 42;
+constexpr auto kJumpMargin = 18;
+constexpr auto kJumpButtonGap = 8;
+constexpr auto kUnreadPage = 100;
 
 template <typename Type>
 [[nodiscard]] const Type *Cast(const api::Object *object) {
@@ -621,6 +628,7 @@ void ChatView::subscribe() {
     refreshComposerState();
     refreshFooters();
     draftChanged();
+    refreshJumpButtons();
   }, _lifetime);
   _store.onTopic([this](Td::ChatId chat, std::int32_t id) {
     if (_topic && chat == _chat && id == _topic) topicChanged();
@@ -678,6 +686,7 @@ void ChatView::topicChanged() {
     refreshHeader();
     refreshComposerState();
     draftChanged();
+    refreshJumpButtons();
     return;
   }
   // The topic was deleted: nothing left to show. Not now: this runs inside the store's notification.
@@ -747,6 +756,14 @@ void ChatView::updated(api::Update &update) {
           row->refreshReactions();
         }
       }
+      break;
+    }
+    case api::updateMessageMentionRead::ID: {
+      auto &data = static_cast<api::updateMessageMentionRead &>(update);
+      if (data.chat_id_ != _chat) break;
+      if (const auto item = find(data.message_id_)) item->data->contains_unread_mention_ = false;
+      // The update tells the chat's count (the store takes it), not the topic's: that one is asked for.
+      if (_topic) _store.refreshTopic(_chat, _topic);
       break;
     }
     case api::updateMessageUnreadReactions::ID: {
@@ -1477,8 +1494,8 @@ void ChatView::buildList() {
   gtk_widget_add_css_class(_toBottom, "to-bottom");
   gtk_widget_set_halign(_toBottom, GTK_ALIGN_END);
   gtk_widget_set_valign(_toBottom, GTK_ALIGN_END);
-  gtk_widget_set_margin_end(_toBottom, 18);
-  gtk_widget_set_margin_bottom(_toBottom, 18);
+  gtk_widget_set_margin_end(_toBottom, kJumpMargin);
+  gtk_widget_set_margin_bottom(_toBottom, kJumpMargin);
   gtk_widget_set_visible(_toBottom, FALSE);
   _signals.clicked(_toBottom, [this] {
     // Jumped somewhere into the past: the end of the chat comes again.
@@ -1486,6 +1503,7 @@ void ChatView::buildList() {
     else scrollToBottom();
   });
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _toBottom);
+  buildJumpButtons(overlay);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _loading);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _retry);
   adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(_root), overlay);
@@ -2008,6 +2026,7 @@ void ChatView::scrolled() {
   // the bottom: GTK clamps the position to the smaller list before the shift waiting for it puts it back.
   if (!_viewportSource && !_scrollTarget && bottom && _pendingShift == 0.) _stickToBottom = true;
   gtk_widget_set_visible(_toBottom, !bottom && upper > page);
+  refreshJumpButtons();
   if (!_viewportSource) scheduleViewportUpdate();
   if (!_readTimer.active()) _readTimer.callOnce(300);
 }
@@ -2103,6 +2122,7 @@ void ChatView::updateViewport() {
   const auto upper = gtk_adjustment_get_upper(_adjustment);
   const auto page = gtk_adjustment_get_page_size(_adjustment);
   gtk_widget_set_visible(_toBottom, !atBottom() && upper > page);
+  refreshJumpButtons();
   if (atBottom()) showSponsored();
   preloadVisibleEdges();
   updateNearPictures();
@@ -2229,6 +2249,136 @@ void ChatView::markAsRead() {
   auto source = _topic ? api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceForumTopicHistory>())
                       : api::object_ptr<api::MessageSource>(api::make_object<api::messageSourceChatHistory>());
   _store.client().send(api::make_object<api::viewMessages>(_chat, std::move(ids), std::move(source), false));
+}
+
+// --- the buttons to the unread mentions and reactions ----------------------------
+
+void ChatView::buildJumpButtons(GtkWidget *overlay) {
+  // Over the top right corner of the button to the end: its unread count.
+  _toBottomBadge = gtk_label_new("");
+  gtk_widget_add_css_class(_toBottomBadge, "unread-badge");
+  gtk_widget_set_halign(_toBottomBadge, GTK_ALIGN_END);
+  gtk_widget_set_valign(_toBottomBadge, GTK_ALIGN_END);
+  gtk_widget_set_margin_end(_toBottomBadge, kJumpMargin - 4);
+  gtk_widget_set_margin_bottom(_toBottomBadge, kJumpMargin + kJumpButtonSize - 10);
+  gtk_widget_set_can_target(_toBottomBadge, FALSE);
+  gtk_widget_set_visible(_toBottomBadge, FALSE);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _toBottomBadge);
+
+  _jumpBox = gtk_box_new(GTK_ORIENTATION_VERTICAL, kJumpButtonGap);
+  gtk_widget_set_halign(_jumpBox, GTK_ALIGN_END);
+  gtk_widget_set_valign(_jumpBox, GTK_ALIGN_END);
+  gtk_widget_set_margin_end(_jumpBox, kJumpMargin);
+  gtk_widget_set_margin_bottom(_jumpBox, kJumpMargin);
+  // The heart above the "@", as Telegram has them.
+  _toReactions = makeJumpButton("\xE2\x9D\xA4",
+                                Translated("Unread reactions", "Непрочитанные реакции", "Непрочитані реакції").c_str(),
+                                Unread::Reactions, &_toReactionsBadge);
+  gtk_box_append(GTK_BOX(_jumpBox), _toReactions);
+  _toMentions = makeJumpButton("@", Translated("Unread mentions", "Непрочитанные упоминания", "Непрочитані згадки").c_str(),
+                               Unread::Mentions, &_toMentionsBadge);
+  gtk_box_append(GTK_BOX(_jumpBox), _toMentions);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), _jumpBox);
+  refreshJumpButtons();
+}
+
+GtkWidget *ChatView::makeJumpButton(const char *glyph, const char *tooltip, Unread kind, GtkWidget **badge) {
+  auto *label = gtk_label_new(glyph);
+  gtk_widget_add_css_class(label, "jump-glyph");
+  auto *button = gtk_button_new();
+  gtk_button_set_child(GTK_BUTTON(button), label);
+  gtk_widget_set_tooltip_text(button, tooltip);
+  gtk_widget_add_css_class(button, "circular");
+  gtk_widget_add_css_class(button, "osd");
+  gtk_widget_add_css_class(button, "to-bottom");
+  _signals.clicked(button, [this, kind] { jumpToUnread(kind); });
+  // Held: all of them are read, and the tap that would follow is not one.
+  auto *longPress = gtk_gesture_long_press_new();
+  gtk_gesture_single_set_touch_only(GTK_GESTURE_SINGLE(longPress), FALSE);
+  _signals.connect<void(GtkGestureLongPress *, double, double)>(
+      longPress, "pressed", [this, kind](GtkGestureLongPress *gesture, double, double) {
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+        readAllUnread(kind);
+      });
+  gtk_widget_add_controller(button, GTK_EVENT_CONTROLLER(longPress));
+  auto *secondary = gtk_gesture_click_new();
+  gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(secondary), GDK_BUTTON_SECONDARY);
+  _signals.connect<void(GtkGestureClick *, int, double, double)>(
+      secondary, "released", [this, kind](GtkGestureClick *, int, double, double) { readAllUnread(kind); });
+  gtk_widget_add_controller(button, GTK_EVENT_CONTROLLER(secondary));
+
+  *badge = gtk_label_new("");
+  gtk_widget_add_css_class(*badge, "unread-badge");
+  gtk_widget_set_halign(*badge, GTK_ALIGN_END);
+  gtk_widget_set_valign(*badge, GTK_ALIGN_START);
+  gtk_widget_set_can_target(*badge, FALSE);
+  auto *overlay = gtk_overlay_new();
+  gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), *badge);
+  gtk_widget_set_visible(overlay, FALSE);
+  return overlay;
+}
+
+void ChatView::refreshJumpButtons() {
+  if (!_jumpBox) return;
+  const auto known = readState();
+  const auto count = [&](GtkWidget *button, GtkWidget *badge, int unread) {
+    gtk_widget_set_visible(button, unread > 0);
+    if (unread > 0) gtk_label_set_text(GTK_LABEL(badge), ShortCount(unread).c_str());
+  };
+  count(_toMentions, _toMentionsBadge, known ? known->unreadMentions : 0);
+  count(_toReactions, _toReactionsBadge, known ? known->unreadReactions : 0);
+  // Above the button to the end while it is there, in its place otherwise.
+  const auto toBottom = gtk_widget_get_visible(_toBottom);
+  gtk_widget_set_margin_bottom(_jumpBox, kJumpMargin + (toBottom ? kJumpButtonSize + kJumpButtonGap : 0));
+  const auto unread = known ? known->unread : 0;
+  gtk_widget_set_visible(_toBottomBadge, toBottom && unread > 0);
+  if (unread > 0) gtk_label_set_text(GTK_LABEL(_toBottomBadge), ShortCount(unread).c_str());
+}
+
+// The oldest unread mention (or reaction) comes first, as Telegram Desktop walks them: seen on the screen, TDLib
+// reads it (markAsRead), and the next tap goes to the one after it. Nothing found with the count still up: the
+// count is stale, and all of them are read.
+void ChatView::jumpToUnread(Unread kind) {
+  if (_jumping) return;
+  _jumping = true;
+  const auto mentions = kind == Unread::Mentions;
+  auto filter = mentions ? api::object_ptr<api::SearchMessagesFilter>(api::make_object<api::searchMessagesFilterUnreadMention>())
+                         : api::object_ptr<api::SearchMessagesFilter>(api::make_object<api::searchMessagesFilterUnreadReaction>());
+  _store.client().request<api::foundChatMessages>(
+      api::make_object<api::searchChatMessages>(_chat, topicObject(), std::string(), nullptr, 0, 0, kUnreadPage,
+                                                std::move(filter)),
+      _lifetime,
+      [this, kind, mentions](api::foundChatMessages &found) {
+        _jumping = false;
+        auto oldest = kNoMessage;
+        for (const auto &message : found.messages_) {
+          if (message && message->id_ < oldest) oldest = message->id_;
+        }
+        if (g_getenv("CONTRAIL_DEBUG")) {
+          g_message("chat jump: %s found=%zu of %d oldest=%lld", mentions ? "mentions" : "reactions",
+                    found.messages_.size(), found.total_count_, (long long)(oldest == kNoMessage ? 0 : oldest >> 20));
+        }
+        if (oldest == kNoMessage) {
+          readAllUnread(kind);
+          return;
+        }
+        showAt(oldest);
+      },
+      [this](api::error &error) {
+        _jumping = false;
+        ShowToast(error.message_);
+      });
+}
+
+void ChatView::readAllUnread(Unread kind) {
+  const auto mentions = kind == Unread::Mentions;
+  auto function = _topic ? (mentions ? Td::FunctionPtr(api::make_object<api::readAllForumTopicMentions>(_chat, _topic))
+                                     : Td::FunctionPtr(api::make_object<api::readAllForumTopicReactions>(_chat, _topic)))
+                         : (mentions ? Td::FunctionPtr(api::make_object<api::readAllChatMentions>(_chat))
+                                     : Td::FunctionPtr(api::make_object<api::readAllChatReactions>(_chat)));
+  _store.client().request<api::ok>(std::move(function), _lifetime, [](api::ok &) {},
+                                   [](api::error &error) { ShowToast(error.message_); });
 }
 
 // --- the message field ---------------------------------------------------------
@@ -3125,12 +3275,31 @@ void ChatView::debugState() const {
             draft ? draft->ids.size() : 0, draft ? int(draft->names) : 1, int(_forwardShown),
             int(gtk_widget_get_sensitive(_sendButton)), gtk_label_get_text(GTK_LABEL(_replyTitle)),
             gtk_label_get_text(GTK_LABEL(_replyText)), last.c_str());
+  const auto known = readState();
   g_message("chat state: messages=%zu rows=%zu nearRows=%zu oldest=%lld newest=%lld top=%d bottom=%d stick=%d reserve=%d value=%.0f "
-            "page=%.0f upper=%.0f toBottom=%d replyTo=%lld editing=%lld draft=\"%s\"",
+            "page=%.0f upper=%.0f toBottom=%d toBottomCount=%s mentions=%d mentionsButton=%d reactions=%d reactionsButton=%d "
+            "replyTo=%lld editing=%lld draft=\"%s\"",
             _items.size(), _rows.size(), _nearRows.size(), (long long)(oldest >> 20), (long long)(newest >> 20), int(_reachedTop),
             int(_reachedBottom), int(_stickToBottom), _topReserve, value, page, upper,
-            int(gtk_widget_get_visible(_toBottom)), (long long)(_replyToId >> 20), (long long)(_editing >> 20),
-            _savedDraft.c_str());
+            int(gtk_widget_get_visible(_toBottom)),
+            gtk_widget_get_visible(_toBottomBadge) ? gtk_label_get_text(GTK_LABEL(_toBottomBadge)) : "-",
+            known ? known->unreadMentions : -1, int(gtk_widget_get_visible(_toMentions)),
+            known ? known->unreadReactions : -1, int(gtk_widget_get_visible(_toReactions)),
+            (long long)(_replyToId >> 20), (long long)(_editing >> 20), _savedDraft.c_str());
+}
+
+void ChatView::debugJump(const std::string &what) {
+  auto *button = what == "mentions" ? _toMentions : what == "reactions" ? _toReactions : _toBottom;
+  if (GTK_IS_OVERLAY(button)) button = gtk_overlay_get_child(GTK_OVERLAY(button));
+  if (!gtk_widget_get_visible(button)) {
+    g_message("chat jump: the %s button isn't shown", what.c_str());
+    return;
+  }
+  g_signal_emit_by_name(button, "clicked");
+}
+
+void ChatView::debugReadAll(const std::string &what) {
+  readAllUnread(what == "reactions" ? Unread::Reactions : Unread::Mentions);
 }
 
 void ChatView::debugScroll(const std::string &where) {

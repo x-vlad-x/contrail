@@ -619,6 +619,13 @@ void Store::updated(api::Update &update) {
       withChat(data.chat_id_, [&](Chat &chat) { chat.unreadMentions = data.unread_mention_count_; });
       break;
     }
+    case api::updateMessageMentionRead::ID: {
+      // A mention read in a message TDLib holds tells the chat's count only here: there is no
+      // updateChatUnreadMentionCount then, and the "@" in the list stayed.
+      auto &data = static_cast<api::updateMessageMentionRead &>(update);
+      withChat(data.chat_id_, [&](Chat &chat) { chat.unreadMentions = data.unread_mention_count_; });
+      break;
+    }
     case api::updateChatUnreadReactionCount::ID: {
       auto &data = static_cast<api::updateChatUnreadReactionCount &>(update);
       withChat(data.chat_id_, [&](Chat &chat) { chat.unreadReactions = data.unread_reaction_count_; });
