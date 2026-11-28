@@ -69,6 +69,13 @@
     <content_attribute id="social-location">intense</content_attribute>
   </content_rating>
   <releases>
+    <release version="0.4.1" date="2026-11-28" type="stable">
+      <description>
+        <p>Videos, GIFs and files open again on the phone: the Flatpak of 0.4.0 downloaded them and then nothing
+          came. Buttons over the messages lead to the unread mentions and reactions, which are marked read once
+          seen, and the arrow to the end of the chat shows the unread count.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-11-27" type="stable">
       <description>
         <p>Contrail is now built on TDLib instead of the Telegram Desktop core: it starts faster and takes far

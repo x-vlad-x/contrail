@@ -34,7 +34,7 @@ chat list and the chat side by side on a wider screen. It supports touch gesture
 and accent color. It has no Qt and no Telegram Desktop inside, and with the window closed it takes about 70 MiB of
 memory (see [Memory and speed](#memory-and-speed)).
 
-The current version is **0.4.0**, the first one on TDLib. Coming from 0.3: sign in once, see
+The current version is **0.4.1**; 0.4 is the first on TDLib. Coming from 0.3: sign in once, see
 [Updating from 0.3](#updating-from-03).
 
 Contrail has its own [Flatpak repository](#from-the-flatpak-repository): add it once, and new versions come

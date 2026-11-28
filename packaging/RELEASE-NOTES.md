@@ -1,13 +1,12 @@
 <p align="center"><img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/packaging/io.github.x_vlad_x.Contrail.svg" width="96" alt=""></p>
 
-# Contrail 0.4.0
+# Contrail 0.4.1
 
-**Contrail**, a native GNOME (GTK4 + libadwaita) Telegram client for Linux phones, is now built on
-[TDLib](https://github.com/tdlib/td), Telegram's library for clients, instead of the Telegram Desktop core. It
-starts faster, takes about a third of the memory with the window closed, and its packages are a third of the
-size or less. Everything 0.3.1 did is still there. Contrail is made for FuriOS on the FuriPhone FLX1s and now comes
-for ARM64 only, as a Flatpak and a DEB. Contrail is an unofficial client that uses the Telegram API; it is not
-affiliated with or endorsed by Telegram.
+**Contrail**, a native GNOME (GTK4 + libadwaita) Telegram client for Linux phones, built on
+[TDLib](https://github.com/tdlib/td), Telegram's library for clients. 0.4.1 fixes videos, GIFs and files that
+didn't open in the Flatpak of 0.4.0, and adds Telegram's buttons to the unread mentions and reactions in a chat.
+Contrail is made for FuriOS on the FuriPhone FLX1s and comes for ARM64 only, as a Flatpak and a DEB. Contrail is
+an unofficial client that uses the Telegram API; it is not affiliated with or endorsed by Telegram.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/x-vlad-x/contrail/main/screenshots/chat.png" width="180" alt="A conversation with reactions and a pinned message">
@@ -36,12 +35,12 @@ Updates then come through the app store or `flatpak update`. If you installed a 
 
 | Your system | File (ARM64) |
 | --- | --- |
-| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.0-1_arm64.deb` |
-| Any Phosh system with Flatpak | `Contrail-0.4.0-aarch64.flatpak` |
+| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.1-1_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-0.4.1-aarch64.flatpak` |
 
 ```sh
-sudo apt install ./contrail_0.4.0-1_arm64.deb              # DEB
-flatpak install --user ./Contrail-0.4.0-aarch64.flatpak    # Flatpak
+sudo apt install ./contrail_0.4.1-1_arm64.deb              # DEB
+flatpak install --user ./Contrail-0.4.1-aarch64.flatpak    # Flatpak
 ```
 
 No building and no Telegram API keys are needed. `README.md` below is the installation guide: what each package
@@ -56,12 +55,26 @@ needs, where your account is kept, and the move from the earlier SSH install (`c
   background are read from 0.3's settings on the first start.
 - Your cloud chats are loaded again. Files downloaded by 0.3, uploads that never finished and live locations
   shared from 0.3 stay with 0.3: stop a live location before updating, and share it again afterwards.
-- 0.3's data (`contrail-data/tdata`) is left where it is, so you can go back to 0.3.1. Once 0.4.0 works for you,
+- 0.3's data (`contrail-data/tdata`) is left where it is, so you can go back to 0.3.1. Once 0.4 works for you,
   you can delete that folder to free the space.
-- **x86_64 computers stay on 0.3.1**, as do the RPM and the AppImage: from 0.4.0 Contrail comes for ARM64 only.
+- **x86_64 computers stay on 0.3.1**, as do the RPM and the AppImage: since 0.4.0 Contrail comes for ARM64 only.
   0.3.1's files stay on [its release page](https://github.com/x-vlad-x/contrail/releases/tag/v0.3.1).
 
-## What's new in 0.4.0
+## What's new in 0.4.1
+
+- **Files open on the phone again.** In the Flatpak of 0.4.0 a tap on a video, a GIF, a sticker or a file
+  downloaded it, and then nothing came: GTK 4.20 and later hand a `file://` address to the desktop portal as it
+  is, and the portal refuses such addresses from a sandbox without a word. Files now go to the portal as files,
+  with their descriptor, and open in the system's player or viewer. When nothing can open a file, Contrail says
+  so.
+- **Buttons to the unread mentions and reactions**, as in the Telegram apps: over the messages, above the arrow
+  to the end of the chat, "@" with the number of messages that mention you and a heart with the number of new
+  reactions to your messages. A tap goes to the oldest of them; seen on the screen, it is marked read and the
+  count goes down. A long press (or a right click) marks them all read. The arrow to the end of the chat shows
+  the number of unread messages.
+- A mention read on the screen no longer leaves the "@" badge on the chat in the list.
+
+## Earlier, in 0.4.0
 
 - **Built on TDLib**: the connection to Telegram, the message database and the files are TDLib's; the interface is
   the same GTK4 and libadwaita one, now without Qt and without Telegram Desktop's core. Contrail keeps only the
@@ -235,28 +248,31 @@ recording video messages, folders, multiple accounts. Secret chats aren't planne
 ## Tested
 
 <!-- Keep this true for the published files: re-run tools/smoke-test.sh on them and update the lists. -->
-- The DEB and the Flatpak of this release were installed on the FuriPhone FLX1s (FuriOS 14, Phosh) and started
-  on an offline, made-up account (`tools/smoke-test.sh`): the chats, a chat, the settings and About.
-- On the FLX1s with a real account, in test builds of the same code (as a Flatpak, next to 0.3.1): signing in,
-  signing out and staying signed in after a restart; sending, editing and deleting messages and a photo's caption;
-  notifications with the window closed opening their chat; an incoming video call with the window closed and the
-  phone locked, accepted from Phosh's notification, with video both ways; an outgoing voice call of 30 minutes with
-  the microphone muted and unmuted; a day in the background (the memory above); the restart without the window
-  and coming back to the chat; the update from 0.3.1's settings; removing the test version without touching
-  0.3.1.
+- The Flatpak of this release was installed on the FuriPhone FLX1s (FuriOS 14, Phosh), in a Flatpak installation
+  of its own, and started on an offline, made-up account (`tools/smoke-test.sh`): the chats, a chat, the settings
+  and About. The DEB was unpacked on the FLX1s and its program started the same way.
+- On the FLX1s with a real account, a build of this code as a Flatpak in an installation of its own: a video from
+  Saved Messages opens in the system's player (Celluloid), where 0.4.0 downloaded it and did nothing. The buttons
+  to the unread mentions and reactions were walked on the phone on the scripted account (a tap to the oldest, read
+  once seen, all read with a long press, the "@" leaving the chat list, the count on the arrow), not on the real
+  one: it had no unread mentions or reactions at the time.
+- 0.4.0's checks on the FLX1s with a real account (signing in and out, messages, notifications, calls with video,
+  a day in the background, the restart without the window, the update from 0.3) hold for this code: 0.4.1 changes
+  only how files are handed to the system, the chat's buttons and the mention badge in the list.
 - Every screen and action on the scripted account in a virtual display (`tools/td-ui-test.sh`): the chat list,
-  reading and writing, topics, forwarding, pinned messages, reactions, places and live locations, the photo
-  viewer, voice messages and music, recording, sending files and pasting, links, settings, notifications, the
-  background, proxies and calls.
-- Not checked on the phone with these builds: switching cameras in a call and the screen going dark at the ear,
-  Bluetooth and wired headsets, moving between Wi-Fi and mobile data, a real live location, Mobian and PureOS.
+  reading and writing, topics, forwarding, pinned messages, reactions and the new buttons, places and live
+  locations, the photo viewer, voice messages and music, recording, sending files and pasting, links, settings,
+  notifications, the background, proxies and calls.
+- Not checked on the phone with these builds: stickers and GIFs opening (they take the same way as videos),
+  switching cameras in a call and the screen going dark at the ear, Bluetooth and wired headsets, moving between
+  Wi-Fi and mobile data, a real live location, Mobian and PureOS.
 
 ## Sources and licenses
 
 GNU General Public License, version 3, with the OpenSSL exception, the same as Telegram Desktop. TDLib is under
 the Boost Software License 1.0, and the packages contain other libraries under their own licenses; see
-`LICENSES.md`. `Contrail-0.4.0-sources.tar.gz` holds Contrail's sources; the
-`Contrail-0.4.0-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the packages are
+`LICENSES.md`. `Contrail-0.4.1-sources.tar.gz` holds Contrail's sources; the
+`Contrail-0.4.1-corresponding-sources.tar.part*` files (see `SOURCES.md`) hold everything else the packages are
 built from. Checksums: `SHA256SUMS`.
 
 Telegram is a trademark of Telegram FZ-LLC.

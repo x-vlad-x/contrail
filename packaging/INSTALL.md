@@ -1,4 +1,4 @@
-# Installing Contrail 0.4.0
+# Installing Contrail 0.4.1
 
 Contrail is an unofficial Telegram client that uses the Telegram API. It is not affiliated with or endorsed
 by Telegram. You don't need to build anything or get Telegram API keys to use these packages.
@@ -28,8 +28,8 @@ repository.
 
 | Your system | File (ARM64) |
 | --- | --- |
-| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.0-1_arm64.deb` |
-| Any Phosh system with Flatpak | `Contrail-0.4.0-aarch64.flatpak` |
+| FuriOS, Mobian, PureOS and other Debian-based systems | `contrail_0.4.1-1_arm64.deb` |
+| Any Phosh system with Flatpak | `Contrail-0.4.1-aarch64.flatpak` |
 
 `uname -m` prints `aarch64` on these phones. The DEB carries the libraries Contrail needs (GTK 4.18, libadwaita
 1.7 from Debian 13, and FFmpeg 7.1 built from Debian 13's source with what Contrail uses) and takes only the base
@@ -41,7 +41,7 @@ sound libraries. The Flatpak runs on the GNOME 51 runtime, which Flatpak downloa
 Open a terminal in the folder with the file and run:
 
 ```sh
-sudo apt install ./contrail_0.4.0-1_arm64.deb
+sudo apt install ./contrail_0.4.1-1_arm64.deb
 ```
 
 `apt` installs what the package needs from your system's repositories. If it reports dependencies that can't be
@@ -51,7 +51,7 @@ way, also over the 0.1.0-preview1 package. `sudo apt remove contrail` removes th
 ## Flatpak
 
 ```sh
-flatpak install --user ./Contrail-0.4.0-aarch64.flatpak
+flatpak install --user ./Contrail-0.4.1-aarch64.flatpak
 flatpak run io.github.x_vlad_x.Contrail
 ```
 
@@ -76,7 +76,7 @@ Contrail keeps the account, the chats and the cache in `~/.local/share/contrail-
 from the official Telegram Desktop. The Flatpak keeps its own in
 `~/.var/app/io.github.x_vlad_x.Contrail/data/contrail-data/td`. Removing a package doesn't delete them.
 
-Contrail 0.4.0 is the first version on TDLib. After the update from 0.3, sign in once. Contrail carries over the
+Contrail 0.4 is the first version on TDLib. After the update from 0.3, sign in once. Contrail carries over the
 language, notification and background settings and retrieves your cloud chats again. The data of 0.3 stays in
 `contrail-data/tdata` next to it.
 
